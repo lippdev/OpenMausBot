@@ -3,24 +3,45 @@ FROM ${BASE_IMAGE}
 
 USER root
 
-# Ferramentas necessárias para acessar o Docker da VPS via SSH.
-# Não instala nem inicia um daemon Docker dentro do container.
+# Dependências para conexão SSH e instalação do Docker CLI.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        docker.io \
         openssh-client \
         ca-certificates \
+        curl \
+        tar \
     && rm -rf /var/lib/apt/lists/*
 
-# Engines de IA: Claude Code e OpenAI Codex
+# Docker CLI 29.1.3
+# Instala apenas o cliente, sem Docker daemon.
+ARG DOCKER_VERSION=29.1.3
+ARG TARGETARCH
+
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) DOCKER_ARCH="x86_64" ;; \
+      arm64) DOCKER_ARCH="aarch64" ;; \
+      *) echo "Arquitetura Docker não suportada: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz" \
+      -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    docker --version
+
+# Engines de IA: Claude Code e OpenAI Codex.
 ARG ENGINES="@anthropic-ai/claude-code @openai/codex"
+
 RUN if [ -n "$ENGINES" ]; then \
       npm install -g $ENGINES; \
     fi
 
 # Grok CLI: versão fixada, usando o instalador oficial da xAI.
-# Defina GROK_VERSION= vazio para não instalar.
+# Defina GROK_VERSION vazio para não instalar.
 ARG GROK_VERSION=1.0.41
+
 RUN if [ -n "$GROK_VERSION" ]; then \
       mkdir -p /tmp/grok-install \
       && curl -fsSL https://x.ai/cli/install.sh \
@@ -36,5 +57,5 @@ RUN if [ -n "$GROK_VERSION" ]; then \
       && rm -rf /tmp/grok-install; \
     fi
 
-# Executar OpenMausBot como usuário não privilegiado.
+# Executa o OpenMausBot sem privilégios de root.
 USER maus

@@ -23,10 +23,14 @@ services:
 
     ports:
       - "${OMB_BIND_ADDRESS:-127.0.0.1}:${OMB_HTTP_PORT:-8080}:80"
-
+      
     environment:
       OMB_PORT: "8799"
       OMB_WEBHOOK_PORT: "8800"
+
+            # Jev via OpenRouter (valores vêm do Environment do Dokploy).
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      JEV_PROVIDER: ${JEV_PROVIDER:-openrouter}
 
       OMB_PUBLIC_URL: ${OMB_PUBLIC_URL:-http://localhost:${OMB_HTTP_PORT:-8080}}
       OMB_WEBHOOK_PUBLIC_URL: ${OMB_WEBHOOK_PUBLIC_URL:-${OMB_PUBLIC_URL:-http://localhost:${OMB_HTTP_PORT:-8080}}}

@@ -1,15 +1,5 @@
 // @vitest-environment happy-dom
-// A notification's click, a bot's own row and a search hit open a thread as
-// the sidebar shows threads at that moment. With threads hidden a bot is one
-// conversation, and a sibling is reached only through its activity row while
-// it is unread: opening another thread must not pass the reply in the thread
-// the bot was left on as read, neither by selecting the bot first nor while
-// the switch is under way: the server announces a switch on the live stream
-// before it answers it (store.switchTask emits), so that frame reaches the
-// window while the bot is still on the thread it leaves. With threads shown
-// the bot is selected first, as it always was. The real provider, its live
-// stream, the real display preference, and a fake server answering in the
-// real one's order.
+// The real provider, its live stream and display preference, and a fake server answering in the real one's order.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -34,9 +24,7 @@ class FixtureNotification {
   constructor(readonly title: string) { FixtureNotification.shown.push(this); }
 }
 
-// The person is in another bot's chat. Scout was left on "left-behind",
-// where a routine's reply landed unread; the person last wrote in
-// "main-chat"; "finished" is the side job the notification is about.
+// Scout was left on "left-behind" (an unread routine reply); the person last wrote in "main-chat"; "finished" is the notification's.
 const elsewhere: BotAnnouncement = {
   id: "other", threadId: "other-chat", name: "Other", title: "", description: "", notifications: true, unread: false,
   color: "blue", modelSelection: { instanceId: "fake", model: "m" }, tasks: [{ threadId: "other-chat", title: "Chat", createdAt: 1 }],
@@ -52,9 +40,7 @@ const scout: BotAnnouncement = {
 };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const requests: Array<{ path: string; body?: string }> = [];
-/** Scout as the server keeps it: where it is, and what is unread. */
 let server: BotAnnouncement;
-/** The bot the app opens on at launch: the first one, nothing remembered. */
 let firstBot = "other";
 let state: AppState;
 let dispatch: (action: Action) => void;
@@ -68,7 +54,6 @@ const { setShowThreads } = await import("@/lib/thread-preferences");
 let root: Root;
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((resolve) => setTimeout(resolve, 0)); };
 const stream = () => FixtureEventSource.opened.at(-1)!;
-/** The server's bot frame now, a network hop later, then its answer. */
 const announcedThen = (body: unknown) => new Promise<Response>((resolve) => setTimeout(() => {
   stream().send({ kind: "bot", bot: structuredClone(server) });
   setTimeout(() => resolve(json(body)), 0);
@@ -98,8 +83,7 @@ beforeAll(() => {
     const switched = path.match(/^\/api\/bots\/scout\/tasks\/([\w-]+)/);
     if (switched && init?.method === "POST") {
       if (!server.tasks!.some((task) => task.threadId === switched[1])) return Promise.resolve(json({ error: "no such task" }, 404));
-      // store.switchTask moves the selection and announces it; the route
-      // answers with the snapshot it took then.
+      // Like store.switchTask: announce the switch, then answer with the snapshot taken then.
       server = { ...server, threadId: switched[1]! };
       return announcedThen({ bot: { ...structuredClone(server), messages: [] } });
     }
@@ -116,7 +100,6 @@ beforeAll(() => {
   });
 });
 afterAll(() => vi.unstubAllGlobals());
-/** The app as it opens, on the conversation it remembers. */
 async function launch() {
   server = structuredClone(scout);
   // A previous scenario must not decide which bot this launch restores.
@@ -129,7 +112,6 @@ async function launch() {
   stream().send({ kind: "hello", resumed: false, cursor: "run:0" });
   await settle();
 }
-// Each test starts from the app as it opens: in the other bot's chat.
 beforeEach(async () => {
   firstBot = "other";
   await launch();
@@ -145,14 +127,12 @@ const threadsShown = async (shown: boolean) => {
   await settle();
 };
 const sent = () => requests.map((request) => request.body ? `${request.path} ${request.body}` : request.path);
-/** The threads the window asked the server to mark read. */
 const reads = () => requests.filter((request) => request.path === "/api/bots/scout/read").map((request) => JSON.parse(request.body!).threadId);
 const scoutNow = () => state.bots.find((bot) => bot.id === "scout")!;
 const unread = (threadId: string) => scoutNow().tasks!.find((task) => task.threadId === threadId)!.unread;
 
-/** Scout's side job finished; the person clicks the notification. */
 async function followNotification() {
-  const frame: ServerFrame = { kind: "notify", notification: { kind: "done", botId: "scout", botName: "Scout", threadId: "finished", title: "Scout finished", body: "Side job done." } };
+  const frame: ServerFrame = { kind: "notify", notification: { id: "n1", at: 1, read: false, kind: "done", botId: "scout", botName: "Scout", threadId: "finished", title: "Scout finished", body: "Side job done." } };
   stream().send(frame, "run:1");
   await settle();
   expect(FixtureNotification.shown).toHaveLength(1);
@@ -165,8 +145,6 @@ describe("following a notification", () => {
     await threadsShown(false);
     await followNotification();
     expect(sent().filter((request) => request.startsWith("/api/bots/scout/tasks/finished"))).toHaveLength(1);
-    // The switch's own announcement reads the thread it opens, not the one
-    // left, and the snapshot that lands after it does not put its dot back.
     expect(reads()).toEqual(["finished"]);
     expect(scoutNow().threadId).toBe("finished");
     expect(unread("finished")).toBe(false);
@@ -185,12 +163,10 @@ describe("following a notification", () => {
 
   it("leaves the thread a failed switch stayed on as the one on screen", async () => {
     await threadsShown(false);
-    // Deleted on the server a moment ago; this window has not heard yet.
     server = { ...server, tasks: server.tasks!.filter((task) => task.threadId !== "finished") };
     await followNotification();
     expect(scoutNow().threadId).toBe("left-behind");
     expect(reads()).toEqual([]);
-    // Scout is on screen at the thread it stayed on: news there is read.
     stream().send({ kind: "bot", bot: structuredClone(server) });
     await settle();
     expect(reads()).toEqual(["left-behind"]);
@@ -206,7 +182,6 @@ describe("opening a bot with threads hidden", () => {
     expect(reads()).toEqual([]);
     expect(scoutNow().threadId).toBe("main-chat");
     expect(unread("left-behind")).toBe(true);
-    // Its row stands for the thread on screen; the reply keeps a row of its own.
     expect(threadsWhenTreeHidden(scoutNow(), {}).map((task) => task.threadId).filter((id) => id !== scoutNow().threadId))
       .toEqual(expect.arrayContaining(["left-behind", "finished"]));
   });
@@ -218,7 +193,6 @@ describe("opening a bot with threads hidden", () => {
       snippet: "the side job is done", matchStart: 4, matchLength: 8, onActivePath: true,
     }, state, dispatch, false);
     await settle();
-    // No page limit: the hit can be older than one page.
     expect(sent().filter((request) => request.startsWith("/api/bots/scout/tasks/"))).toEqual(["/api/bots/scout/tasks/finished {}"]);
     expect(reads()).toEqual(["finished"]);
     expect(unread("left-behind")).toBe(true);
@@ -227,7 +201,6 @@ describe("opening a bot with threads hidden", () => {
 });
 
 describe("launching the app on a bot", () => {
-  /** Quit while Scout was on screen, left on the thread a reply waits in. */
   async function relaunch(shown: boolean) {
     flushSync(() => root.unmount());
     flushSync(() => { setAdvancedMode(true); setShowThreads(shown); });

@@ -4,7 +4,6 @@ import type { AppConfig } from "../config.ts";
 import { createDecider } from "./index.ts";
 import { OPENROUTER_DEFAULT_MODEL, openrouterEndpoint, openrouterRequestBody } from "./openrouter.ts";
 
-// No test here reaches OpenRouter: every call goes through a mocked fetch.
 const KEY = "sk-or-v1-unit-secret-key-0123456789abcdef";
 const CHAT_MODEL = "openai/gpt-4.1-nano";
 // A chat model, so most of this file exercises chat completions; the default model is a decisions one.
@@ -52,12 +51,10 @@ describe("the OpenRouter request on the wire", () => {
       response_format: { type: "json_schema", json_schema: { name: "decision", strict: true } },
     });
     expect(body).not.toHaveProperty("reasoning");
-    // the schema offers exactly the option keys, and every property is required
     const answer = body.response_format.json_schema.schema.properties.answers.properties.answer;
     expect(answer.properties.choice.enum).toEqual(["maya", "theo"]);
     expect(answer.required).toEqual(["choice", "probabilities"]);
     expect(answer.properties.probabilities).toMatchObject({ required: ["maya", "theo"], additionalProperties: false });
-    // the question reaches the model in Jev's wire form, next to the state
     const [system, user] = body.messages;
     expect(system.role).toBe("system");
     expect(system.content).not.toContain("PRIVATE-MESSAGE-TEXT");

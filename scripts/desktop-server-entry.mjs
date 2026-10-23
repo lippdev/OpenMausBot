@@ -1,10 +1,7 @@
-// The packaged desktop forks this file instead of the index.js beside it
-// (electron/server-child-launch.mjs). It turns on Node's on-disk compile
-// cache for this one process, so a relaunch reuses the compiled 5 MB bundle
-// instead of parsing and compiling all of it again, then runs the server
-// unchanged. Copied verbatim to dist-server/desktop-entry.mjs by
-// scripts/bundle-server.mjs: bundling it would inline index.js and defeat
-// the point.
+// The packaged desktop forks this instead of index.js: it turns on Node's
+// on-disk compile cache for this process, so a relaunch reuses the compiled
+// bundle, then runs the server unchanged. Copied, not bundled: bundling would
+// inline index.js.
 import module from "node:module";
 import { lstatSync, readdirSync, rmSync, utimesSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -20,7 +17,6 @@ if (cacheRoot) {
   try {
     enabled = module.enableCompileCache(cacheRoot).status === module.constants.compileCacheStatus.ENABLED;
   } catch {
-    // An unusable cache costs only the compile it would have saved.
   }
 }
 
@@ -48,7 +44,6 @@ if (enabled) {
         }
       }
     } catch {
-      // Best effort: anything not written or removed now is retried next launch.
     }
   }, 10_000).unref();
 }

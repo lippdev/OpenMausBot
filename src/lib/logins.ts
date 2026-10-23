@@ -6,17 +6,14 @@ import { api } from "@/state/store";
 export interface LoginFieldsInput {
   username: string;
   password: string;
-  /** A 2FA setup key or otpauth:// address; empty for none. */
   totp: string;
 }
 
-/** Every login, saved here or in 1Password, and whether 1Password is connected. */
 export async function listLogins(): Promise<{ logins: LoginSummary[]; onePassword: OnePasswordStatus }> {
   return await api<{ logins: LoginSummary[]; onePassword: OnePasswordStatus }>("/api/logins");
 }
 
-/** Connect 1Password with a service account token; the server checks it
- * reaches 1Password before keeping it, and never sends it back. */
+/** The server checks the token reaches 1Password before keeping it, and never sends it back. */
 export async function connectOnePassword(token: string): Promise<OnePasswordStatus> {
   return (await api<{ onePassword: OnePasswordStatus }>("/api/logins/1password", { method: "POST", body: JSON.stringify({ token }) })).onePassword;
 }
@@ -29,36 +26,50 @@ export async function disconnectOnePassword(): Promise<OnePasswordStatus> {
   return (await api<{ onePassword: OnePasswordStatus }>("/api/logins/1password", { method: "DELETE" })).onePassword;
 }
 
-export async function addLogin(site: string, fields: LoginFieldsInput, bots: LoginBots): Promise<LoginSummary> {
+export async function addLogin(site: string, fields: LoginFieldsInput, bots: LoginBots, exactHost = false): Promise<LoginSummary> {
   return (await api<{ login: LoginSummary }>("/api/logins", {
     method: "POST",
-    body: JSON.stringify({ site, username: fields.username, password: fields.password, ...(fields.totp.trim() ? { totp: fields.totp } : {}), bots }),
+    body: JSON.stringify({ site, username: fields.username, password: fields.password, ...(fields.totp.trim() ? { totp: fields.totp } : {}), bots, ...(exactHost ? { exactHost } : {}) }),
   })).login;
 }
 
-/** Replace a login's password or 2FA key, or change who may use it. An
- * empty password or key leaves the saved one; `removeTotp` drops the key. */
-export async function changeLogin(id: string, change: { password?: string; totp?: string; removeTotp?: boolean; bots?: LoginBots }): Promise<LoginSummary> {
+export async function changeLogin(id: string, change: { password?: string; totp?: string; removeTotp?: boolean; bots?: LoginBots; exactHost?: boolean }): Promise<LoginSummary> {
   return (await api<{ login: LoginSummary }>(`/api/logins/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify({
       ...(change.password ? { password: change.password } : {}),
       ...(change.removeTotp ? { totp: null } : change.totp?.trim() ? { totp: change.totp } : {}),
       ...(change.bots ? { bots: change.bots } : {}),
+      ...(change.exactHost === undefined ? {} : { exactHost: change.exactHost }),
     }),
   })).login;
+}
+
+/** Which bots may use the logins in one 1Password vault. */
+export async function grantVault(vaultId: string, bots: LoginBots): Promise<OnePasswordStatus> {
+  return (await api<{ onePassword: OnePasswordStatus }>(`/api/logins/1password/vaults/${encodeURIComponent(vaultId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ bots }),
+  })).onePassword;
 }
 
 export async function deleteLogin(id: string): Promise<void> {
   await api(`/api/logins/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-/** The sign-in card's Save: the login is kept for the card's page, usable by
- * the asking bot, and the bot resumes to fill it (server/index.ts
- * saveLoginFromCard). */
-export async function saveLoginFromCard(ref: Pick<ComputerHelpRef, "botId" | "threadId" | "messageId">, fields: LoginFieldsInput): Promise<void> {
-  await api(`/api/bots/${encodeURIComponent(ref.botId)}/sign-in-cards/${encodeURIComponent(ref.messageId)}/save-login`, {
+type CardRef = Pick<ComputerHelpRef, "botId" | "threadId" | "messageId">;
+
+const cardSavePath = (ref: CardRef) => `/api/bots/${encodeURIComponent(ref.botId)}/sign-in-cards/${encodeURIComponent(ref.messageId)}/save-login`;
+
+/** Where a login saved from the card fills: its site, and a sign-in page on another site the browser shows now, which
+ * the person may add. */
+export async function cardSaveTarget(ref: CardRef): Promise<{ site: string; signInHost?: string }> {
+  return await api<{ site: string; signInHost?: string }>(`${cardSavePath(ref)}?threadId=${encodeURIComponent(ref.threadId)}`);
+}
+
+export async function saveLoginFromCard(ref: CardRef, fields: LoginFieldsInput, signInHost?: string): Promise<void> {
+  await api(cardSavePath(ref), {
     method: "POST",
-    body: JSON.stringify({ threadId: ref.threadId, username: fields.username, password: fields.password, ...(fields.totp.trim() ? { totp: fields.totp } : {}) }),
+    body: JSON.stringify({ threadId: ref.threadId, username: fields.username, password: fields.password, ...(fields.totp.trim() ? { totp: fields.totp } : {}), ...(signInHost ? { signInHost } : {}) }),
   });
 }

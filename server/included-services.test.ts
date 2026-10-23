@@ -1,10 +1,7 @@
-// Which credential a Boat, ElevenLabs or Jev request uses, and where it may
-// go. The relays know only the Admin's accounts: an own key must never reach
-// them, and the included token must never reach the providers.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { jevEndpoint } from "./decider/jev.ts";
-import { boatCredential, deciderCredential, trialCreditCredential, voiceCredential } from "./included-services.ts";
+import { applyIncludedXMessage, boatCredential, deciderCredential, researchCredential, trialCreditCredential, voiceCredential, xCredential, xResearchStatus } from "./included-services.ts";
 
 const RELAY_BOAT = "https://cloud.example.test/api/cloud/services/boat/api/box/v1";
 const RELAY_VOICE = "https://cloud.example.test/api/cloud/services/voice/v1";
@@ -26,7 +23,6 @@ describe("Boat credential", () => {
   });
 
   it("uses the person's own key, sent only to Boat, whenever there is one", () => {
-    // Boat's public API v1.
     expect(boatCredential("box_own", cloud)).toEqual({ token: "box_own", api: "https://boat.dev/api/v1", included: false });
     // OMB_BOAT_API points own keys at a stub for dev and tests.
     expect(boatCredential("box_own", { ...cloud, OMB_BOAT_API: "http://127.0.0.1:9/api/v1" }))
@@ -34,7 +30,6 @@ describe("Boat credential", () => {
   });
 
   it("sends the included token only to the relay even when it comes back as a plain token", () => {
-    // A leased computer descriptor carries the token in use back to boat.ts.
     expect(boatCredential("box_omb_included", { ...cloud, OMB_BOAT_API: "http://127.0.0.1:9/api/v1" }))
       .toEqual({ token: "box_omb_included", api: RELAY_BOAT, included: true });
   });
@@ -90,7 +85,6 @@ describe("Jev credential", () => {
   it("sends the included token only to the relay, whatever base URL is set for own keys", () => {
     expect(deciderCredential(undefined, "http://127.0.0.1:9", cloud)).toMatchObject({ token: "omb_decide_included", included: true });
     expect(endpoint(deciderCredential(undefined, "http://127.0.0.1:9", cloud))).toBe(`${RELAY_DECIDER}/v1/systemone`);
-    // Pasted back as if it were an own key, it still goes only to the relay.
     expect(endpoint(deciderCredential("omb_decide_included", undefined, cloud))).toBe(`${RELAY_DECIDER}/v1/systemone`);
   });
 
@@ -152,15 +146,85 @@ describe("holdIncludedServices", () => {
     expect(process.env.OMB_CLOUD_BOAT_TOKEN).toBeUndefined();
     expect(process.env.OMB_CLOUD_VOICE_TOKEN).toBeUndefined();
     expect(process.env.OMB_CLOUD_DECIDER_TOKEN).toBeUndefined();
-    // The URLs are not secrets and stay.
     expect(process.env.OMB_CLOUD_BOAT_URL).toBe(RELAY_BOAT);
     expect(process.env.OMB_CLOUD_DECIDER_URL).toBe(RELAY_DECIDER);
     expect(services.boatCredential(undefined)).toEqual({ token: "box_omb_included", api: RELAY_BOAT, included: true });
     expect(services.voiceCredential(undefined)).toEqual({ token: "omb_voice_included", api: RELAY_VOICE, included: true });
     expect(services.deciderCredential(undefined, undefined)).toEqual({ token: "omb_decide_included", api: RELAY_DECIDER, included: true });
-    // The person's own key still wins, and still goes only to the provider.
     expect(services.boatCredential("box_own")).toMatchObject({ token: "box_own", included: false });
     expect(services.voiceCredential("sk-own")).toMatchObject({ token: "sk-own", included: false });
     expect(services.deciderCredential("tsk_own", undefined)).toEqual({ token: "tsk_own", api: "https://api.typesafe.ai", included: false });
   });
 });
+
+describe("X research credential", () => {
+  const RELAY_X = "https://cloud.example.test/api/cloud/services/x";
+  const desktopToken = `omb_xd_${"a".repeat(43)}`;
+  afterEach(() => { applyIncludedXMessage({ type: "openmausbot:included-x", access: null }); });
+
+  it("is a Cloud home's included token, sent only to the relay, and there is no own-key path", () => {
+    expect(xCredential({ OMB_CLOUD_X_URL: `${RELAY_X}/`, OMB_CLOUD_X_TOKEN: "omb_x_included" })).toEqual({ token: "omb_x_included", api: RELAY_X, included: true });
+    expect(xCredential({})).toBeNull();
+    expect(xCredential({ OMB_CLOUD_X_URL: RELAY_X })).toBeNull();
+  });
+
+  it("takes a signed-in desktop's token from its main process, and drops it when told", () => {
+    expect(applyIncludedXMessage({ type: "openmausbot:included-x", access: { url: RELAY_X, token: desktopToken } })).toBe(true);
+    expect(xCredential({})).toEqual({ token: desktopToken, api: RELAY_X, included: true });
+    expect(applyIncludedXMessage({ type: "openmausbot:included-x", access: null })).toBe(true);
+    expect(xCredential({})).toBeNull();
+  });
+
+  it("ignores other messages and refuses a malformed one without changing what it holds", () => {
+    applyIncludedXMessage({ type: "openmausbot:included-x", access: { url: RELAY_X, token: desktopToken } });
+    expect(applyIncludedXMessage({ type: "openmausbot:managed-composio", access: null })).toBe(false);
+    for (const access of [{ url: "http://cloud.example.test/api/cloud/services/x", token: desktopToken }, { url: RELAY_X, token: "" }, { url: "not a url", token: desktopToken },
+      { url: RELAY_X, token: "x".repeat(300) }, "nope"]) {
+      expect(() => applyIncludedXMessage({ type: "openmausbot:included-x", access }), JSON.stringify(access)).toThrow();
+    }
+    expect(xCredential({})?.token).toBe(desktopToken);
+  });
+
+  it("lets a loopback relay through for development and tests only over http", () => {
+    applyIncludedXMessage({ type: "openmausbot:included-x", access: { url: "http://127.0.0.1:4300/api/cloud/services/x", token: desktopToken } });
+    expect(xCredential({})?.api).toBe("http://127.0.0.1:4300/api/cloud/services/x");
+  });
+});
+
+describe("X research status for the app's Settings", () => {
+  const RELAY_X = "https://cloud.example.test/api/cloud/services/x";
+  afterEach(() => { applyIncludedXMessage({ type: "openmausbot:included-x", access: null }); });
+
+  it("is included with a credential, not offered once the Admin said no, and plain not-included otherwise", () => {
+    expect(xResearchStatus({})).toEqual({ included: false });
+    applyIncludedXMessage({ type: "openmausbot:included-x", access: null, offered: false });
+    expect(xResearchStatus({})).toEqual({ included: false, unavailable: true });
+    applyIncludedXMessage({ type: "openmausbot:included-x", access: { url: RELAY_X, token: `omb_xd_${"b".repeat(43)}` } });
+    expect(xResearchStatus({})).toEqual({ included: true });
+    applyIncludedXMessage({ type: "openmausbot:included-x", access: null });
+    expect(xResearchStatus({})).toEqual({ included: false });
+    expect(xResearchStatus({ OMB_CLOUD_X_URL: RELAY_X, OMB_CLOUD_X_TOKEN: "omb_x_home" })).toEqual({ included: true });
+  });
+});
+
+describe("research credential", () => {
+  const RELAY_X = "https://cloud.example.test/api/cloud/services/x";
+  const plan = { OMB_CLOUD_X_URL: RELAY_X, OMB_CLOUD_X_TOKEN: "omb_x_home" };
+
+  it("is the person's own treg key, sent straight to treg, and it wins over the plan's relay credential", () => {
+    expect(researchCredential(" treg_own ", {})).toEqual({ token: "treg_own", api: "https://treg.to", included: false });
+    expect(researchCredential("treg_own", plan)).toEqual({ token: "treg_own", api: "https://treg.to", included: false });
+  });
+
+  it("is the plan's relay credential without an own key, and nothing with neither", () => {
+    expect(researchCredential(undefined, plan)).toEqual({ token: "omb_x_home", api: RELAY_X, included: true });
+    expect(researchCredential("  ", plan)).toEqual({ token: "omb_x_home", api: RELAY_X, included: true });
+    expect(researchCredential(undefined, {})).toBeNull();
+  });
+
+  it("sends an own key only to treg over https, or to a loopback stand-in", () => {
+    expect(researchCredential("k", { OMB_TREG_URL: "http://127.0.0.1:4300/" })?.api).toBe("http://127.0.0.1:4300");
+    for (const url of ["http://evil.example.test", "ftp://treg.to", "not a url"]) expect(researchCredential("k", { OMB_TREG_URL: url })?.api, url).toBe("https://treg.to");
+  });
+});
+

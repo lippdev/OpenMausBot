@@ -1,5 +1,4 @@
-// Real HTTP + stdio MCP contract tests: a model's claim is never the receipt.
-// The only writes performed by tools are in a fresh temporary directory.
+// Real HTTP + stdio MCP contract tests; tools write only in a fresh temporary directory.
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
@@ -57,8 +56,7 @@ function answer(response: ServerResponse, text = "The operation is complete.") {
   sse(response, [chunk({ content: text }, "stop")]);
 }
 
-// This fake implements MCP on the wire, without importing the production
-// transport or using a fake execution callback in the runtime under test.
+// MCP on the wire, without the production transport or a fake execution callback.
 const MCP_SCRIPT = `
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -159,6 +157,78 @@ async function fixture(script: Script, provider: Provider = "openai-compat", api
   };
 }
 
+describe("bounded action announcement recovery", () => {
+  const later = `${"The terminal output is absent; the launch receipt only confirms the process. ".repeat(7)}\n\nLet me execute the commands to create the file and read it back.`;
+
+  it("recovers a later long announcement after the first nudge and preserves earlier results", async () => {
+    const f = await fixture((_body, response, round) => {
+      if (round === 1) answer(response, "I'll open the terminal.");
+      else if (round === 3) answer(response, later);
+      else if (round === 2 || round === 4) sse(response, [chunk({ tool_calls: [toolCall("audit_write", JSON.stringify({ name: `step-${round}`, value: "done" }), `call-${round}`)] }, "tool_calls")]);
+      else answer(response, "Both receipts are verified.");
+    });
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: true });
+    expect(f.requests).toHaveLength(5);
+    expect(f.effects().map(effect => effect.name)).toEqual(["step-2", "step-4"]);
+    expect(f.requests[3].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "call-2" }));
+    expect(f.requests[3].messages.at(-1)).toMatchObject({ content: expect.stringContaining("Never repeat") });
+  });
+
+  it("fails after three nudges even when each recovery makes tool progress", async () => {
+    const f = await fixture((_body, response, round) => round % 2
+      ? answer(response, "I'll inspect the next result.")
+      : sse(response, [chunk({ tool_calls: [toolCall("audit_write", JSON.stringify({ name: `step-${round}`, value: "done" }), `call-${round}`)] }, "tool_calls")]));
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: false });
+    expect(f.requests).toHaveLength(7);
+    expect(f.effects()).toHaveLength(3);
+    expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "runtime.error", message: expect.stringContaining("3 announcement nudges") }));
+  });
+
+  it("stops on a second announcement without tool progress", async () => {
+    const f = await fixture((_body, response) => answer(response, "I'll inspect the terminal."));
+    await f.start();
+    expect(await f.completed()).toMatchObject({ ok: false });
+    expect(f.requests).toHaveLength(2);
+    expect(f.effects()).toEqual([]);
+  });
+
+  it("does not nudge after a denied operation", async () => {
+    const f = await fixture((_body, response, round) => round === 1
+      ? sse(response, [chunk({ tool_calls: [toolCall()] }, "tool_calls")])
+      : answer(response, "I'll write the receipt now."));
+    await f.start();
+    await f.decide("deny");
+    expect(await f.completed()).toMatchObject({ ok: false });
+    expect(f.requests).toHaveLength(2);
+    expect(f.effects()).toEqual([]);
+  });
+
+  it("does not use an announcement to bypass a failed operation", async () => {
+    const f = await fixture((_body, response, round) => round === 1
+      ? sse(response, [chunk({ tool_calls: [toolCall("audit_fail")] }, "tool_calls")])
+      : answer(response, "I'll write the receipt now."));
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: false });
+    expect(f.requests).toHaveLength(2);
+    expect(f.effects()).toEqual([]);
+  });
+
+  // Whether to run an operation again is the model's call under the engine's own permissions: the nudge only asks it not to.
+  it("leaves a repeated operation after a nudge to the model and the turn's permissions", async () => {
+    const f = await fixture((_body, response, round) => {
+      if (round === 2) answer(response, "I'll write the receipt now.");
+      else if (round === 1 || round === 3) sse(response, [chunk({ tool_calls: [toolCall("audit_write", round === 1 ? '{"name":"receipt","value":"done"}' : '{"value":"done","name":"receipt"}', `call-${round}`)] }, "tool_calls")]);
+      else answer(response, "Receipt verified.");
+    });
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: true });
+    expect(f.requests).toHaveLength(4);
+    expect(f.effects()).toHaveLength(2);
+  });
+});
+
 describe("a searched MCP catalog", () => {
   it("asks about the tool call_tool runs, and never about a search", async () => {
     const remote = await startFakeHttpMcp({ tools: whopLikeCatalog(300) });
@@ -178,7 +248,6 @@ describe("a searched MCP catalog", () => {
     expect(remote.calls).toEqual([{ name: "payments_list", arguments: { company_id: "biz_1" } }]);
     expect(f.recorder.events.flatMap((event) => event.type === "item.started" && event.itemType === "tool" ? [event.title] : []))
       .toEqual(["whop_search_tools", "whop_payments_list"]);
-    // the model was handed three tools for the server, not three hundred
     const names = f.requests[0].tools!.map((tool) => tool.function.name);
     expect(names.filter((name) => name.startsWith("whop_"))).toEqual(["whop_search_tools", "whop_describe_tool", "whop_call_tool"]);
     expect(f.requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "call_search", content: expect.stringContaining("payments_list") });
@@ -221,11 +290,9 @@ describe("approvals that follow the other engines", () => {
     expect(first).toMatchObject({ tool: "audit_write", allowSession: true });
     expect(await f.instance.adapter.respondToRequest(f.threadId, first.requestId!, { behavior: "allow", always: true })).toBe("allowed-once");
     expect(await f.completed()).toMatchObject({ ok: true });
-    // the second write in the same turn ran without a card
     expect(opened()).toHaveLength(1);
     expect(f.effects().map((effect) => effect.name)).toEqual(["one", "two"]);
 
-    // a later turn of the conversation: the kept tool runs, another asks
     f.recorder.events.splice(0);
     await f.start();
     const other = await f.recorder.until((event) => event.type === "request.opened");
@@ -234,8 +301,6 @@ describe("approvals that follow the other engines", () => {
     await f.instance.adapter.respondToRequest(f.threadId, other.requestId!, { behavior: "deny" });
     await f.completed();
 
-    // a guest's turn in the same conversation uses none of the owner's
-    // grants, and an "always" answered there keeps nothing
     f.recorder.events.splice(0);
     await f.start({ guestConfined: true });
     const guest = await f.recorder.until((event) => event.type === "request.opened");
@@ -247,7 +312,6 @@ describe("approvals that follow the other engines", () => {
     await f.completed();
     expect(f.effects().map((effect) => effect.name)).toEqual(["one", "two", "three", "guest"]);
 
-    // another conversation keeps nothing
     f.recorder.events.splice(0);
     await f.instance.adapter.sendTurn({ threadId: randomUUID(), text: "Store it here too.", model: "fixture-model", integrations: f.integrations });
     const elsewhere = await f.recorder.until((event) => event.type === "request.opened");
@@ -364,7 +428,6 @@ describe("optional built-in question compatibility", () => {
     expect(f.requests[1]).not.toHaveProperty("tools");
     expect(f.requests[1].messages).toEqual(f.requests[0].messages);
     expect(f.effects()).toEqual([]);
-    // A rejection for this turn is not a persisted provider setting.
     f.recorder.events.length = 0;
     await f.start({ integrations: undefined });
     expect(await f.completed()).toMatchObject({ ok: true });
@@ -603,8 +666,6 @@ describe.each<Provider>(["openai-compat", "grok", "minimax"])("%s structured too
     await f.start({ integrations: undefined, system: "Fixture persona", transcript: [{ role: "user", text: "Earlier question" }, { role: "assistant", text: "Earlier answer" }] });
     expect(await f.completed()).toMatchObject({ ok: true });
     expect(f.requests).toHaveLength(1);
-    // ask_user is the runtime's built-in, so it is offered even with no MCP
-    // server mounted — and nothing else is.
     expect(f.requests[0].tools?.map((tool) => tool.function.name)).toEqual(["ask_user"]);
     expect(f.requests[0].messages.map((message) => message.role)).toEqual(["system", "user", "assistant", "user"]);
     expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "assistant_text", text: imitation }));
@@ -627,8 +688,6 @@ describe.each<Provider>(["openai-compat", "grok", "minimax"])("%s structured too
     const opened = await f.recorder.until((event) => event.type === "request.opened");
     if (opened.type !== "request.opened") throw new Error("expected a question card");
     expect(opened).toMatchObject({ requestType: "question", tool: "ask_user", questions });
-    // A multi-question card cannot flatten to one choice list without
-    // losing which question an answer belongs to.
     expect(opened.choices).toBeUndefined();
     expect(f.requests[0].tools).toContainEqual({
       type: "function",
@@ -650,8 +709,6 @@ describe.each<Provider>(["openai-compat", "grok", "minimax"])("%s structured too
     const opened = await f.recorder.until((event) => event.type === "request.opened");
     expect(await f.instance.adapter.respondToRequest(f.threadId, opened.requestId!, { behavior: "deny" })).toBe("rejected");
     const completed = await f.completed();
-    // Absence is not a "no": the turn ends with the final answer intact, no
-    // denial recorded, no tool_error stop reason.
     expect(completed).toMatchObject({ ok: true });
     expect((completed as any).stopReason).not.toBe("tool_error");
     expect((completed as any).denials).toBeUndefined();
@@ -732,7 +789,7 @@ describe("structured tool execution boundaries", () => {
     expect(f.effects()).toEqual([{ name: "receipt", value: "done" }]);
   });
 
-  // Groq's wording (#2077), truncated in the runtime error but not in the body.
+  // Groq's wording, truncated in the runtime error but not in the body.
   const reasoningRejection = { error: {
     message: "'messages.2' : for 'role:assistant' the following must be satisfied[('messages.2' : property 'reasoning_content' is unsupported)]",
     type: "invalid_request_error",
@@ -757,7 +814,6 @@ describe("structured tool execution boundaries", () => {
     const resent = f.requests[2].messages;
     expect(resent.some((message) => "reasoning_content" in message)).toBe(false);
     expect(resent).toEqual(f.requests[1].messages.map(({ reasoning_content: _omitted, ...message }) => message));
-    // The rejected request executed nothing; the call ran exactly once.
     expect(f.effects()).toEqual([{ name: "receipt", value: "done" }]);
     expect(f.recorder.events.some((event) => event.type === "runtime.error")).toBe(false);
 
@@ -1081,7 +1137,6 @@ describe("structured tool execution boundaries", () => {
   });
 
   it("finishes a tool-heavy task that needs more than sixteen steps", async () => {
-    // A tool-heavy model (one call per step) used to be cut off at 16 steps.
     const f = await fixture((_body, response, round) => round <= 40
       ? sse(response, [chunk({ tool_calls: [toolCall("audit_write", `{"name":"step","value":"${round}"}`, `call_${round}`)] }, "tool_calls")])
       : answer(response));
@@ -1111,7 +1166,6 @@ describe("structured tool execution boundaries", () => {
   });
 
   it("stops at 200 tool calls in one turn without running the batch that crosses it", async () => {
-    // The turn's total is separate from the 32-per-reply bound.
     const f = await fixture((_body, response, round) => sse(response, [chunk({
       tool_calls: Array.from({ length: 25 }, (_, index) => ({
         ...toolCall("audit_write", `{"name":"r${round}","value":"${index}"}`, `call_${round}_${index}`), index,
@@ -1128,8 +1182,6 @@ describe("structured tool execution boundaries", () => {
   });
 
   it("keeps Grok's native log small on a long turn with large tool results", async () => {
-    // Logging the whole transcript on every step grows with the square of the
-    // step count; a step is logged by its message count, like the other engines.
     ensureDirs();
     const large = "note ".repeat(4_000);
     const f = await fixture((_body, response, round) => round <= 20
@@ -1139,7 +1191,6 @@ describe("structured tool execution boundaries", () => {
     expect(await f.completed()).toMatchObject({ ok: true });
     expect(f.effects()).toHaveLength(20);
     const log = readFileSync(join(NATIVE_DIR, `${f.threadId}.ndjson`), "utf8");
-    // The whole turn's log is smaller than one tool result.
     expect(log.length).toBeLessThan(large.length);
     const outgoing = log.trim().split("\n").map((line) => JSON.parse(line) as { dir: string; msg: unknown })
       .filter((entry) => entry.dir === "out").map((entry) => entry.msg);
@@ -1176,5 +1227,25 @@ describe("structured tool execution boundaries", () => {
     const pending = f.recorder.events.find((event) => event.type === "request.opened");
     if (pending) expect(await f.instance.adapter.respondToRequest(f.threadId, pending.requestId!, { behavior: "allow" })).toBe("unavailable");
     expect(f.recorder.events.filter((event) => event.type === "turn.completed")).toHaveLength(1);
+  });
+});
+
+describe("a configured MCP server that cannot mount", () => {
+  it("is skipped with a notice, and the turn runs with the remaining servers", async () => {
+    const f = await fixture((_body, response) => answer(response));
+    const broken = join(f.directory, "broken-mcp.mjs");
+    // Answers initialize with an error, as a server needing sign-in or refusing its credential (401) does.
+    writeFileSync(broken, `process.stdin.setEncoding("utf8");let b="";process.stdin.on("data",(c)=>{b+=c;let n;while((n=b.indexOf("\\n"))!==-1){const m=JSON.parse(b.slice(0,n));b=b.slice(n+1);if(m.id!==undefined)process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,error:{code:-32001,message:"401 Unauthorized"}})+"\\n");}});`);
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      await f.start({ integrations: { custom: { ...f.integrations!.custom, slack: { command: process.execPath, args: [broken], env: {} } } } });
+      expect(await f.completed()).toMatchObject({ ok: true });
+    } finally { console.warn = warn; }
+    expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "runtime.notice", message: expect.stringContaining(`MCP server "slack" was skipped`) }));
+    expect(f.recorder.events.some((event) => event.type === "runtime.error")).toBe(false);
+    const names = f.requests[0].tools!.map((tool) => tool.function.name);
+    expect(names).toContain("audit_write");
+    expect(names.some((name) => name.startsWith("slack_"))).toBe(false);
   });
 });

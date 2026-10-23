@@ -1,10 +1,3 @@
-// The Boat or self-hosted VPS choice, in both its homes (the Computer panel
-// and a bot's Access settings). Boat and a self-hosted VPS follow one rule
-// (shared/cloud-computer.ts): an engine that can use a computer can use
-// either. The Computer engine, which could run only on Boat, is gone, so
-// neither backend is offered or refused on its own, and no copy sends anyone
-// to Boat to get around an engine. My Cloud's cloud computers are the plan's,
-// so there it is not offered at all.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";

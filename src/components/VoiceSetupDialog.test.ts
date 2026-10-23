@@ -1,6 +1,5 @@
-// The voice set-up pop-up the call button opens. Server rendering never runs
-// effects, so the one that moves focus and listens for Escape is collected
-// and run by hand against stand-in elements.
+// Server rendering never runs effects, so the focus and Escape effect is collected and run by hand against stand-in
+// elements.
 import { Children, createElement, isValidElement, type EffectCallback, type ReactElement, type ReactNode, type RefObject } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -73,7 +72,6 @@ const byAttribute = (rendered: { nodes: Node[] }, attribute: string, value?: unk
   rendered.nodes.find((node) => (value === undefined ? node.props[attribute] !== undefined : node.props[attribute] === value))!;
 const click = (node: Node) => (node.props.onClick as () => void)();
 
-/** Just enough of an element for the focus effect. */
 class FakeElement {
   focus = vi.fn();
   contains = vi.fn(() => true);
@@ -83,7 +81,6 @@ class FakeElement {
 }
 const VOICE_PICKER = "select[data-voice-picker]:not([disabled])";
 const FIRST_FIELD = "input:not([disabled]), select:not([disabled])";
-/** A pane holding these fields, found the way a browser would. */
 function paneWith(fields: { voicePicker?: FakeElement; firstField?: FakeElement }) {
   const pane = new FakeElement();
   pane.querySelector.mockImplementation((selector) =>
@@ -112,7 +109,7 @@ describe("voice set-up pop-up", () => {
     expect(html).toContain("glass-surface");
     expect(html).toMatch(/role="dialog" aria-modal="true"/);
     expect(html).toContain("Give Pepper a voice");
-    expect(html).toContain("Choose an engine, add its key if it needs one, then pick a voice.");
+    expect(html).toContain("Choose a voice provider, add its key if it needs one, then pick a voice.");
     expect(html).toContain('data-voice-settings="pepper"');
     expect(html).toContain('aria-label="Close voice set-up"');
     expect(html).toContain("All voice settings");
@@ -186,7 +183,6 @@ describe("voice set-up pop-up", () => {
       removeEventListener: (type: string) => listeners.delete(type),
     });
     const view = render({ returnFocusRef: { current: callButton as unknown as HTMLElement } });
-    // No key saved yet, so no voice picker: the key field comes first.
     const pane = paneWith({ firstField: keyField });
     (byAttribute(view, "role", "dialog").props.ref as RefObject<unknown>).current = pane;
 
@@ -195,7 +191,6 @@ describe("voice set-up pop-up", () => {
     expect(pane.querySelector).toHaveBeenCalledWith(FIRST_FIELD);
     expect(keyField.focus).toHaveBeenCalledOnce();
 
-    // A key some other layer already handled is not ours.
     listeners.get("keydown")!({ key: "Escape", defaultPrevented: true, preventDefault: vi.fn() } as unknown as KeyboardEvent);
     expect(view.props.onClose).not.toHaveBeenCalled();
     const preventDefault = vi.fn();
@@ -214,7 +209,6 @@ describe("voice set-up pop-up", () => {
     vi.stubGlobal("document", { body: {}, activeElement: null });
     vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     const view = render();
-    // The key field stays (to replace the key), ahead of the picker.
     const keyField = new FakeElement();
     const voicePicker = new FakeElement();
     const pane = paneWith({ voicePicker, firstField: keyField });
@@ -232,14 +226,11 @@ describe("voice set-up pop-up", () => {
     const key = 'aria-label="ElevenLabs key"';
     const pickerTag = (html: string) => html.match(/<select\b[^>]*>/g)?.find((tag) => tag.includes("data-voice-picker"));
 
-    // No ElevenLabs key yet: its field, and no picker.
     fixture.config = { tts: { configured: false, provider: "elevenlabs" } };
     const needsKey = card();
     expect(needsKey).toContain(key);
     expect(pickerTag(needsKey)).toBeUndefined();
 
-    // Key saved: the field is still there, first, and Pepper's voice picker
-    // follows it.
     fixture.config = { tts: { configured: true, provider: "elevenlabs" } };
     const needsVoice = card();
     const tag = pickerTag(needsVoice);
@@ -272,16 +263,13 @@ describe("voice set-up pop-up", () => {
       return event.preventDefault;
     };
 
-    // The control holding focus went away (an engine switch): back in.
     expect(tab()).toHaveBeenCalledOnce();
     expect(first.focus).toHaveBeenCalledOnce();
     expect(tab(true)).toHaveBeenCalledOnce();
     expect(last.focus).toHaveBeenCalledOnce();
-    // On the pane itself, too.
     page.activeElement = pane;
     tab();
     expect(first.focus).toHaveBeenCalledTimes(2);
-    // And it wraps at both ends.
     page.activeElement = last;
     tab();
     expect(first.focus).toHaveBeenCalledTimes(3);

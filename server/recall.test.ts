@@ -1,5 +1,3 @@
-// Automatic recall: the query, the two-term rule, which files are never
-// recalled, and the block's shape (rule first, numbered, fenced, capped).
 import { rmSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +7,19 @@ import { buildRecall, enoughMatches, memoryPassages, RECALL_CLOSE, RECALL_OPEN, 
 import { appendMemoryLog, searchMemoryFiles, writeMemoryFile, writeMemoryTopic, WORKSPACES_DIR } from "./workspace.ts";
 
 const BOT = "bot-recall-test";
+
+it("keeps a matching answer late in a named topic instead of replacing it with the introduction", () => {
+  writeMemoryTopic(BOT, "tapa.md", `---\ntitle: Tapa\n---\n${"Earlier draft background. ".repeat(40)}\nThe approved amber test is version SEVEN.\n`);
+  const result = buildRecall({ botId: BOT, message: "Tapa approved amber test", threadIds: [], label: () => "", author: () => "" });
+  expect(result?.text).toContain("SEVEN");
+});
+
+it("keeps a named topic's matching answer when better-ranked matches fill the recall budget", () => {
+  writeMemoryTopic(BOT, "tapa.md", `---\ntitle: Tapa\n---\n${"Earlier draft background. ".repeat(40)}\nThe approved amber test is version SEVEN.\n`);
+  for (let n = 0; n < 5; n++) writeMemoryTopic(BOT, `decoy-${n}.md`, `- Tapa approved amber test, Tapa amber test ${n}\n`);
+  const result = buildRecall({ botId: BOT, message: "Tapa approved amber test", threadIds: [], label: () => "", author: () => "" });
+  expect(result?.text).toContain("SEVEN");
+});
 
 describe("recall terms and query", () => {
   it("keeps signs, symbols and versions, drops filler and punctuation", () => {
@@ -94,7 +105,6 @@ describe("recall from memory files", () => {
     expect(topicPassages(BOT, "where can I get bhel?").map((p) => p.label)).toEqual(["memory/Dining.md"]);
     expect(topicPassages(BOT, "an Irani cafe nearby").map((p) => p.label)).toEqual(["memory/Dining.md"]);
     expect(topicPassages(BOT, "is my family visiting?").map((p) => p.label)).toEqual(["memory/family.md"]);
-    // word matching has a limit: nothing here says "restaurant"
     expect(topicPassages(BOT, "suggest a restaurant")).toEqual([]);
   });
 
@@ -150,5 +160,31 @@ describe("recall from memory files", () => {
     writeMemoryTopic(BOT, "dining.md", "- Loves pasta\n");
     expect(buildRecall({ botId: BOT, message: "ok", threadIds: [], label: () => "", author: () => "" })).toBeNull();
     expect(buildRecall({ botId: BOT, message: "schedule the quarterly review", threadIds: [], label: () => "", author: () => "" })).toBeNull();
+  });
+});
+
+describe("recall across memory layers (a Team Cloud)", () => {
+  beforeEach(() => {
+    closeMessageDb();
+    rmSync(DATA_DIR, { recursive: true, force: true });
+    rmSync(WORKSPACES_DIR, { recursive: true, force: true });
+  });
+
+  it("reads the layers it is given and no other: the turn's own and the team's, never another member's", () => {
+    const TEAM = BOT, MINE = `${BOT}--member-p_mine`, THEIRS = `${BOT}--member-p_theirs`;
+    writeMemoryTopic(TEAM, "office.md", "---\naliases: [plant]\n---\n- The office plant is Fernando\n");
+    writeMemoryTopic(MINE, "tea.md", "---\naliases: [drinks]\n---\n- Ada prefers oolong tea\n");
+    writeMemoryTopic(THEIRS, "badge.md", "---\naliases: [door]\n---\n- Ben's badge code is 4471\n");
+    const recall = (memoryIds: string[], message: string) => buildRecall({ botId: BOT, memoryIds, message, threadIds: [], label: () => "", author: () => "" })?.text ?? "";
+    const mine = recall([MINE, TEAM], "any plant or drinks or door codes for the badge?");
+    expect(mine).toContain("Fernando");
+    expect(mine).toContain("oolong");
+    expect(mine).not.toContain("4471");
+    const team = recall([TEAM], "any plant or drinks or door codes for the badge?");
+    expect(team).toContain("Fernando");
+    expect(team).not.toContain("oolong");
+    // Without memoryIds a bot reads its own folder only, as before.
+    expect(recall([], "any plant or drinks?")).toContain("Fernando");
+    expect(recall([], "any plant or drinks?")).not.toContain("oolong");
   });
 });

@@ -16,7 +16,6 @@ describe("resolveAddressBarInput", () => {
     expect(resolveAddressBarInput("http://example.com")).toBe("http://example.com/");
   });
 
-  // "google" used to open https://google/, which does not resolve.
   it("searches for a single word and for anything that is not an address", () => {
     expect(resolveAddressBarInput("google")).toBe("https://duckduckgo.com/?q=google");
     expect(resolveAddressBarInput("weather")).toBe("https://duckduckgo.com/?q=weather");

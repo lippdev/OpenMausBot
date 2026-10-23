@@ -4,10 +4,10 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Bot, InstanceInfo } from "@/state/store";
 import type { EffortLevel } from "../../shared/wire";
+import { Select } from "./Select";
 
-// Same hook-by-call-order harness as ModelPicker.interaction.test.ts: the
-// picker's own state survives between renders, effects never run, and
-// handlers are read off the returned element tree.
+// Hook-by-call-order harness: the picker's own state survives between renders, effects never run, and handlers are read
+// off the element tree.
 const fixture = vi.hoisted(() => {
   vi.stubGlobal("window", {});
   vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {} });
@@ -90,7 +90,6 @@ const grok = engine("grok", "grokAgent", "Grok", "subscription", [{ id: "grok-5"
 const cursor = engine("cursor", "cursorAgent", "Cursor", "subscription", [{ id: "auto", label: "Auto" }]);
 const openaiKey = engine("openai", "openai-compat", "OpenAI", "api", [{ id: "gpt-5.6", label: "GPT-5.6" }]);
 const claudeKey = engine("claudeApi", "claudeAgent", "Claude (API key)", "api", claudeModels);
-/** A local engine: Llama and Gemma are loaded in memory right now. */
 const local = engine("pi", "piAgent", "pi", "custom", [
   { id: "qwen", label: "Qwen 3", custom: true },
   { id: "mistral", label: "Mistral Small", custom: true },
@@ -111,14 +110,13 @@ function bot(effort?: EffortLevel, instanceId = "claude", model = "claude-opus-5
   };
 }
 
-function render(forBot: Bot, options: { contained?: boolean } = {}) {
+function render(forBot: Bot, options: { contained?: boolean; thread?: boolean } = {}) {
   fixture.values.length = Math.min(fixture.values.length, fixture.own);
   let tree: ReactNode = null;
   function Capture() {
     fixture.index = 0;
-    // The bot panel's Default model is contained and edits the bot, not a thread.
     tree = options.contained
-      ? ModelPicker({ bot: forBot, contained: true, label: "Default model" })
+      ? ModelPicker({ bot: forBot, contained: true, label: "Default model", ...(options.thread ? { threadId: forBot.threadId } : {}) })
       : ModelPicker({ bot: forBot, threadId: forBot.threadId });
     fixture.own = fixture.index;
     return tree;
@@ -127,7 +125,7 @@ function render(forBot: Bot, options: { contained?: boolean } = {}) {
   return { html, nodes: nodes(tree) };
 }
 
-function open(forBot: Bot, options: { contained?: boolean } = {}) {
+function open(forBot: Bot, options: { contained?: boolean; thread?: boolean } = {}) {
   const trigger = render(forBot, options).nodes.find((node) => node.props["data-tour"] === "model")!;
   (trigger.props.onClick as () => void)();
   return render(forBot, options);
@@ -136,7 +134,6 @@ function open(forBot: Bot, options: { contained?: boolean } = {}) {
 const pane = (rendered: ReturnType<typeof render>) =>
   rendered.nodes.find((node) => node.type === SimpleModelPane) as ReactElement<ComponentProps<typeof SimpleModelPane>> | undefined;
 const menu = (html: string) => html.slice(html.indexOf("data-model-picker-content"));
-// The pane itself uses no hooks, so its own element tree can be walked too.
 const inside = (rendered: ReturnType<typeof render>) => nodes(SimpleModelPane(pane(rendered)!.props));
 const region = (html: string, marker: string, next?: string) =>
   html.slice(html.indexOf(marker), next ? html.indexOf(next) : undefined);
@@ -165,9 +162,9 @@ describe("the model picker in Simple mode", () => {
     expect(opened.nodes.some((node) => node.type === ModelEngineRail)).toBe(false);
     expect(html).toContain("Claude");
     expect(html).toContain("Opus 5.5");
-    for (const step of ["Quick", "Balanced", "Deep", "Max"]) expect(html).toContain(`>${step}</button>`);
-    expect(html).not.toContain(">Deeper</button>");
-    expect(html).not.toContain("new chats too"); // every pick is also the bot's default
+    for (const step of ["Low", "Medium", "High", "X-High", "Max"]) expect(html).toContain(`>${step}</button>`);
+    expect(html).not.toContain(">Quick</button>");
+    expect(html).not.toContain("new chats too");
   });
 
   it("is a narrow popover, and the full picker keeps its own width", () => {
@@ -196,10 +193,10 @@ describe("the model picker in Simple mode", () => {
     const list = region(html, "data-simple-models", "data-simple-effort-band");
     expect(list).toContain("Opus 5.5");
     expect(list).toContain("Sonnet 5.5");
-    expect(list).not.toContain(">Deep</button>");
+    expect(list).not.toContain(">High</button>");
 
     const bottom = region(html, "data-simple-effort-band");
-    expect(bottom).toContain(">Deep</button>");
+    expect(bottom).toContain(">High</button>");
     expect(bottom).not.toContain("new chats too");
     expect(bottom).toContain("Manage AI accounts");
   });
@@ -212,10 +209,8 @@ describe("the model picker in Simple mode", () => {
     const column = region(menu(opened.html), "data-simple-providers", "data-simple-models");
     for (const name of ["Claude", "OpenAI", "Grok", "Cursor", "pi"]) expect(column).toContain(`>${name}</span>`);
     expect(column.match(/data-simple-key/g)).toHaveLength(2);
-    // The key on the mark says "API key", so the name does not say it again.
     expect(column).not.toContain("(API key)");
 
-    // The two OpenAI rows (and the two Claude rows) differ by the key alone.
     const rows = inside(opened).filter((node) => node.props["data-simple-provider"] !== undefined);
     const byId = (id: string) => rows.find((node) => node.props["data-simple-provider"] === id)!;
     const hasKey = (id: string) => nodes(byId(id).props.children).some((node) => node.props["data-simple-key"] !== undefined);
@@ -286,8 +281,6 @@ describe("the model picker in Simple mode", () => {
     const all = render(forBot);
     expect(labels(all)).toHaveLength(15);
     expect(labels(all).slice(0, 5)).toEqual(suggested);
-    // The same button stays where it was (so keyboard focus does too) and
-    // now folds the list back.
     expect(pane(all)!.props.showAll).toMatchObject({ count: 15, open: true });
     expect(menu(all.html)).not.toContain("Show all 15 models");
     expect(menu(all.html)).toContain('aria-expanded="true"');
@@ -310,7 +303,6 @@ describe("the model picker in Simple mode", () => {
     const forBot = bot(undefined, "claude", "model-1");
     pane(open(forBot))!.props.showAll!.onToggle();
     const search = pane(render(forBot))!.props.search as ReactElement<{ onChange: (value: string) => void }>;
-    // A search narrows the list, so the toggle steps aside until it is cleared.
     search.props.onChange("model 1");
     expect(pane(render(forBot))!.props.showAll).toBeNull();
     search.props.onChange("");
@@ -378,8 +370,6 @@ describe("the model picker in Simple mode", () => {
     const opened = open(forBot);
     expect(pane(opened)!.props.signIn).toEqual({ name: "Claude" });
 
-    // Clicking the row it is already on, or browsing away and back, must not
-    // trade the local list (and the model the bot is on) for "needs setup".
     pane(opened)!.props.onProvider(signedOut);
     const again = render(forBot);
     expect(pane(again)!.props.needsSetup).toBeNull();
@@ -393,7 +383,6 @@ describe("the model picker in Simple mode", () => {
     const list = region(menu(back.html), "data-simple-models", "data-simple-effort-band");
     expect(list).toContain("Sign in for Claude&#x27;s own models");
     click(inside(back).find((node) => node.props["data-simple-sign-in"] !== undefined));
-    // The full picker opens on the sign-in, not on the local list.
     const full = render(forBot);
     expect(pane(full)).toBeUndefined();
     const setup = full.nodes.find((node) => node.type === EngineSetup);
@@ -420,8 +409,8 @@ describe("the model picker in Simple mode", () => {
     expect(region(html, "data-simple-effort-band")).toContain('aria-label="Reasoning effort"');
   });
 
-  it("names the effort in plain words on the header chip", () => {
-    expect(render(bot("high")).html).toContain("· Deep");
+  it("names the effort by the provider's own level on the header chip", () => {
+    expect(render(bot("high")).html).toContain("· High");
     fixture.advanced = true;
     expect(render(bot("high")).html).toContain("· High");
   });
@@ -481,7 +470,7 @@ describe("the model picker in Simple mode", () => {
     const variants = [{ id: "default", label: "Default" }, { id: "high", label: "High" }];
     fixture.instances = [{ ...claude(true, [{ id: "claude-opus-5-5", label: "Opus 5.5", variants }]), capabilities: { modelVariants: true } }];
     const row = pane(open(bot()))!.props.variantsRow as ReactElement<ComponentProps<typeof ModelVariantRow>>;
-    const select = nodes(ModelVariantRow(row.props)).find((node) => node.type === "select")!;
+    const select = nodes(ModelVariantRow(row.props)).find((node) => node.type === Select)!;
     (select.props.onChange as (event: unknown) => void)({ target: { value: "1" } });
     expect(fixture.dispatch).toHaveBeenLastCalledWith({
       type: "setModel", botId: "scout", threadId: "thread-scout",
@@ -503,7 +492,6 @@ describe("the model picker in Simple mode", () => {
     const simple = pane(opened)!;
     expect(simple).toBeDefined();
     expect(opened.html).toContain("Default model");
-    // In-flow, not a floating popover: it sits under the trigger inside the panel.
     const content = opened.nodes.find((node) => node.props["data-model-picker-content"] !== undefined)!;
     expect(String(content.props.className)).toContain("relative");
     expect(String(content.props.className)).not.toContain("absolute");
@@ -513,14 +501,29 @@ describe("the model picker in Simple mode", () => {
       selection: expect.objectContaining({ model: "claude-haiku-4-5-20251001" }),
     }));
     simple.props.effort!.onPick("max");
-    // No thread: the effort goes to the bot's default, as the full Model section's row does.
     expect(fixture.dispatch).toHaveBeenLastCalledWith({
       type: "setModel", botId: "scout", threadId: undefined,
       selection: expect.objectContaining({ effort: "max" }),
     });
   });
 
-  it("writes the real effort level behind a friendly step", () => {
+  it.each([[true, true], [false, false], [null, false]] as const)(
+    "lets the bot panel's picker, given the open thread, set the default only for the Cloud owner (owner: %s)",
+    (ownerOrAdmin, updatesDefault) => {
+      fixture.cloudHome = true;
+      fixture.ownerOrAdmin = ownerOrAdmin;
+      const simple = pane(open(bot(), { contained: true, thread: true }))!;
+      simple.props.onPick("claude-haiku-4-5-20251001");
+      expect(fixture.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({
+        type: "setModel", botId: "scout", threadId: "thread-scout", updateBotDefault: updatesDefault,
+      }));
+      simple.props.effort!.onPick("max");
+      expect(fixture.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ type: "setModel", threadId: "thread-scout" }));
+      expect((fixture.dispatch as ReturnType<typeof vi.fn>).mock.lastCall![0].updateBotDefault).toBe(updatesDefault ? true : undefined);
+    },
+  );
+
+  it("writes the picked effort level", () => {
     pane(open(bot()))!.props.effort!.onPick("high");
     expect(fixture.dispatch).toHaveBeenLastCalledWith({
       type: "setModel", botId: "scout", threadId: "thread-scout", updateBotDefault: true,
@@ -528,8 +531,8 @@ describe("the model picker in Simple mode", () => {
     });
   });
 
-  it("keeps an unusual level the bot already uses visible", () => {
-    expect(pane(open(bot("xhigh")))!.props.effort!.levels).toContain("xhigh");
+  it("offers every level the engine reports, none hidden", () => {
+    expect(pane(open(bot("xhigh")))!.props.effort!.levels).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 
   it("sends a provider that needs sign-in to the full picker's setup", () => {
@@ -559,7 +562,7 @@ describe("the model picker in Simple mode", () => {
     const forBot = bot();
     pane(open(forBot))!.props.onSetUp();
     const trigger = render(forBot).nodes.find((node) => node.props["data-tour"] === "model")!;
-    (trigger.props.onClick as () => void)(); // close
+    (trigger.props.onClick as () => void)();
     expect(pane(open(forBot))).toBeDefined();
   });
 
@@ -665,7 +668,6 @@ describe("the model picker in Simple mode", () => {
     expect(pane(browsed)!.props.needsSetup).toBeNull();
     expect(labels(browsed)).toEqual(["GPT-5.6 (plan)"]);
 
-    // The signed-out account is still a select away, and says what it needs.
     (pane(browsed)!.props.account as ReactElement<ComponentProps<typeof ClaudeAccountSelect>>).props.onSelect(signedOutCodex);
     const onCodex = render(forBot);
     expect(pane(onCodex)!.props.needsSetup).toEqual({ name: "Codex" });
@@ -710,7 +712,6 @@ describe("the model picker in Simple mode", () => {
     const opened = open(forBot);
     expect(labels(opened)).not.toContain("amazon-bedrock");
     expect(route(row(opened, "Claude Sonnet 4.5 · anthropic"))).toBe("anthropic");
-    // A name the list does not repeat stays a name; its hint still says the route.
     expect(route(row(opened, "GPT-5.6 · openai"))).toBeUndefined();
     expect(row(opened, "GPT-5.6 · openai").props.title).toContain("openai");
 
@@ -729,7 +730,6 @@ describe("the model picker in Simple mode", () => {
     pane(opened)!.props.showAll!.onToggle();
     expect(fixture.refreshModels).toHaveBeenLastCalledWith("claude");
 
-    // Engines with no local models have none to look for.
     pane(render(forBot))!.props.onProvider(grok);
     pane(render(forBot))!.props.onProvider(codexMany);
     pane(render(forBot))!.props.showAll!.onToggle();
@@ -755,12 +755,10 @@ describe("the model picker in Simple mode", () => {
     expect(row.type).toBe(ModelVariantRow);
     expect(row.props).toMatchObject({ compact: true, wide: true });
     const bottom = region(menu(opened.html), "data-simple-effort-band");
-    const select = bottom.slice(bottom.indexOf("<select"), bottom.indexOf(">", bottom.indexOf("<select")));
-    expect(select).toContain('aria-label="Reasoning variant"');
-    expect(select).toContain("flex-1");
-    expect(select).not.toContain("max-w-[65%]");
-    // A closed select shows only its choice ("Use session setting"), so it
-    // keeps a one-word name beside it; the question stays gone.
+    const field = bottom.slice(bottom.lastIndexOf("<div", bottom.indexOf("<select")), bottom.indexOf(">", bottom.indexOf("<select")));
+    expect(field).toContain('aria-label="Reasoning variant"');
+    expect(field).toContain("flex-1");
+    expect(field).not.toContain("max-w-[65%]");
     expect(bottom.indexOf(">Reasoning</span>")).toBeGreaterThan(-1);
     expect(bottom.indexOf(">Reasoning</span>")).toBeLessThan(bottom.indexOf("<select"));
     expect(bottom).not.toContain(">Quick</button>");
@@ -778,7 +776,6 @@ describe("the model picker in Simple mode", () => {
 describe("a thread's picker and its bot's model", () => {
   const opus = { instanceId: "claude", model: "claude-opus-5-5" };
   const haiku = { instanceId: "claude", model: "claude-haiku-4-5-20251001" };
-  /** The bot as the store holds it (its model is Opus), and the thread's view of it. */
   function scout(threadModel: typeof opus | null, others: Array<{ threadId: string; model: typeof opus | null }> = []) {
     const profile: Bot = { ...bot(), tasks: [
       { threadId: "thread-scout", title: "This one", createdAt: 1, modelSelection: threadModel ?? opus, followsBotModel: threadModel === null },

@@ -1,7 +1,3 @@
-// Write a command: a name, a one-line description, and the instructions the
-// bot follows when someone types `/name` in a chat. Saved as an ordinary
-// skill through the bot-creation template route, so it is listed, switched
-// off, and removed with the bot's other skills above.
 import { SquareSlash } from "lucide-react";
 import { useState } from "react";
 

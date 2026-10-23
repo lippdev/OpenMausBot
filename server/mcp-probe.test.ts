@@ -23,9 +23,7 @@ function whopSizedCatalog() {
 
 const fakeServer = fileURLToPath(new URL("./testing/fake-mcp-server.ts", import.meta.url));
 
-/** Let real I/O (sockets, child pipes) run while timers are faked. Bounded
- * by real time, not a count of turns: a loaded CI runner can need far more
- * turns for the same round trips (Date is not faked here). */
+/** Bounded by real time, not a count of turns: a loaded CI runner can need far more turns for the same round trips. */
 async function untilReal(condition: () => boolean, limitMs = 15_000): Promise<void> {
   const started = Date.now();
   while (!condition() && Date.now() - started < limitMs) {
@@ -34,7 +32,6 @@ async function untilReal(condition: () => boolean, limitMs = 15_000): Promise<vo
   expect(condition()).toBe(true);
 }
 
-/** Settles `pending` into a readable state without awaiting it. */
 function watch<T>(pending: Promise<T>): { done: boolean; value?: T } {
   const state: { done: boolean; value?: T } = { done: false };
   void pending.then((value) => { state.done = true; state.value = value; });
@@ -142,7 +139,6 @@ describe("remote MCP probe", () => {
       await expect(probeMcpServer({ type: "http", url: fake.url, headers: { Authorization: "Bearer tok-docs" }, enabled: false }, 2_000))
         .resolves.toEqual({ ok: true, tools });
       expect(fake.seenHeaders[0]?.authorization).toBe("Bearer tok-docs");
-      // the handshake is complete before the tools are asked for
       expect(fake.seenHeaders.length).toBeGreaterThanOrEqual(3);
     } finally {
       await fake.close();

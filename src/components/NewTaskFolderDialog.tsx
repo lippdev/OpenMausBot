@@ -5,8 +5,7 @@ import { useStore, type Bot } from "@/state/store";
 import { t } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/use-modal-dialog";
 
-/** An explicit pin is chosen while creating a thread, never by moving the
- * working directory of a provider session that already exists. */
+/** A pin is chosen while creating a thread, never by moving the working directory of an existing provider session. */
 export function NewTaskFolderDialog({ bot, onClose, onReturnFocus }: { bot: Bot; onClose: () => void; onReturnFocus?: () => void }) {
   const { dispatch } = useStore();
   const [cwd, setCwd] = useState(bot.cwd ?? "");
@@ -17,8 +16,6 @@ export function NewTaskFolderDialog({ bot, onClose, onReturnFocus }: { bot: Bot;
   const input = useRef<HTMLInputElement>(null);
   const close = () => { if (!pending.current) onClose(); };
   useModalDialog(dialog, close);
-  // A menu item may disappear before this dialog closes. Its owner supplies
-  // a stable fallback after the modal hook restores the original opener.
   const returnFocus = useRef(onReturnFocus);
   returnFocus.current = onReturnFocus;
   useEffect(() => () => { returnFocus.current?.(); }, []);

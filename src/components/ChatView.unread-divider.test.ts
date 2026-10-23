@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// The New divider in an open chat: it sits above the first message that came
-// in while the person was away, stays there while more stream in, and fades
-// once they write back. None of it re-renders a row.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -21,7 +18,7 @@ vi.mock("./DesktopCapabilities", async (importOriginal) => ({
   useDesktopCapabilities: () => ({ capabilities: { dictation: { available: false }, host: { packaged: true, platform: "other" }, localComputer: { available: false } }, ready: true }),
 }));
 vi.mock("@/lib/analytics", () => ({ track: vi.fn() }));
-vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true }));
+vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true, useReactor: () => "user" }));
 vi.mock("./ModelPicker", () => ({ ModelPicker: () => null }));
 
 const { ChatView } = await import("./ChatView");
@@ -59,7 +56,6 @@ async function apply(action: Action) {
   return renders.botText;
 }
 const divider = () => document.querySelector<HTMLElement>('[role="separator"][data-unread-divider]');
-/** The row right under the divider. */
 const rowUnder = () => divider()?.closest("[data-mid]")?.getAttribute("data-mid") ?? null;
 
 beforeAll(async () => {
@@ -97,7 +93,6 @@ describe("the New divider in a chat", () => {
   });
 
   it("holds still while more streams in", async () => {
-    // the new row, and the answer before it handing Regenerate on
     expect(await apply({ type: "messageAdded", threadId: "pepper-thread", message: line("b6", "bot", 6, "b5") })).toBe(2);
     expect(rowUnder()).toBe("b4");
     await vi.advanceTimersByTimeAsync(UNREAD_DIVIDER_LINGER_MS + UNREAD_DIVIDER_FADE_MS);
@@ -109,7 +104,6 @@ describe("the New divider in a chat", () => {
     expect(divider()?.className).not.toContain("opacity-0");
     renders.botText = 0;
     await vi.advanceTimersByTimeAsync(UNREAD_DIVIDER_LINGER_MS);
-    // and the render that timer asked for
     await vi.advanceTimersByTimeAsync(0);
     expect(divider()?.className).toContain("opacity-0");
     expect(divider()?.className).toContain("grid-rows-[0fr]");

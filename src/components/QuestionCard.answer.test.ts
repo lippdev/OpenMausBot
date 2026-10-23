@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// Answering in one step: a single pick sends itself, and an open question
-// is a text field from the start, where Enter sends and Shift+Enter breaks
-// the line.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,8 +26,7 @@ function mount(questions: AskQuestion[]) {
   act(() => root.render(createElement(BotEditorStore, { value: store, children: createElement(QuestionCard, { threadId: "t1", bot: { name: "Dev" }, message }) })));
 }
 
-// an option row reads "A" (its key badge) then the label, so match the
-// label at the end of the text
+// An option row reads "A" (its key badge) then the label, so match the label at the end.
 const button = (label: string) =>
   Array.from(host.querySelectorAll("button")).find((element) => {
     const text = element.textContent?.trim() ?? "";

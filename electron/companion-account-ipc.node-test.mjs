@@ -1,7 +1,3 @@
-// The desktop's own wiring for the HTTPS address on demand, run from the
-// production source of main.mjs: which service options it passes, how the
-// need is read from the running companion, and the local-only prepare channel
-// an organisation's policy can refuse.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -56,7 +52,6 @@ test("the desktop holds its address on demand, read from the running companion",
 
   assert.equal(options.onDemand, true);
   assert.equal(options.autoRecover, true);
-  // Remote access off: nothing to ask, and nothing asked.
   assert.equal(await options.managedEndpointNeeded(), null);
   assert.equal(stateReads.length, 0);
 

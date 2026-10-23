@@ -5,10 +5,10 @@ import { browserProfileDeletionBlockReason, browserProfilesMutation, newBrowserP
 import { isOwnerOrAdmin, readSessionState } from "@/lib/session";
 import { t } from "@/lib/i18n";
 import { SignedInSites } from "./SignedInSites";
+import { Select } from "./Select";
+import { browserScope } from "@/lib/team-browser";
 
-/** Browser-panel and workspace settings share one editor. The server owns
- * session routing and erasure; this UI never handles cookies or partitions.
- * Each profile's browser is the built-in one or the person's own Chrome. */
+/** Security: the server owns session routing and erasure; this UI never handles cookies or partitions. */
 export function BrowserProfilesManager({ bot, onProfileChanged, disabled = false }: {
   bot?: Bot;
   onProfileChanged?: () => void;
@@ -16,7 +16,6 @@ export function BrowserProfilesManager({ bot, onProfileChanged, disabled = false
 }) {
   const { state, dispatch, flushBotPatches } = useStore();
   const profiles = state.config?.browserProfiles ?? [];
-  // My Chrome needs the person's Chrome on the computer the bots run on.
   const myChrome = state.config?.browserEngine?.myChrome === true;
   const bots = state.bots ?? [];
   const currentBot = bot ? bots.find((candidate) => candidate.id === bot.id) ?? bot : undefined;
@@ -39,8 +38,6 @@ export function BrowserProfilesManager({ bot, onProfileChanged, disabled = false
   const failed = async (cause: unknown) => {
     setError(cause instanceof Error ? cause.message : t("settings.profiles.saveError"));
     if (cause instanceof ApiError && cause.status === 409) {
-      // Preserve typed names and the error. Refresh the base list, then let
-      // the person review it and explicitly retry rather than merge a wipe.
       try {
         const config: ConfigStatus = await api("/api/config");
         dispatch({ type: "configStatus", config });
@@ -112,7 +109,6 @@ export function BrowserProfilesManager({ bot, onProfileChanged, disabled = false
     }
   };
 
-  // No confirm step: choosing My Chrome is the person's own decision.
   const setBrowser = async (profile: BrowserProfile, browser: string) => {
     if (locked || (profile.browser ?? "") === browser) return;
     setBusy(true);
@@ -129,8 +125,7 @@ export function BrowserProfilesManager({ bot, onProfileChanged, disabled = false
     setBusy(true);
     setError("");
     try {
-      // Drain coalesced settings edits before the explicit profile change so
-      // an older queued patch cannot put the bot back on its previous login.
+      // Drain coalesced settings edits first, so an older queued patch cannot put the bot back on its previous login.
       await flushBotPatches(currentBot.id);
       const result: { bot: BotAnnouncement } = await api(`/api/bots/${encodeURIComponent(currentBot.id)}`, {
         method: "PATCH",
@@ -158,25 +153,24 @@ export function BrowserProfilesManager({ bot, onProfileChanged, disabled = false
       {currentBot && (
         <div className="flex flex-col gap-1.5">
           <label htmlFor={`${fieldId}-profile`} className="text-[12px] font-medium text-ink">{t("settings.profiles.browserSession")}</label>
-          <select
+          <Select className="w-full"
             id={`${fieldId}-profile`}
             value={selected}
             disabled={locked || currentBot.busy}
             onChange={(event) => void select(event.target.value)}
-            className={inputClass}
           >
             <option value="">{t("settings.profiles.own")}</option>
             {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
             <option value="guest">{t("settings.profiles.temporary")}</option>
             {selected && selected !== "guest" && !profiles.some((profile) => profile.id === selected)
               ? <option value={selected} disabled>{t("settings.profiles.removed")}</option> : null}
-          </select>
+          </Select>
           <p className="text-[11px] leading-relaxed text-ink-secondary">
             {currentBot.busy ? t("settings.profiles.stopToSwitch") : selected === "guest" ? t("settings.profiles.temporaryHint") : t("settings.profiles.sharedHint")}
           </p>
           {selectedProfile?.browser === "chrome" && myChrome ? chromeNote
             : (selected === "" || selectedProfile) && (
-              <SignedInSites key={`${currentBot.id}:${selected}`} target={{ bot: currentBot.id }} sharedBy={selected ? usersOf(selected) : [currentBot.name]} disabled={locked} />
+              <SignedInSites key={`${currentBot.id}:${selected}`} target={{ bot: currentBot.id }} scope={browserScope(state.config?.team, bot?.threadId)} sharedBy={selected ? usersOf(selected) : [currentBot.name]} disabled={locked} />
             )}
         </div>
       )}
@@ -217,10 +211,10 @@ export function BrowserProfilesManager({ bot, onProfileChanged, disabled = false
                   <div className="flex min-w-0 flex-col gap-2 pl-6 pt-1">
                     <label className="flex items-center gap-2 text-[12px] text-ink-secondary">
                       {t("settings.profiles.browserLabel")}
-                      <select value={profile.browser ?? ""} disabled={locked} onChange={(event) => void setBrowser(profile, event.target.value)} className="rounded-md border border-hairline/40 bg-inset px-2 py-1 text-[12px] text-ink outline-none focus:border-accent disabled:opacity-50">
+                      <Select size="sm" value={profile.browser ?? ""} disabled={locked} onChange={(event) => void setBrowser(profile, event.target.value)}>
                         <option value="">{t("settings.profiles.builtIn")}</option>
                         <option value="chrome" disabled={!myChrome}>{t("settings.profiles.myChrome")}</option>
-                      </select>
+                      </Select>
                     </label>
                     {chrome ? chromeNote : <SignedInSites target={{ profile: profile.id }} sharedBy={users} disabled={locked} />}
                   </div>

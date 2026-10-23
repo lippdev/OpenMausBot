@@ -4,10 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import { readBody } from "./http.ts";
 
-/** A request body that arrives in exactly these chunks. */
 const request = (chunks: Buffer[]) => Readable.from(chunks) as unknown as IncomingMessage;
 
-/** Split a UTF-8 buffer inside the first multi-byte character after `from`. */
 function splitInsideCharacter(bytes: Buffer, from: number): [Buffer, Buffer] {
   let cut = from;
   while ((bytes[cut]! & 0xc0) !== 0x80) cut += 1;

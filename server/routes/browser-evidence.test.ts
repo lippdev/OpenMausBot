@@ -1,5 +1,3 @@
-// The recorded browser steps through the route table, against a real store
-// in a temporary folder.
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -70,12 +68,10 @@ describe("recorded browser step routes", () => {
     for (const path of [`/api/threads/thread-1/evidence/${GEN}/step-999999.jpg`, `/api/threads/other/evidence/${GEN}/${one.image}`, `/api/threads/other/evidence`]) {
       expect((await fetch(`${base}${path}`)).status, path).toBe(404);
     }
-    // A conversation that no longer exists answers nothing, even before the sweep removes its folder.
     const gone = await record("gone-1", Buffer.from("jpeg of a deleted conversation"));
     for (const path of [`/api/threads/gone-1/evidence/${GEN}/${gone.image}`, "/api/threads/gone-1/evidence.tar", "/api/threads/gone-1/evidence"]) {
       expect((await fetch(`${base}${path}`)).status, path).toBe(404);
     }
-    // Not this module's: a malformed name passes to the server's other routes.
     expect(await (await fetch(`${base}/api/threads/thread-1/evidence/${GEN}/..%2Fsteps.jsonl`)).json()).toEqual({ from: "inline routes" });
     expect((await fetch(`${base}/api/threads/thread-1/evidence?limit=0`)).status).toBe(400);
     expect((await fetch(`${base}/api/threads/thread-1/evidence?generation=../x`)).status).toBe(400);

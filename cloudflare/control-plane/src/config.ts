@@ -15,7 +15,7 @@ export interface CapacityConfig {
   /** Zone DNS record quota used for the usage alert. */
   dnsRecordLimit: number;
   /** A tunnel offline for at least this long (and an installation that has
-   * been quiet as long) may be reclaimed. Never below seven days. */
+   * been quiet as long) may be reclaimed. Never below three days. */
   offlineReclaimMs: number;
   /** `observe` evaluates and logs reclaim candidates without marking any. */
   reclaimMode: TunnelReclaimMode;
@@ -38,10 +38,9 @@ export interface EndpointAccount {
   /** New endpoints go here only for installations reporting at least this
    * version (`x.y.z`), or for any installation when null. */
   minAppVersion: string | null;
-  /** False keeps every endpoint the account holds but gives it no new ones:
-   * it is never chosen for a new endpoint and never a row's relocation
-   * target, and it leaves the pool /healthz and the pool alert describe.
-   * Always true for the primary. */
+  /** False keeps every endpoint the account holds but gives it no new ones,
+   * and leaves it out of the pool /healthz describes. Always true for the
+   * primary. */
   newEndpoints: boolean;
   /** Account tunnel quota: ranks accounts, tells a quota 429 from a rate
    * limit, and drives the usage alert. */
@@ -68,19 +67,17 @@ const DAY_MS = 24 * 60 * 60 * 1_000;
 export const DEFAULT_TUNNEL_LIMIT = 1_000;
 export const DEFAULT_DNS_RECORD_LIMIT = 1_000;
 export const DEFAULT_OFFLINE_RECLAIM_DAYS = 21;
-export const MIN_OFFLINE_RECLAIM_DAYS = 7;
-// Each cleanup makes at most ten Cloudflare API calls. Twenty rows plus the
-// two capacity reads stay near 200 calls per five-minute run: well under the
-// 1,200-requests-per-five-minutes API token limit and the Workers Paid
-// 10,000-subrequest invocation limit. A run also makes up to two Cache API
-// deletes (the /healthz copy), which count as subrequests too. Lower this to 4
-// on Workers Free, whose invocation limit is 50 subrequests (4 x 10 + 2 + 2 = 44).
+export const MIN_OFFLINE_RECLAIM_DAYS = 3;
+// Each cleanup makes at most ten Cloudflare API calls: twenty rows plus the two
+// capacity reads stay near 200 calls per five-minute run, under the token's
+// 1,200-per-five-minutes limit and Workers Paid's 10,000 subrequests. Use 4 on
+// Workers Free, whose limit is 50 subrequests (4 x 10 + 2 + 2 Cache API
+// deletes = 44).
 export const DEFAULT_CLEANUP_SWEEP_LIMIT = 20;
 export const MAX_CLEANUP_SWEEP_LIMIT = 50;
-/** The primary plus at most three accounts from CLOUDFLARE_ENDPOINT_ACCOUNTS.
- * Each account adds two Cloudflare reads (a tunnel page and a DNS count) to
- * every cron run: on Workers Free, 4 cleanup rows x 10 calls + 4 x 2 + two
- * Cache API deletes is the whole 50-subrequest budget. */
+/** Each account adds two Cloudflare reads per cron run: on Workers Free, 4
+ * cleanup rows x 10 calls + 4 x 2 + two Cache API deletes is the whole
+ * 50-subrequest budget. */
 export const MAX_ENDPOINT_ACCOUNTS = 4;
 
 function boundedIntegerVar(
@@ -110,8 +107,7 @@ function reclaimMode(value: unknown): TunnelReclaimMode {
   return "observe";
 }
 
-/** Optional tuning variables. Each has a safe default so an older deployment
- * configuration without them keeps working. */
+/** Optional tuning variables, each with a safe default. */
 export function readCapacityConfig(env: Partial<Record<string, unknown>>): CapacityConfig {
   return {
     cleanupSweepLimit: boundedIntegerVar(
@@ -201,15 +197,11 @@ const endpointAccountSchema = z.strictObject({
 });
 
 /**
- * Optional accounts beyond the primary, from CLOUDFLARE_ENDPOINT_ACCOUNTS: a
- * JSON array (a wrangler.jsonc JSON var, or the same JSON as a string or a
- * secret) of
- * `{ accountId, zoneId, companionHostSuffix, apiTokenSecret, tunnelLimit?,
- * dnsRecordLimit?, minAppVersion?, newEndpoints? }`.
- *
- * A bad entry never throws: sign-in, recovery, and every endpoint already in
- * a good account must keep working. It is dropped and reported as a redacted
- * issue code, and endpoints tied to it refuse to act until it is fixed.
+ * CLOUDFLARE_ENDPOINT_ACCOUNTS: a JSON array (a wrangler.jsonc JSON var, or the
+ * same JSON as a string or a secret) of `{ accountId, zoneId,
+ * companionHostSuffix, apiTokenSecret, tunnelLimit?, dnsRecordLimit?,
+ * minAppVersion?, newEndpoints? }`. A bad entry never throws: it is dropped and
+ * reported as a redacted issue code, and endpoints tied to it refuse to act.
  */
 export function readEndpointAccounts(
   env: Partial<Record<string, unknown>>,

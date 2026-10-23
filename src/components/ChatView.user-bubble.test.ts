@@ -16,7 +16,7 @@ vi.mock("./DesktopCapabilities", () => ({
 vi.mock("@/lib/analytics", () => ({ track: vi.fn() }));
 vi.mock("@/lib/thread-preferences", () => ({ useShowThreads: () => false, useShowThreadsChoice: () => false, setShowThreads: vi.fn() }));
 vi.mock("@/lib/interface-mode", () => ({ useAdvancedMode: () => false, setAdvancedMode: vi.fn() }));
-vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true }));
+vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true, useReactor: () => "user" }));
 vi.mock("./CitationUI", () => ({ CitationSelectionToolbar: () => null, SentCitations: () => null }));
 vi.mock("./ModelPicker", () => ({ ModelPicker: () => null }));
 vi.mock("./ApprovalModeSelector", () => ({ ApprovalModeSelector: () => null }));
@@ -42,22 +42,22 @@ beforeEach(() => {
 });
 
 describe("bot-colored user bubbles", () => {
-  it("keeps the skin bubble until the setting is on", () => {
+  it("keeps the skin bubble when the setting is off", () => {
     const html = renderToStaticMarkup(createElement(ChatView, { bot }));
     expect(html).toContain("bg-bubble-user");
     expect(html).not.toContain("user-bubble-colored");
     expect(html).toContain("hello from me");
   });
 
-  it("paints the person's bubble with a deep shade of the bot and white text", () => {
+  it("paints the person's bubble with a gradient of the bot and readable text", () => {
     fixture.colorMine = true;
     const tone = userBubbleTone("yellow");
     const html = renderToStaticMarkup(createElement(ChatView, { bot }));
     expect(html).toContain("user-bubble-colored");
     expect(html).toContain(`background-color:${tone.background}`);
-    expect(html).toContain("--color-ink:#ffffff");
+    expect(html).toContain(`background-image:${tone.gradient}`);
+    expect(html).toContain(`--color-ink:${tone.ink}`);
     expect(html).toContain("hello from me");
-    // the bot's own bubble stays on the card, not the person's fill
     const mine = html.indexOf("user-bubble-colored");
     const reply = html.indexOf("hello back");
     expect(mine).toBeGreaterThan(-1);

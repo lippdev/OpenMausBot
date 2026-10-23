@@ -33,13 +33,10 @@ describe("room replies", () => {
       text("n1", "t1"),
       text("n2", "t1"),
       text("final", "t1", { turnTerminal: true }),
-      // a turn still running keeps every line
       text("live1", "t2"),
       text("live2", "t2"),
-      // a voice note is never folded away
       text("audio", "t3", { attachments: [{ kind: "audio", path: "/a.m4a", mime: "audio/mp4" }] } as Partial<Message>),
       text("t3final", "t3", { turnTerminal: true }),
-      // lines without a turn (older rows) are left alone
       text("legacy", undefined),
     ];
     expect([...roomTurnNarrationIds(messages)]).toEqual(["n1", "n2"]);

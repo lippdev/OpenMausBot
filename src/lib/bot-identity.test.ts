@@ -51,7 +51,6 @@ describe("room speaker colors", () => {
       const app = tokens["--color-app"];
       expect(ink, id).toBe(toneForSurface(MAUS_COLORS[color], app!));
       expect(contrastRatio(ink!, app!)).toBeGreaterThanOrEqual(4.5);
-      // the room avatar's highlight and shadow stay inside 18% of this tone
       const highlight = mixSrgb("#ffffff", ink!, 0.18);
       const shadow = mixSrgb("#000000", ink!, 0.18);
       expect(contrastRatio(highlight, app!)).toBeGreaterThanOrEqual(3);

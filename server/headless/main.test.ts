@@ -1,6 +1,3 @@
-// The command line as a script sees it: one JSON document on stdout with
-// --json, errors included; plain help for every verb; secrets redacted in
-// everything printed; and the published `openmausbot` reaching the verbs.
 import "../testing/scrub-ambient-omb-env.ts";
 
 import { spawn, spawnSync } from "node:child_process";

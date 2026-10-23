@@ -40,6 +40,7 @@ import {
   type LocalVmTarget,
   autoLocalVmAttachable,
 } from "./container-computer.ts";
+import { PIDS_LIMIT } from "./container-limits.ts";
 
 function runner(responses: Record<string, string | Error>) {
   const calls: string[] = [];
@@ -383,7 +384,6 @@ describe("containerComputerStatus", () => {
       ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
       ["CAP_SETGID", "CAP_SETUID", "CAP_SYS_CHROOT"],
     )).toBe(true);
-    // Existing two-capability containers must be recreated, not accepted as ready.
     expect(podmanSecurityIsHardened(
       config, ["CAP_SETGID", "CAP_SETUID"], ["CAP_SETGID", "CAP_SETUID"],
     )).toBe(false);
@@ -563,8 +563,6 @@ describe("containerComputerStatus", () => {
   });
 
   it("rejects a privileged or host-namespaced Local VM even with correct limits", async () => {
-    // pins the stricter shared hardening check: resource limits alone are
-    // not hardening — privilege and namespace escapes disqualify the VM too
     const base = JSON.parse(readyInspect())[0].HostConfig;
     for (const override of [
       { Privileged: true },
@@ -648,7 +646,7 @@ describe("containerComputerStatus", () => {
       desktop_error: null,
       ready: true,
       problem: null,
-      driver_version: "0.20.0",
+      driver_version: "0.37.0",
     });
     expect(status.viewer_url).toContain("#autoconnect=true&resize=scale&password=secret123");
   });
@@ -665,6 +663,40 @@ describe("containerComputerStatus", () => {
     expect(status.viewer_url).toContain("#autoconnect=true&resize=scale&password=secret123");
     expect(status.managed).toBe(true);
     expect(fake.calls.some(call => call.startsWith("docker exec"))).toBe(false);
+  });
+
+  it("raises the process cap of a desktop made under an older, lower one, in place and once", async () => {
+    const statusOf = async (botId: string, pids: number | null, targetLabel?: string) => {
+      const target = perBotLocalVmTarget(botId);
+      const detail = JSON.parse(perBotReadyInspect(botId, 49152, targetLabel))[0];
+      detail.HostConfig.PidsLimit = pids;
+      const update = `docker update --pids-limit ${PIDS_LIMIT} ${target.containerName}`;
+      const fake = runner({
+        "/usr/bin/which docker": "docker\n",
+        "/usr/bin/which podman": new Error("missing"),
+        "docker info --format {{.ServerVersion}}": "29\n",
+        [`docker image inspect ${IMAGE}`]: preparedImageInspect(),
+        [`docker inspect ${target.containerName}`]: JSON.stringify([detail]),
+        [update]: target.containerName,
+      });
+      const read = async () => {
+        await containerComputerStatus(fake.run, "linux", target, { probeDesktop: false });
+        await new Promise((resolve) => setImmediate(resolve));
+      };
+      await read();
+      const first = fake.calls.filter((call) => call === update).length;
+      await read();
+      return { first, total: fake.calls.filter((call) => call === update).length };
+    };
+
+    expect(PIDS_LIMIT, "Firefox alone needs about 430 threads for seven tabs").toBeGreaterThanOrEqual(4096);
+    expect(await statusOf("pids-old", 512), "a VM made under the 512 cap keeps crashing Firefox").toEqual({ first: 1, total: 1 });
+    expect(await statusOf("pids-current", PIDS_LIMIT)).toEqual({ first: 0, total: 0 });
+    expect(await statusOf("pids-unlimited", -1)).toEqual({ first: 0, total: 0 });
+    expect(await statusOf("pids-unset", null)).toEqual({ first: 0, total: 0 });
+    expect(await statusOf("pids-chosen", 1024), "a cap someone chose stays").toEqual({ first: 0, total: 0 });
+    expect(await statusOf("pids-foreign", 512, perBotLocalVmTarget("someone-else").label), "never another container")
+      .toEqual({ first: 0, total: 0 });
   });
 
   it("reports the bounded desktop startup error instead of waiting forever", async () => {
@@ -780,23 +812,28 @@ describe("Cua integration", () => {
     expect(connection.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
   });
 
-  it("builds an exact, checksum-verified Cua Driver 0.20.0 image", () => {
+  it("builds an exact, checksum-verified Cua Driver 0.37.0 image", () => {
     const dockerfile = managedImageDockerfile();
     expect(BASE_IMAGE).toMatch(/@sha256:[a-f0-9]{64}$/);
     expect(dockerfile).toContain(`FROM ${BASE_IMAGE}`);
-    expect(dockerfile).toContain("cua_driver-0.20.0-py3-none-manylinux_2_31_x86_64.whl");
-    expect(dockerfile).toContain("cua_driver-0.20.0-py3-none-manylinux_2_31_aarch64.whl");
+    expect(dockerfile).toContain("cua_driver-0.37.0-py3-none-manylinux_2_31_x86_64.whl");
+    expect(dockerfile).toContain("cua_driver-0.37.0-py3-none-manylinux_2_31_aarch64.whl");
     expect(dockerfile).not.toContain("/tmp/cua-driver.whl");
     expect(dockerfile).toContain("sha256sum -c -");
     expect(dockerfile).toContain(`install -D -m 0755 "$driver_bin" ${CUA_EXECUTABLE}`);
     expect(dockerfile).toContain(`cua-driver ${CUA_DRIVER_VERSION}`);
     expect(dockerfile).toContain(`serve --socket ${CUA_SOCKET} --permission-mode standard`);
     expect(dockerfile).toContain("CUA_DRIVER_RS_TELEMETRY_ENABLED=0");
+    // 0.37.0 waits 800 ms after every foreground key, click or scroll for a window it might open, and glides its agent cursor
+    // for about 0.6 s before each pixel action; plain logs feed desktop_error.
+    expect(dockerfile).toContain(`CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=200 NO_COLOR=1 ${CUA_EXECUTABLE} serve`);
+    expect(dockerfile).toContain(`--permission-mode standard --cursor-reduced-motion on'`);
     expect(dockerfile).toContain("prepare-openmausbot-workspace.sh");
     expect(dockerfile).toContain('if ! chmod 0700 "$workspace"');
     expect(dockerfile).toContain('test -r "$directory" && test -w "$directory" && test -x "$directory"');
-    expect(dockerfile).toContain("migrate_profile google-chrome");
-    expect(dockerfile).toContain("migrate_profile chromium");
+    expect(dockerfile).toContain('migrate_profile "$HOME/.config/google-chrome" google-chrome');
+    expect(dockerfile).toContain('migrate_profile "$HOME/.config/chromium" chromium');
+    expect(dockerfile).toContain('migrate_profile "$HOME/.mozilla" mozilla');
     expect(dockerfile).toContain("SingletonLock");
     expect(dockerfile).toContain(`${IMAGE_LAYER_LABEL}="${IMAGE_LAYER_VERSION}"`);
     expect(dockerfile).toContain("did not become ready within 45 seconds");
@@ -810,18 +847,15 @@ describe("Cua integration", () => {
     expect(dockerfile).toContain("6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2");
     expect(dockerfile).toContain("/usr/local/share/licenses/noto-cjk/OFL.txt");
     expect(dockerfile).toContain("fc-cache -f");
-    expect(IMAGE_LAYER_VERSION).toBe("5");
+    expect(IMAGE_LAYER_VERSION).toBe("6");
   });
 
   it("rejects a zero-byte OpenSSL base image before the wheel download needs curl", () => {
     const dockerfile = managedImageDockerfile();
-    // both multiarch triplets, both OpenSSL libraries
     expect(dockerfile).toContain('"/lib/$lib_triplet/libssl.so.3"');
     expect(dockerfile).toContain('"/lib/$lib_triplet/libcrypto.so.3"');
     expect(dockerfile).toContain("[ ! -s \"$ssl_lib\" ]");
     expect(dockerfile).toContain("is zero bytes, so curl cannot start");
-    // the gate runs in the same RUN as the fetch, ahead of it — a defective
-    // layer must be named before curl has any chance to fail confusingly
     const gate = dockerfile.indexOf('[ ! -s "$ssl_lib" ]');
     const fetch = dockerfile.indexOf("curl -fsSL");
     expect(gate).toBeGreaterThan(-1);
@@ -1032,7 +1066,7 @@ describe("setupCommands", () => {
   it("limits resources and retains only the sandbox supervisor's identity-switch caps", () => {
     const command = setupCommands("docker", "linux").run!;
     expect(command).toContain("--memory 4g --memory-swap 4g");
-    expect(command).toContain("--cpus 2 --pids-limit 512");
+    expect(command).toContain("--cpus 2 --pids-limit 4096");
     expect(command).toContain("--ipc private --cgroupns private");
     expect(command).toContain("--cap-drop ALL --cap-add SETUID --cap-add SETGID");
     expect(command).toContain(`--label ${MANAGED_LABEL}=1`);
@@ -1165,7 +1199,6 @@ describe("Auto's Local VM eligibility", () => {
   it("attaches a ready desktop or one whose prepared image can be recreated, and nothing else", () => {
     expect(autoLocalVmAttachable({ ...base, ready: true, container: "running" })).toBe(true);
     expect(autoLocalVmAttachable(base)).toBe(true);
-    // Never a first-time setup, an unverified stopped image, or a dead daemon
     expect(autoLocalVmAttachable({ ...base, image: false })).toBe(false);
     expect(autoLocalVmAttachable({ ...base, daemonUp: false })).toBe(false);
     expect(autoLocalVmAttachable({ ...base, container: "stopped" })).toBe(false);

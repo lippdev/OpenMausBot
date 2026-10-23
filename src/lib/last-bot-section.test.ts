@@ -8,7 +8,6 @@ import {
   rememberBotSection,
 } from "./last-bot-section";
 
-/** A storage surface the test fills and reads back, the way the app does. */
 const surface = (initial: Record<string, string> = {}) => {
   const stored = new Map<string, string>(Object.entries(initial));
   return {
@@ -27,8 +26,6 @@ describe("last bot section", () => {
   });
 
   it("readLastBotSection ignores an unknown section id", () => {
-    // an id outside the rail, as an older or future build could leave,
-    // reads as absent rather than resuming somewhere meaningless
     vi.stubGlobal("localStorage", surface({ [LAST_BOT_SECTION_KEY]: "not-a-section" }));
     expect(readLastBotSection()).toBeNull();
   });

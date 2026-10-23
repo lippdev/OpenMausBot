@@ -1,6 +1,5 @@
 // @vitest-environment happy-dom
 // The real provider and dialog share a deliberately delayed HTTP response.
-// A rejected folder must not navigate away from the conversation underneath.
 import { createElement, useState, type Dispatch } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";

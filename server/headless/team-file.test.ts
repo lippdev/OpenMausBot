@@ -1,5 +1,3 @@
-// A team file read and checked: defaults under every bot, files read in from
-// beside it, and each rule that makes a file unusable named with where it is.
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -82,8 +80,7 @@ rooms:
   });
 
   it("reads a working folder by the rules of the system it is written for, never this computer's", () => {
-    // A team file applied from a Windows laptop to a Linux sandbox, or from
-    // Linux CI to a Windows workspace: the folder is the server's.
+    // Applied from a Windows laptop to a Linux sandbox, or the other way: the folder is the server's.
     const team = loadTeamFile(file(JSON.stringify({ version: 1, bots: [
       { name: "A", cwd: "/work/room/" }, { name: "B", cwd: "C:\\work\\room\\" }, { name: "C", cwd: "C:/work/visitors" },
       { name: "D", cwd: "\\\\nas\\share\\room" }, { name: "E", cwd: "/work//visitors/../room" },
@@ -94,9 +91,7 @@ rooms:
   });
 
   it("reads a file checked out on Windows exactly as on Linux: LF line ends, either path separator", () => {
-    // Git on Windows checks text out with CRLF; Linux CI with LF. Read as they
-    // are, each apply from the other machine would rewrite every soul and
-    // replace every skill, and --check would never pass.
+    // Git on Windows checks text out with CRLF and Linux CI with LF: each apply from the other would rewrite every file.
     mkdirSync(join(dir, "crlf", "skills", "report"), { recursive: true });
     writeFileSync(join(dir, "crlf", "soul.md"), "Lead the rehearsal.\r\nWrite report.md.\r\n");
     writeFileSync(join(dir, "crlf", "skills", "report", "SKILL.md"), "---\r\nname: report\r\ndescription: Write it.\r\n---\r\nBody.\r\n");
@@ -130,7 +125,6 @@ rooms:
     ["a bad tool selector", 'bots: [{ name: A, tools: { deny: ["Bash"] } }]', "selectors look like native:Bash"],
     ["a room member listed twice", "bots: [{ name: A }]\nrooms: [{ name: R, members: [A, a] }]", "a member is listed twice"],
     ["a responder from outside the room", "bots: [{ name: A }]\nrooms: [{ name: R, members: [A], responder: B }]", "responder must be everyone, mentions, or one of its members"],
-    // what the server would refuse part way through an apply, refused before the first write
     ["a title on two lines", 'bots: [{ name: A, title: "Buyer\\nand critic" }]', "bots[0].title: a title must fit on one line"],
     ["a name too long", `bots: [{ name: ${"n".repeat(BOT_PROFILE_LIMITS.name + 1)} }]`, `bots[0].name: must be at most ${BOT_PROFILE_LIMITS.name} characters`],
     ["a soul too long", `bots: [{ name: A, soul: ${"s".repeat(BOT_PROFILE_LIMITS.soul + 1)} }]`, `soul is over ${BOT_PROFILE_LIMITS.soul} bytes`],

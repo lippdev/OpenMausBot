@@ -1,7 +1,3 @@
-// Boundary markers: a Chief-proposable group says its changes arrive as a
-// card the owner confirms; an owner-only group says it never arrives as a
-// proposal. Both hide when no other Chief covers the bot's section and in
-// the draft editor, and sections with nothing proposal-eligible carry none.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

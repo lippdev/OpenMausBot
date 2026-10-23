@@ -53,8 +53,6 @@ describe("recordLiveCall", () => {
 describe("titleLiveCall", () => {
   const spoken = (id: string, text: string, callId: string): Message => ({ id, role: "user", kind: "text", text, via: "call", callId, at: 1 });
   const callRow = (extra: Partial<LiveCallRecord> = {}): Message => ({ id: "row", role: "bot", kind: "call", text: "Call with Ada · 1:42", call: record(extra), at: 2 });
-  /** A chat holding `messages` (the row last), whose title one-shot behaves as `title` does. The
-   * excerpt and the scrub are the real ones: the harness hands exactly these in. */
   function chat(messages: Message[], title: LiveCallTitleDeps["title"]) {
     return {
       messagesFor: () => messages,
@@ -113,12 +111,9 @@ describe("titleLiveCall", () => {
     const row = callRow();
     const boom = () => { throw new Error("boom"); };
     const asked = [spoken("m1", "what is the weather", "call-1"), row];
-    // the one-shot throws instead of returning a promise
     await expect(titleLiveCall(chat(asked, boom), { threadId: "t1", row })).resolves.toBeUndefined();
-    // the chat cannot be read
     const unreadable = { ...chat(asked, async () => "Weather"), messagesFor: boom };
     await expect(titleLiveCall(unreadable, { threadId: "t1", row })).resolves.toBeUndefined();
-    // the patch cannot be written
     const unwritable = { ...chat(asked, async () => "Weather"), patchMessage: vi.fn(boom) };
     await expect(titleLiveCall(unwritable, { threadId: "t1", row })).resolves.toBeUndefined();
     expect(unwritable.patchMessage).toHaveBeenCalledTimes(1);
@@ -158,8 +153,7 @@ describe("titleLiveCall", () => {
 });
 
 describe("live-call-record.ts", () => {
-  // server/steer-queue.ts imports this module at runtime: the store, the
-  // title machinery and the harness reach it only through injected deps.
+  // server/steer-queue.ts imports this module at runtime.
   it("imports nothing but a pure shared leaf at runtime", () => {
     const source = readFileSync(new URL("./live-call-record.ts", import.meta.url), "utf8");
     const runtimeImports = [...source.matchAll(/^import\s+(?!type\b)(?:[^;"]*?\sfrom\s+)?"([^"]+)"/gm)].map((match) => match[1]);

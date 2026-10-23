@@ -1,10 +1,4 @@
 // @vitest-environment happy-dom
-// Grok Build's setup card, wherever Grok is not ready: Settings → Engines,
-// My Cloud's sign-in and a failed turn's card all render this one. Signed out,
-// it is the in-app code, the same on the desktop, a server and My Cloud; the
-// `grok login` command stays behind "Prefer a terminal?" only where a
-// terminal runs on that machine. Where Grok cannot run and nobody here can
-// install it, it is one honest line and one action: an xAI key.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -15,7 +9,7 @@ import { BotEditorStore, type InstanceInfo, type useStore } from "@/state/store"
 import { EngineSetup, grokKeyInstead } from "./EngineSetup";
 
 const CURL = "curl -fsSL https://x.ai/cli/install.sh | bash";
-const NOT_INSTALLED = "Grok with your grok.com subscription isn't installed on this server. Use an xAI API key instead.";
+const NOT_INSTALLED = "Grok with your grok.com subscription isn't installed here. Use an xAI API key instead.";
 const grok = (snapshot: InstanceInfo["snapshot"]): InstanceInfo => ({
   instanceId: "grok", driverKind: "grokAgent", displayName: "Grok",
   models: { default: "grok-4.7", options: [] }, snapshot,
@@ -25,8 +19,6 @@ const grok = (snapshot: InstanceInfo["snapshot"]): InstanceInfo => ({
 const signedOut = grok({ state: "available", authenticated: false, version: "grok 1.0.41" });
 const missing = grok({ state: "unavailable", reason: "`grok` CLI not found" });
 
-// Where the page is: the desktop app's own window on its own server, the
-// desktop paired to another server, or a browser on a server's page.
 const desktop = { platform: "darwin", openInstallTerminal: vi.fn(async () => true), remoteClient: { active: false } };
 const pairedDesktop = { ...desktop, remoteClient: { active: true } };
 
@@ -57,7 +49,7 @@ describe("signed out: the in-app code", () => {
   it("signs in with xAI's code on a server's page, with no terminal command", () => {
     const html = render(signedOut, undefined);
     expect(html).toContain('data-device-sign-in="grok"');
-    expect(html).toContain("Sign in with your grok.com account so Grok runs on this server");
+    expect(html).toContain("Sign in with your grok.com account so your bots can use Grok");
     expect(html).toContain("Sign in to Grok");
     expect(html).not.toContain("grok login");
     expect(html).not.toContain("Prefer a terminal?");

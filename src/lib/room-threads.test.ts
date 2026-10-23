@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { roomSpeakerIds, roomThreadSpeakerId, roomThreadWorking, roomThreadsWorkingElsewhere } from "./room-threads";
+import { roomQueueLabel, roomSpeakerIds, roomThreadQueue, roomThreadSpeakerId, roomThreadWorking, roomThreadsWorkingElsewhere } from "./room-threads";
 import type { Group } from "@/state/store";
 
 type Room = Pick<Group, "threadId" | "working" | "busyBotId" | "tasks">;
 
 describe("room thread state", () => {
-  // The room's open thread is idle while two others run side by side; the
-  // room-level flag counts every thread, busyBotId only the open one's.
+  // The open thread idles while two others run: the room flag counts every thread, busyBotId only the open one's.
   const room: Room = {
     threadId: "open",
     working: true,
@@ -54,7 +53,22 @@ describe("room thread state", () => {
     expect(roomThreadSpeakerId(legacy, "open")).toBe("scout");
     expect(roomThreadSpeakerId(legacy, "other")).toBeNull();
     expect(roomThreadsWorkingElsewhere(legacy)).toBe(0);
-    // a bot-to-bot channel has no task list at all
     expect(roomThreadWorking({ threadId: "dm", working: true }, "dm")).toBe(true);
+  });
+});
+
+describe("room queue labels", () => {
+  const queue = [
+    { botId: "scout", threadId: "open", state: "running" as const, position: 1, of: 3 },
+    { botId: "pixel", threadId: "open", state: "queued" as const, position: 2, of: 3, waitingForBotId: "scout" },
+    { botId: "ada", threadId: "other", state: "queued" as const, position: 2, of: 2 },
+  ];
+
+  it("lists only the open thread's waiting members and says on whom they wait", () => {
+    const waiting = roomThreadQueue({ queue }, "open");
+    expect(waiting.map((entry) => entry.botId)).toEqual(["pixel"]);
+    expect(roomQueueLabel(waiting[0]!, (id) => (id === "scout" ? "Scout" : undefined))).toBe("Queued · waiting for Scout (2 of 3)");
+    expect(roomQueueLabel(roomThreadQueue({ queue }, "other")[0]!, () => undefined)).toBe("Queued (2 of 2)");
+    expect(roomThreadQueue({}, "open")).toEqual([]);
   });
 });

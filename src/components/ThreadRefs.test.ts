@@ -65,7 +65,6 @@ describe("ThreadRefText", () => {
     expect(inProvider(createElement(ThreadRefText, { text: "#QA PR 245" }))).toContain('data-thread-link="ada-qa"');
     fixture.selectedId = "standup";
     const guessed = inProvider(createElement(ThreadRefText, { text: "#QA PR 245" }));
-    // newest by activity wins outright here, so no tooltip guess is needed
     expect(guessed).toContain('data-thread-link="ada-qa"');
     expect(guessed).toContain('title="Open #QA PR 245"');
   });
@@ -108,8 +107,6 @@ describe("ThreadLink", () => {
       { type: "switchTask", botId: "scout", threadId: "qa-245" },
       { type: "revealThread", threadId: "qa-245" },
     ]);
-    // With threads hidden the switch alone opens it: the thread the bot was
-    // left on keeps its unread mark (openBotThread).
     fixture.showThreads = false;
     fixture.dispatch.mockClear();
     renderToStaticMarkup(createElement(Capture));
@@ -133,7 +130,6 @@ describe("ThreadLink", () => {
   });
 });
 
-// #2383: a chat link opened from a browser or a dashboard.
 describe("openChatLink", () => {
   const state = async () => ({ ...(await import("@/state/store")).initialState, bots: [scout, ada], groups: [room, dm], selectedId: "ada" });
   const actions = (dispatch: ReturnType<typeof vi.fn>) => dispatch.mock.calls.map(([action]) => action);
@@ -222,8 +218,6 @@ describe("openChatLink", () => {
     ]);
   });
 
-  // Threads hidden: a bot is one conversation, its main thread, wherever a
-  // notification or an activity row last left it.
   it("opens a bot-only link at the bot's main thread while threads are hidden, as its row would", async () => {
     const left = { ...(await state()), bots: [{ ...scout, threadId: "qa-245", mainThreadId: "scout-main" }, ada] };
     const dispatch = vi.fn();
@@ -232,14 +226,12 @@ describe("openChatLink", () => {
       { type: "switchTask", botId: "scout", threadId: "scout-main" },
       { type: "revealThread", threadId: "scout-main" },
     ]);
-    // A dead thread link shows that bot the same way.
     const dead = vi.fn();
     expect(openChatLink(dead, "openmausbot://thread/gone?bot=scout", left, false)).toBe(false);
     expect(actions(dead)).toEqual([
       { type: "switchTask", botId: "scout", threadId: "scout-main" },
       { type: "notice", notice: { kind: "thread-gone", botName: "Scout" } },
     ]);
-    // With threads shown, the thread it is on, as before.
     const shown = vi.fn();
     expect(openChatLink(shown, "openmausbot://bot/scout", left, true)).toBe(true);
     expect(actions(shown)).toEqual([
@@ -269,8 +261,6 @@ describe("ThreadRefsProvider", () => {
 });
 
 
-// Merged with #900: a line can carry an @mention and a #thread at once, and
-// each decoration comes from its own resolver without disturbing the other.
 describe("ThreadRefText with mention peers", () => {
   it("highlights the @mention and links the #thread in one line", () => {
     const markup = inProvider(createElement(ThreadRefText, {

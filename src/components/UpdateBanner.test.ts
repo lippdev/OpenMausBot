@@ -21,8 +21,6 @@ function render(state: UpdaterState, window: object = { ogb: { updater: {} } }, 
 const LOCAL = "http://127.0.0.1:8799";
 const CLOUD = "https://home-7f3k2.fly.dev";
 const OTHER = "https://bots.example.test";
-/** The window.ogb that electron/preload.cjs gives a server's page; `answered`:
- * whether main answers that page about updates (My Cloud's, not another's). */
 function serverPageBridge(origin: string, answered: boolean) {
   let bridge: unknown;
   vm.runInNewContext(readFileSync(new URL("../../electron/preload.cjs", import.meta.url), "utf8"), {
@@ -55,7 +53,6 @@ describe("UpdateBanner", () => {
     expect(render({ status: "downloaded", version: "0.2.0" }, { location: { origin: OTHER }, ogb })).toBe("");
   });
 
-  // Updates download by themselves: nothing to do yet, so nothing to show.
   it.each([
     { status: "downloading", version: "0.2.0" },
     { status: "downloading", version: "0.2.0", percent: 40 },
@@ -109,9 +106,7 @@ describe("UpdateBanner", () => {
   it("leaves the ready update to the sidebar's update button while the sidebar is in view", () => {
     expect(render({ status: "downloaded", version: "1.2.3", installMode: "restart" }, undefined, true)).toBe("");
     expect(render({ status: "installing", version: "1.2.3" }, undefined, true)).toBe("");
-    // a drawer-hidden sidebar keeps the popup as before
     expect(render({ status: "downloaded", version: "1.2.3", installMode: "restart" }, undefined, false)).toContain("Restart");
-    // what the button does not cover still pops up
     expect(render({ status: "handed-off", version: "1.2.3", installMode: "handoff", command: "sudo apt install ./x.deb" }, undefined, true)).toContain("Finish in a terminal");
     expect(render({ status: "error", message: "boom" }, undefined, true)).toContain("Update failed");
   });

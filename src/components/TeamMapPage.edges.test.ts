@@ -1,6 +1,3 @@
-// A hand-off on the team map opens the thread doing the work, the room it
-// ran in, or else the bot it went to, the way that bot's row opens it: with
-// threads hidden, at its main thread (openBot).
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +16,6 @@ const bot = (id: string, extra: Partial<Bot> = {}): Bot => ({
   messages: [], modelSelection: { instanceId: "fake", model: "test" }, tasks: [{ threadId: `${id}-chat`, title: "Chat", createdAt: 1 }], ...extra,
 });
 
-/** Click the edge's row; what it dispatched. */
 function click(edge: Parameters<typeof EdgeRow>[0]["edge"]) {
   let tree: ReactNode;
   function Capture() { tree = EdgeRow({ edge, bots: fixture.bots }); return tree; }
@@ -31,7 +27,6 @@ function click(edge: Parameters<typeof EdgeRow>[0]["edge"]) {
 beforeEach(() => {
   fixture.dispatch.mockClear();
   fixture.showThreads = true;
-  // Ada was left on an older thread; the person last wrote in her main one.
   fixture.bots = [bot("clive"), bot("ada", { threadId: "ada-old", mainThreadId: "ada-chat",
     tasks: [{ threadId: "ada-chat", title: "Chat", createdAt: 1 }, { threadId: "ada-old", title: "Report", createdAt: 2, unread: true }] })];
 });

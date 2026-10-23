@@ -1,12 +1,8 @@
-// The trial Claude credit's refusals, as the OpenAI-compatible relay answers
-// them and as the chat engine reports them: told apart by the HTTP status and
-// the relay's own error code (first in its error object, so it survives the
-// engine keeping only the start of a body), never by what a model says.
 import { describe, expect, it } from "vitest";
 import { TRIAL_CREDIT_REFUSED, trialCreditEnds, trialCreditFailure, trialCreditRefusal } from "./trial-credit.ts";
 import { trialCreditKind } from "../shared/trial-credit.ts";
 
-/** The relay's error body, exactly as the Admin writes it (server/cloud-credit.ts `error`): its code first. */
+/** The relay's error body as the Admin writes it (server/cloud-credit.ts `error`): its code first. */
 const relay = (code: string, message: string, type = "insufficient_quota") => JSON.stringify({ error: { code, type, message, param: null } });
 /** The chat engine's failure line: "upstream HTTP <status>: <the first 200 characters of the body>". */
 const failure = (status: number, body: string) => `upstream HTTP ${status}: ${body.slice(0, 200)}`;
@@ -19,7 +15,6 @@ describe("the trial Claude credit's refusal", () => {
     expect(trialCreditRefusal(400, relay("trial_credit_too_low", "Your Claude credit has $0.20 left, too little for this request.", "invalid_request_error"))).toBe("too_low");
     expect(trialCreditRefusal(429, relay("trial_credit_paused", "Claude credit is paused for now.", "rate_limit_error"))).toBe("paused");
     expect(trialCreditRefusal(429)).toBe("paused");
-    // Only the two 402s and the unknown token end the credit; paused and too low are for now.
     expect((["used_up", "ended", "too_low", "paused"] as const).map(trialCreditEnds)).toEqual([true, true, false, false]);
   });
 
@@ -32,7 +27,6 @@ describe("the trial Claude credit's refusal", () => {
   });
 
   it("reads the chat engine's own failure line, which keeps only the start of a body, and never a model's reply or another error", () => {
-    // The relay's sentences run past 200 characters with the JSON around them: the code, first, is still read.
     const usedUp = relay("trial_credit_used_up", `Your $5 of Claude credit is used up. To keep your bots working, connect your own Claude or ChatGPT account, or an API key, on your Cloud.`);
     expect(usedUp.length).toBeGreaterThan(200);
     expect(trialCreditFailure(failure(402, usedUp))).toBe("used_up");
@@ -44,12 +38,10 @@ describe("the trial Claude credit's refusal", () => {
   });
 
   it("reads the code the chat engine puts after the relay's message, and only at the end of the line", () => {
-    // drivers/openai-chat.ts shows an error envelope's message, then its code.
     expect(trialCreditFailure("upstream HTTP 402: Your $5 of Claude credit is used up. (trial_credit_used_up)")).toBe("used_up");
     expect(trialCreditFailure("upstream HTTP 402: Claude credit isn't available on this Cloud. (trial_credit_ended)")).toBe("ended");
     expect(trialCreditFailure("upstream HTTP 401: This Claude credit key isn't valid. (invalid_api_key)")).toBe("ended");
     expect(trialCreditFailure("upstream HTTP 400: Too little left for this request. (trial_credit_too_low)")).toBe("too_low");
-    // a code in the middle of a sentence, or under the wrong status, is not the relay's
     expect(trialCreditFailure("upstream HTTP 402: (trial_credit_used_up) was not the cause")).toBeNull();
     expect(trialCreditFailure("upstream HTTP 500: Overloaded. (trial_credit_used_up)")).toBeNull();
   });

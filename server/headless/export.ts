@@ -1,17 +1,3 @@
-// export: one conversation's job, written to a folder a person or a CI step
-// can keep. Everything is read through the routes the app itself uses, each
-// under its own grant: the job tree (GET /api/threads/:id/job), every
-// transcript of the job (the transcript export), the files its bots' replies
-// link to (the message-scoped file route: a reply is the grant; a linked
-// folder brings the files directly in it), and screen captures the server
-// kept. Bounded by file count, screen count and bytes actually written;
-// transcripts and the job tree pass through secret redaction.
-//
-//   DIR/manifest.json   what was written, and what was skipped and why
-//   DIR/job.json        the job tree: every assignment, its status and result
-//   DIR/transcripts/    each conversation of the job, .json and .md
-//   DIR/files/          files the replies link to, per conversation
-//   DIR/screens/        screen captures, per conversation
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable, Transform } from "node:stream";
@@ -29,14 +15,11 @@ type Rec = Record<string, any>;
 export interface ExportOptions {
   threadId: string;
   out: string;
-  /** Work open at or begun after this server time (default: the whole conversation). */
   since?: number;
-  /** Only this root's tree. */
   root?: string;
   maxFiles?: number;
   maxScreens?: number;
   maxBytes?: number;
-  /** Write into a folder that already has files in it (an earlier export's files are replaced). */
   force?: boolean;
 }
 
@@ -46,9 +29,7 @@ const enc = encodeURIComponent;
 
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "conversation";
 
-/** A name made safe to write on any system: one path segment, no control
- * or reserved characters, no trailing dot or space (Windows drops them), and
- * never a Windows device name (con.md would be the console there). */
+/** One path segment; no trailing dot or space (Windows drops them) and never a Windows device name (con.md is the console there). */
 export function safeName(raw: string): string {
   // eslint-disable-next-line no-control-regex
   const name = basename(raw.replace(/[\\/]/g, "_")).replace(/[\x00-\x1f<>:"|?*]/g, "_").trim().slice(0, 120).replace(/[. ]+$/, "");
@@ -56,7 +37,6 @@ export function safeName(raw: string): string {
   return /^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(name) ? `_${name}` : name;
 }
 
-/** A file name from the server's content-disposition, else the link's own. */
 function fileName(disposition: string | null, link: string): string {
   const star = disposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
   const plain = disposition?.match(/filename="([^"]+)"/i)?.[1];
@@ -65,8 +45,6 @@ function fileName(disposition: string | null, link: string): string {
   return safeName(name);
 }
 
-/** A name this export has not used yet in a folder: report.md, report (2).md, …
- * (a file an earlier export left there is replaced, under --force). */
 function unused(dir: string, name: string, taken: Set<string>): string {
   const ext = extname(name);
   const stem = name.slice(0, name.length - ext.length);
@@ -76,8 +54,6 @@ function unused(dir: string, name: string, taken: Set<string>): string {
   return candidate;
 }
 
-/** The folder an export writes: new, or empty unless `force`. Checked before
- * anything is read or sent (run --export checks it before the job starts). */
 export function exportFolder(dir: string, force: boolean): string {
   const out = resolve(dir);
   if (!existsSync(out) || force) return out;
@@ -91,10 +67,6 @@ export function exportFolder(dir: string, force: boolean): string {
   return out;
 }
 
-/** A transcript for people to read, written from the messages the export
- * keeps (the .json's, secrets already removed), as the app's own Markdown
- * export lays it out: so a long conversation's .md ends with the job, not
- * with its first few megabytes. */
 function markdownOf(title: string, messages: readonly Rec[], botName: string): string {
   const lines: string[] = [`# ${title}`, ""];
   for (const message of messages) {
@@ -109,10 +81,7 @@ function markdownOf(title: string, messages: readonly Rec[], botName: string): s
   return lines.join("\n");
 }
 
-/** Under --force: what an earlier export wrote in this folder, as its
- * manifest lists it, is removed before this one writes, so no file of an
- * older job is left beside this one's. Only files that manifest names, inside
- * the folder; anything else in it is left alone. */
+/** Removes only the files the earlier export's manifest names inside the folder; anything else is left alone. */
 function removeEarlierExport(out: string): void {
   let manifest: Rec;
   try {
@@ -127,8 +96,7 @@ function removeEarlierExport(out: string): void {
     const target = resolve(out, file);
     const inside = relative(out, target);
     if (!inside || inside.startsWith("..") || isAbsolute(inside)) continue;
-    try { rmSync(target, { force: true }); } catch { continue; } // a folder of that name is not a file it wrote
-    // and the folders that held only what it wrote
+    try { rmSync(target, { force: true }); } catch { continue; }
     for (let folder = dirname(target); relative(out, folder) && !relative(out, folder).startsWith(".."); folder = dirname(folder)) {
       try { rmdirSync(folder); } catch { break; }
     }
@@ -137,9 +105,7 @@ function removeEarlierExport(out: string): void {
 
 const OVER_LIMIT = Symbol("over the byte limit");
 
-/** A response body into a new file, counting as it goes: past `limit` bytes it
- * stops, removes what it wrote, and says so. A length header is not trusted:
- * a proxy in front of the server may send the body without one. */
+/** A length header is not trusted: a proxy in front of the server may send the body without one. */
 async function writeCapped(response: Response, file: string, limit: number): Promise<number | typeof OVER_LIMIT> {
   let written = 0;
   const count = new Transform({
@@ -160,7 +126,6 @@ async function writeCapped(response: Response, file: string, limit: number): Pro
   }
 }
 
-/** Why the server would not hand a file over, in its own words. */
 const refusal = async (response: Response | null): Promise<string> =>
   response ? String(((await response.json().catch(() => ({}))) as Rec).error ?? `HTTP ${response.status}`) : "the server did not answer";
 
@@ -188,7 +153,6 @@ export async function exportJob(client: HeadlessClient, options: ExportOptions, 
   const taken = new Set<string>();
   let bytes = 0;
 
-  /** One answered file into `dir` under what is left of the byte budget, or the reason it is not. */
   const keep = async (response: Response, dir: string, wanted: string, about: Rec, into: Rec[]) => {
     const left = maxBytes - bytes;
     const declared = Number(response.headers.get("content-length") ?? Number.NaN);
@@ -205,7 +169,6 @@ export async function exportJob(client: HeadlessClient, options: ExportOptions, 
       return;
     }
     bytes += written;
-    // with /, as the transcripts' paths are, whatever system wrote it
     into.push({ ...about, file: relative(out, file).split(sep).join("/"), bytes: written });
   };
   const fileRoute = (threadId: string, messageId: string, body: Rec) =>
@@ -213,7 +176,6 @@ export async function exportJob(client: HeadlessClient, options: ExportOptions, 
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
     }).catch(() => null);
 
-  /** A linked file, or each file directly in a linked folder, under the reply's own grant. */
   const saveLinked = async (threadId: string, folder: string, messageId: string, link: string) => {
     const about = { threadId, messageId, link };
     if (files.length >= maxFiles) return void skipped.push({ ...about, reason: `more than --max-files ${maxFiles}` });
@@ -253,7 +215,6 @@ export async function exportJob(client: HeadlessClient, options: ExportOptions, 
     writeFileSync(join(out, "transcripts", `${name}.md`), markdownOf(title, redacted.messages, botNames.get(threadId) ?? "Bot"), { mode: 0o600 });
     transcripts.push({ threadId, label, file: `transcripts/${name}.json`, messages: kept.length, ...(all.length > kept.length ? { truncated: all.length - kept.length } : {}) });
 
-    // the files its replies link to or attach, each under that reply's grant
     const seen = new Set<string>();
     for (const message of kept) {
       if (message.role !== "bot" || message.kind !== "text") continue;
@@ -265,13 +226,11 @@ export async function exportJob(client: HeadlessClient, options: ExportOptions, 
       }
     }
 
-    // screen captures the server kept (their pixels are never in the transcript)
     for (const message of kept) {
       if (message.kind !== "screen") continue;
       const about = { threadId, messageId: message.id };
       if (screens.length >= maxScreens) { skipped.push({ ...about, reason: `more than --max-screens ${maxScreens}` }); continue; }
       const response = await client.raw(`/api/threads/${enc(threadId)}/messages/${enc(message.id)}/image`).catch(() => null);
-      // a capture whose pixels the server no longer keeps is not a failure
       if (response?.status === 404) { await response.body?.cancel(); continue; }
       if (!response?.ok) { skipped.push({ ...about, reason: await refusal(response) }); continue; }
       const type = response.headers.get("content-type") ?? "image/png";

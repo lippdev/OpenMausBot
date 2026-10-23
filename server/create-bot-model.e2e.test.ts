@@ -26,7 +26,7 @@ it("Chief creation uses the workspace default or a validated explicit model with
     await api("PATCH", "/api/config", { defaultModelSelection: defaultModel });
     const chiefModel = { instanceId: "claude", model: claude.models.default };
     const chief = (await api("POST", "/api/bots", { name: "Chief", section: "Design", modelSelection: chiefModel }, 201)).bot;
-    // On Ask, so each creation waits on its review card.
+    // At Ask too, each creation applies at once: OpenMausBot adds no card of its own.
     await api("PATCH", `/api/bots/${chief.id}`, { chiefOfStaff: true, approvalMode: "ask" });
     await api("POST", `/api/bots/${chief.id}/messages`, { text: "Prepare a specialist." }, 202);
     await expect.poll(() => existsSync(fixture.fixtureDumpPath), { timeout: 15_000 }).toBe(true);
@@ -37,20 +37,16 @@ it("Chief creation uses the workspace default or a validated explicit model with
       role: "Specialist", instructions: "Complete assigned work.",
       ...(modelSelection === undefined ? {} : { modelSelection }),
     }, expected, token);
-    // Below Full Access every creation is one review card: nothing exists
-    // until the person applies it, after the Chief's turn has ended.
-    const idle = () => expect.poll(async () => !(await api("GET", "/api/bots")).bots.find((bot: any) => bot.id === chief.id).busy, { timeout: 20_000 }).toBe(true);
-    const apply = async (pending: any) => {
-      expect(pending).toMatchObject({ state: "pending", applied: false });
-      const answered = await api("POST", `/api/threads/${chief.threadId}/respond`, { requestId: pending.requestId, behavior: "allow" });
-      await idle();
-      return answered.result.bots[0];
+    const idle = () => expect.poll(async () => (await api("GET", "/api/bots")).bots.every((bot: any) => !bot.busy), { timeout: 20_000 }).toBe(true);
+    const applied = (result: any) => {
+      expect(result).toMatchObject({ state: "applied", applied: true });
+      return { id: result.id as string, modelSelection: result.modelSelection };
     };
     const before = (await api("GET", "/api/bots")).bots.length;
-    const firstCard = await create("Default specialist");
+    const first = applied(await create("Default specialist"));
     const explicit = { instanceId: "claude", model: claude.models.options.find((item: any) => item.id !== claude.models.default).id, effort: "low" };
-    const secondCard = await create("Chosen specialist", explicit);
-    expect((await api("GET", "/api/bots")).bots.length).toBe(before);
+    const second = applied(await create("Chosen specialist", explicit));
+    expect((await api("GET", "/api/bots")).bots.length).toBe(before + 2);
     for (const invalid of [null, {}, { instanceId: "missing", model: "missing" },
       { ...explicit, model: "not-in-catalog" }, { ...explicit, effort: "invalid" },
       { ...explicit, variant: "a-variant" }]) {
@@ -62,32 +58,27 @@ it("Chief creation uses the workspace default or a validated explicit model with
     writeFileSync(gate, "finish");
     await idle();
     await create("Expired authority", undefined, 401);
-    const first = await apply(firstCard);
-    const second = await apply(secondCard);
     expect(first.modelSelection).toEqual(defaultModel);
     expect(second.modelSelection).toEqual(explicit);
     const bots = (await api("GET", "/api/bots")).bots;
-    expect(bots.length).toBe(before + 2);
+    expect(bots.length).toBe(before + 4);
     expect(bots.find((bot: any) => bot.id === chief.id).modelSelection).toEqual(chiefModel);
     for (const [id, modelSelection] of [[first.id, defaultModel], [second.id, explicit]]) {
-      // Not the Chief's Ask: a new specialist starts at the default, Full access.
       expect(bots.find((bot: any) => bot.id === id)).toMatchObject({
         section: "Design", modelSelection, approvalMode: "full", autoApprove: false, composio: false, approvePeerComms: false,
         soul: "Complete assigned work.",
       });
     }
-    // Changing the config revokes old capabilities. A fresh authorized turn
-    // sees the new default; previously created bots keep their selected models.
     await api("PATCH", "/api/config", { defaultModelSelection: explicit });
     unlinkSync(gate);
     unlinkSync(fixture.fixtureDumpPath);
     await api("POST", `/api/bots/${chief.id}/messages`, { text: "Prepare the next specialist." }, 202);
     await expect.poll(() => existsSync(fixture.fixtureDumpPath), { timeout: 15_000 }).toBe(true);
     token = JSON.parse(readFileSync(fixture.fixtureDumpPath, "utf8")).mcpConfig.mcpServers.agents.env.OMB_COMMS_TOKEN;
-    const updatedCard = await create("Updated default specialist");
+    const updated = applied(await create("Updated default specialist"));
     writeFileSync(gate, "finish");
     await idle();
-    expect((await apply(updatedCard)).modelSelection).toEqual(explicit);
+    expect(updated.modelSelection).toEqual(explicit);
     expect((await api("GET", "/api/bots")).bots.find((bot: any) => bot.id === first.id).modelSelection).toEqual(defaultModel);
   } finally {
     writeFileSync(gate, "finish");

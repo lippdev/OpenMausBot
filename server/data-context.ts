@@ -1,5 +1,3 @@
-// The HTTP boundary of a message's Data context (shared/data-context.ts):
-// a card id as the sheet mints them and a bounded draft, or a 400.
 import { z } from "zod";
 
 import type { DataContext } from "../shared/data-context.ts";
@@ -14,7 +12,6 @@ const dataContextSchema = z.object({
   draftSql: z.string().refine((draft) => Buffer.byteLength(draft) <= DATA_CONTEXT_DRAFT_MAX_BYTES, "draftSql is too large").optional(),
 }).strict();
 
-/** Parse an optional `dataContext` from a messages POST body. */
 export function parseDataContext(value: unknown): DataContext | undefined {
   if (value === undefined || value === null) return undefined;
   const parsed = dataContextSchema.safeParse(value);

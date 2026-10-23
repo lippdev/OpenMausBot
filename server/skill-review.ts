@@ -1,22 +1,3 @@
-// Automatic skill learning: a background review after a bot has worked for a
-// while. Off unless switched on in Settings ("Learn skills automatically",
-// under "Bots may write their own skills").
-//
-// Every finished turn adds the tool steps it ran to a counter kept per bot
-// and conversation, saved to disk so restarts and many short turns still add
-// up. Once a counter reaches the threshold ("Review after N tool steps",
-// default 10), the bot's own engine makes one tool-free model call that
-// reads the conversation (bounded) beside the bot's current skills and
-// answers with at most three skill changes. Each change goes through the
-// same staging path as skill_manage (scan, redaction, size cap), so it
-// shows in the chat as the usual receipt with Undo.
-//
-// The review never holds the bot: it starts only while the bot has no turn
-// running, and when the person writes again before it answers it finishes
-// quietly and applies after that turn settles, rather than being dropped.
-// A skill the bot or the person changed meanwhile is left alone. Nothing it
-// does is a chat message; only the receipts of applied changes show.
-//
 // Design ported from Hermes Agent's background skill review
 // (agent/background_review.py, MIT, Copyright (c) 2025 Nous Research): the
 // step counter and its reset on a skill change, the review after a delivered
@@ -31,21 +12,17 @@ import { MAX_SKILL_REVIEW_STEPS } from "./config.ts";
 import { AUTHORING_STANDARDS } from "./skill-learn.ts";
 
 export const SKILL_REVIEW_MARKER = "You are the SKILL REVIEW step";
-/** One review may change at most this many skills. */
 export const MAX_REVIEW_CHANGES = 3;
 export const REVIEW_TIMEOUT_MS = 3 * 60_000;
-/** A review that could not run waits this long before it is tried again. */
 export const RETRY_AFTER_MS = 15 * 60_000;
+/** Failures in a row after which the steps they covered are dropped; new steps count toward a fresh review. */
+export const MAX_FAILED_REVIEWS = 3;
 export const SETTLE_DELAY_MS = 1_500;
 export const SETTLE_TRIES = 5;
-/** At most this many conversations' counters are kept. */
 export const MAX_COUNTERS = 500;
-/** Recent transcript entries replayed in full; older ones become a digest. */
 export const TRANSCRIPT_TAIL = 40;
 export const TRANSCRIPT_MAX_CHARS = 40_000;
 const FULL_LINE_MAX = 2_500;
-/** Skill bodies shown to the reviewer, in total and each. A skill whose
- * body is not shown cannot be updated by the review (read before write). */
 export const SKILL_BODIES_MAX_CHARS = 30_000;
 const SKILL_BODY_MAX_CHARS = 12_000;
 
@@ -54,11 +31,9 @@ export type ReviewMessage = Pick<WireMessage, "role" | "kind" | "text" | "tool" 
 export interface ReviewSkill {
   name: string;
   description: string;
-  /** A learned skill the review may update; imported skills are read-only. */
   editable: boolean;
   enabled: boolean;
   sha256: string;
-  /** The current SKILL.md, for an editable skill; null when unreadable. */
   body?: string | null;
 }
 
@@ -67,13 +42,9 @@ export interface ReviewChange {
   name: string;
   skillMd: string;
   gist: string;
-  /** update: the version the reviewer read; applied only while still current. */
   baseSha256?: string;
 }
 
-/** Tool steps the bot ran in one finished turn: its activity rows for that
- * turn, without the harness's own setup chips. In a room only the speaker's
- * rows count. */
 export function turnToolSteps(messages: readonly ReviewMessage[], turnId: string, botId: string, room: boolean): number {
   let steps = 0;
   for (const message of messages) {
@@ -124,9 +95,6 @@ function fullLine(entry: Entry): string {
   return `${entry.speaker}: ${clip(entry.text, FULL_LINE_MAX)}`;
 }
 
-/** The conversation as the reviewer reads it: the most recent entries in
- * full, older ones folded into a digest (a person's line, the bot's reply
- * and which tools it used), the whole capped in size. */
 export function reviewTranscript(messages: readonly ReviewMessage[], bot: { id: string; name: string }, room: boolean): string {
   const entries = entriesFor(messages, bot, room);
   let tail = Math.min(TRANSCRIPT_TAIL, entries.length);
@@ -152,7 +120,6 @@ export function reviewTranscript(messages: readonly ReviewMessage[], bot: { id: 
     flushTools();
     const full = recent.map(fullLine);
     const fits = (lines: string[]) => lines.join("\n").length <= TRANSCRIPT_MAX_CHARS;
-    // The oldest digest lines go first, then the full tail shrinks.
     while (digest.length && !fits([...digest, ...full])) digest.shift();
     if (fits([...digest, ...full]) || tail <= 1) {
       const parts = [];
@@ -165,8 +132,6 @@ export function reviewTranscript(messages: readonly ReviewMessage[], bot: { id: 
   }
 }
 
-/** Which skills the reviewer sees in full: editable skills the conversation
- * names first, then the rest, within the size budget. */
 export function shownSkills(skills: readonly ReviewSkill[], transcript: string): { shown: Set<string>; loaded: Set<string> } {
   const lower = transcript.toLowerCase();
   const loaded = new Set(skills.filter((skill) => lower.includes(skill.name.toLowerCase())).map((skill) => skill.name));
@@ -184,7 +149,6 @@ export function shownSkills(skills: readonly ReviewSkill[], transcript: string):
   return { shown, loaded };
 }
 
-// ---------------------------------------------------------------------------
 // The review prompt. Adapted from Hermes Agent's _SKILL_REVIEW_PROMPT and its
 // shared _LESSON_LAYER_BLOCK and _DO_NOT_CAPTURE_BLOCK
 // (agent/background_review.py, https://github.com/NousResearch/hermes-agent),
@@ -193,7 +157,6 @@ export function shownSkills(skills: readonly ReviewSkill[], transcript: string):
 // stages them through skill_manage's path), only learned skills can be
 // updated, there are no support files, and the body follows this repo's
 // authoring rules (When to Use, Procedure, Pitfalls, Verification).
-// ---------------------------------------------------------------------------
 const LESSON_LAYER = `What a skill IS: the instructions for doing a class of task the most efficient and correct way, to THIS person's specifications: the procedure, the tools and commands that work, the order, the person's preferences for how the result should look, and the pitfalls that cost time. A future conversation should be able to follow it and produce what the person wants on the first try.
 - Procedure first: the steps in the order they are done, with the concrete commands, tool calls and decision points. Lessons attach to the step they affect, or go under Pitfalls.
 - A pitfall is a general rule plus one clause of WHY, in the imperative. Not a story of what happened in this conversation.
@@ -275,7 +238,6 @@ export function skillReviewPrompt(input: {
   ].join("\n");
 }
 
-/** The JSON inside a model's answer, fenced or bare. */
 function jsonPayload(text: string): unknown {
   const trimmed = text.trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
@@ -292,8 +254,6 @@ function jsonPayload(text: string): unknown {
   }
 }
 
-/** The `name:` of a SKILL.md's frontmatter, or null. Staging validates it
- * fully; this only routes the change. */
 export function frontmatterName(skillMd: string): string | null {
   const match = /^\s*---\r?\n([\s\S]*?)\r?\n---/.exec(skillMd);
   if (!match) return null;
@@ -301,10 +261,7 @@ export function frontmatterName(skillMd: string): string | null {
   return line ? line[1]!.trim() : null;
 }
 
-/** The changes a review answered with that the harness may stage: an update
- * only to a learned skill the reviewer was shown (and against the version
- * shown), a create only under a name not taken, and never two changes to
- * one skill. */
+/** Updates only to shown learned skills (against the shown version), creates only under free names, one change per skill. */
 export function parseSkillReview(text: string, skills: readonly ReviewSkill[], shown: ReadonlySet<string>): { changes: ReviewChange[]; note: string } {
   const parsed = jsonPayload(text);
   const object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
@@ -338,40 +295,21 @@ export function parseSkillReview(text: string, skills: readonly ReviewSkill[], s
   return { changes, note };
 }
 
-// ---------------------------------------------------------------------------
-// The counters and the scheduler.
-// ---------------------------------------------------------------------------
-
 export interface ReviewEngine {
-  generateText: (prompt: string, options?: { signal?: AbortSignal }) => Promise<string>;
+  generateText: (prompt: string, options?: { signal?: AbortSignal; timeoutMs?: number }) => Promise<string>;
 }
 
 export interface SkillReviewDeps {
-  /** The feature switch (and skill authoring itself) is on. */
   enabled: () => boolean;
-  /** Tool steps between reviews. */
   threshold: () => number;
   bot: (botId: string) => { id: string; name: string } | undefined;
-  /** The bot's engine when it can make the one-shot call and may receive
-   * this text (capability, policy); null otherwise. Spend-cap checks and
-   * usage booking happen inside its generateText. */
   engine: (botId: string) => ReviewEngine | null;
-  /** The bot has a turn running (or the workspace is under maintenance):
-   * a review neither starts nor applies now. */
   busy: (botId: string) => boolean;
-  /** The conversation's active path, or null when it no longer belongs to
-   * the bot (deleted, left the room). */
   transcript: (botId: string, threadId: string) => { messages: readonly ReviewMessage[]; room: boolean } | null;
   skills: (botId: string) => ReviewSkill[];
-  /** The current SKILL.md hash of a skill, or null when it is gone. */
   currentSha: (botId: string, name: string) => string | null;
-  /** Stage and apply one change through the skill_manage path, with its
-   * receipt and Undo in the conversation. */
   apply: (botId: string, threadId: string, change: ReviewChange) => { ok: true } | { ok: false; error: string };
   statePath: string;
-  /** How long after a turn settles the bot is first checked for being free
-   * (its busy flags clear a moment after turn.completed); doubled on each
-   * retry while it is still busy, SETTLE_TRIES times. */
   settleDelayMs?: number;
   now?: () => number;
   log?: (line: string) => void;
@@ -388,8 +326,8 @@ interface Counter {
   threadId: string;
   steps: number;
   at: number;
-  /** When the last attempt could not run; the next waits RETRY_AFTER_MS. */
   failedAt?: number;
+  failures?: number;
 }
 
 interface PendingApply {
@@ -400,20 +338,13 @@ interface PendingApply {
 }
 
 export interface SkillReview {
-  /** A finished, eligible turn of a bot in a conversation, with its tool
-   * steps. Counting only: botSettled starts a review that came due. */
   noteTurn(botId: string, threadId: string, steps: number): void;
-  /** The bot changed one of its skills in this conversation: start counting again. */
   noteSkillChange(botId: string, threadId: string): void;
-  /** One of the bot's turns settled: apply a review that waited for it, or
-   * start one that is due. */
   botSettled(botId: string): void;
   dropBot(botId: string): void;
   dropThread(threadId: string): void;
   status(botId: string, threadId: string): { steps: number; reviewing: boolean; waiting: boolean };
-  /** Run the review of one conversation now (tests; the scheduler uses it). */
   run(botId: string, threadId: string): Promise<ReviewReport>;
-  /** Shutdown: cancel reviews in flight; their counters stay, so they run again later. */
   stop(): void;
   idle(): Promise<void>;
 }
@@ -440,11 +371,11 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
           steps: Math.max(0, Math.floor(raw.steps)),
           at: typeof raw.at === "number" ? raw.at : 0,
           ...(typeof raw.failedAt === "number" ? { failedAt: raw.failedAt } : {}),
+          ...(typeof raw.failures === "number" && raw.failures > 0 ? { failures: Math.floor(raw.failures) } : {}),
         });
       }
     }
   } catch {
-    // no saved counters yet
   }
 
   const save = () => {
@@ -457,7 +388,6 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
       mkdirSync(dirname(deps.statePath), { recursive: true, mode: 0o700 });
       writeFileAtomic(deps.statePath, `${JSON.stringify({ version: 1, counters: list })}\n`, { mode: 0o600 });
     } catch {
-      // losing a counter only delays a review
     }
   };
 
@@ -472,19 +402,24 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
   const settleCounter = (botId: string, threadId: string, steps: number) => {
     const counter = counters.get(key(botId, threadId));
     if (!counter) return;
-    // steps run while the review was out keep counting toward the next one
     counter.steps = Math.max(0, counter.steps - steps);
     delete counter.failedAt;
+    delete counter.failures;
     save();
   };
 
-  const failed = (botId: string, threadId: string, note: string): ReviewReport => {
+  const failed = (botId: string, threadId: string, note: string, steps?: number): ReviewReport => {
     const counter = counters.get(key(botId, threadId));
-    if (counter) {
+    log(`${botId}: ${note}`);
+    if (!counter) return { state: "failed", applied: [], note };
+    counter.failures = (counter.failures ?? 0) + 1;
+    if (counter.failures >= MAX_FAILED_REVIEWS) {
+      settleCounter(botId, threadId, steps ?? counter.steps);
+      log(`${botId}: gave up on this review after ${MAX_FAILED_REVIEWS} failed attempts; new work counts toward the next one`);
+    } else {
       counter.failedAt = now();
       save();
     }
-    log(`${botId}: ${note}`);
     return { state: "failed", applied: [], note };
   };
 
@@ -523,7 +458,7 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
       return { state: "skipped", applied: [], note: "the conversation is gone" };
     }
     const engine = deps.engine(botId);
-    if (!engine) return failed(botId, threadId, "this bot's engine cannot run a background review");
+    if (!engine) return failed(botId, threadId, "this bot's engine cannot run a background review", steps);
     const transcript = reviewTranscript(conversation.messages, bot, conversation.room);
     const skills = deps.skills(botId);
     const { shown } = shownSkills(skills, transcript);
@@ -532,12 +467,12 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
     try {
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(REVIEW_TIMEOUT_MS)]);
       answer = await Promise.race([
-        engine.generateText(prompt, { signal }),
+        engine.generateText(prompt, { signal, timeoutMs: REVIEW_TIMEOUT_MS }),
         new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error(controller.signal.aborted ? "cancelled" : "timed out")), { once: true })),
       ]);
     } catch (error) {
       if (controller.signal.aborted) return { state: "cancelled", applied: [] };
-      return failed(botId, threadId, `the review call failed (${error instanceof Error ? error.message : "unknown"})`);
+      return failed(botId, threadId, `the review call failed (${error instanceof Error ? error.message : "unknown"})`, steps);
     }
     if (controller.signal.aborted) return { state: "cancelled", applied: [] };
     const { changes, note } = parseSkillReview(typeof answer === "string" ? answer : "", skills, shown);
@@ -547,7 +482,6 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
       log(`${botId}: ${note || "Nothing to save."}`);
       return { state: "nothing", applied: [], ...(note ? { note } : {}) };
     }
-    // The person wrote again meanwhile: finish quietly and apply after that turn.
     if (deps.busy(botId)) {
       waiting.set(botId, pending);
       return { state: "deferred", applied: [], ...(note ? { note } : {}) };
@@ -559,8 +493,9 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
     const current = running.get(botId);
     if (current) return current.done;
     const controller = new AbortController();
+    const steps = counters.get(key(botId, threadId))?.steps ?? 0;
     const done = review(botId, threadId, controller).catch((error: unknown) =>
-      failed(botId, threadId, `the review stopped (${error instanceof Error ? error.message : "unknown"})`));
+      failed(botId, threadId, `the review stopped (${error instanceof Error ? error.message : "unknown"})`, steps));
     running.set(botId, { threadId, controller, done });
     void done.finally(() => {
       if (running.get(botId)?.controller === controller) running.delete(botId);
@@ -591,6 +526,7 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
       if (!counter || counter.steps === 0) return;
       counter.steps = 0;
       delete counter.failedAt;
+      delete counter.failures;
       save();
     },
     botSettled(botId) {
@@ -599,8 +535,6 @@ export function createSkillReview(deps: SkillReviewDeps): SkillReview {
         settling.delete(botId);
         if (stopped) return;
         if (deps.busy(botId)) {
-          // still busy (another turn, a room round, maintenance): look again
-          // shortly; after the last try the next settled turn picks it up
           if (tries + 1 < SETTLE_TRIES) schedule(tries + 1, delay * 2);
           return;
         }

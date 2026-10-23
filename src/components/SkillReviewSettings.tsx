@@ -13,8 +13,6 @@ import { api, useStore, type ConfigStatus } from "@/state/store";
 import { t } from "@/lib/i18n";
 import { Switch } from "./SettingsPrimitives";
 
-/** "Learn skills automatically" and its threshold, under "Bots may write
- * their own skills" (server/skill-review.ts). Both live in `features`. */
 export function SkillReviewSettings() {
   const { state, dispatch } = useStore();
   const authoring = skillAuthoringEnabled(state.config);
@@ -119,8 +117,6 @@ export function SkillReviewSettings() {
   );
 }
 
-/** One line under the switch when some bots' engine cannot run the review,
- * so the switch never promises what will not happen for them. */
 export function SkillReviewEngineNote({ engines }: { engines: readonly string[] }) {
   if (!engines.length) return null;
   return (

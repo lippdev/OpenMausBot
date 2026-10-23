@@ -18,18 +18,13 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 // the native catalogs only when given their paths (`--swift`, `--kotlin`).
 const TS_PATH = "../../shared/mascot-bodies.ts";
 
-// Normalised to LF. .gitattributes pins both catalogs to LF so this should be a
-// no-op, but a clone whose git config disagrees would otherwise fail this guard
-// over line endings — which git owns — rather than over generated content, which
-// is what the guard is actually for.
+// Normalised to LF: a clone whose git config disagrees with .gitattributes must
+// fail over generated content, not line endings.
 const read = (p) =>
   readFileSync(new URL(p, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const write = (p, contents) => writeFileSync(new URL(p, import.meta.url), contents);
 
-/**
- * Line-level diff summary: which line numbers differ, and what changed there. Bounded
- * to a handful of lines so the failure message stays readable against a ~100KB file.
- */
+/** Which lines differ, bounded so the message stays readable against ~100KB. */
 function describeDrift(label, before, after) {
   if (before === after) return null;
   const beforeLines = before.split("\n");
@@ -71,10 +66,8 @@ describe("generated catalogs", () => {
       ts: read(TS_PATH),
     };
 
-    // The generator just rewrote both tracked files in place. Whether this assertion
-    // passes or fails, restore the checked-in bytes so a failing run never leaves the
-    // working tree silently modified — the developer sees the diff below, not a
-    // dirty `git status` they have to go discover on their own.
+    // The generator rewrote both tracked files: restore the checked-in bytes
+    // whether or not this passes, so a failure never leaves the tree dirty.
     write(TS_PATH, before.ts);
 
     const drifts = [

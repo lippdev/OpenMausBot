@@ -1,9 +1,5 @@
-// A stand-in for @1password/sdk in tests: no network, no WebAssembly. It has
-// the SDK's own shapes (createClient → vaults.list, items.list,
-// items.getAll with individualResponses and typed fields), so the adapter in
-// server/onepassword.ts is exercised exactly as the real SDK drives it. The
-// token is checked like a service account's: only the one it was made with
-// is accepted. Every call is recorded.
+// A stand-in for @1password/sdk with the SDK's own shapes (createClient → vaults.list, items.list, items.getAll
+// with individualResponses): no network, no WebAssembly, only the token it was made with, every call recorded.
 import type { OnePasswordSdk } from "../onepassword.ts";
 
 export interface FakeItem {

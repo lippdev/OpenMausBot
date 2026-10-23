@@ -1,12 +1,6 @@
-// Provider capacity for managed companion endpoints, per Cloudflare account:
-// the idle-tunnel scan, the usage alerts, the /healthz detail, and the short
-// provisioning gate used while Cloudflare is refusing an account new tunnels
-// or DNS records.
-//
-// Nothing here deletes a provider resource. A reclaim only moves an idle
-// endpoint row to 'deleting'; the existing ownership-verified cleanup path
-// (endpoints.ts deleteClaim) does the deletion and re-checks the tunnel's
-// connection state immediately before each destructive call.
+// Provider capacity per Cloudflare account: the idle-tunnel scan, the usage
+// alerts, the /healthz detail, and the short provisioning gate. Nothing here
+// deletes a provider resource: a reclaim only marks an idle row 'deleting'.
 import { CloudflareAPI, CloudflareAPIError, type CloudflareFetch } from "./cloudflare-api";
 import type { ControlPlaneConfig, EndpointAccount } from "./config";
 import {
@@ -28,8 +22,8 @@ import {
 } from "./tunnel-activity";
 
 /** Cloudflare's tunnel quota (1045), a tunnel-creation 429 while the account
- * is at its tunnel limit (`cf_tunnel_quota`, see endpoints.ts), and the zone's
- * DNS record quota (81045). */
+ * is at its tunnel limit (`cf_tunnel_quota`), and the zone's DNS record quota
+ * (81045). */
 const CAPACITY_ERROR_CODES: ReadonlySet<string> = new Set(["cf_api_1045", "cf_tunnel_quota", "cf_api_81045"]);
 export const CAPACITY_RETRY_AFTER_SECONDS = 600;
 export const CAPACITY_ALERT_PERCENT = 90;
@@ -42,9 +36,8 @@ export const TUNNEL_SCAN_PAGE_SIZE = 100;
 export const RECLAIM_MARK_LIMIT = 20;
 const MAX_SCAN_PAGE = 1_000;
 const MANAGED_TUNNEL_NAME = /^omb-c-[0-9a-f]{32}$/;
-/** /healthz is the busiest public path, and its capacity detail is only a
- * report: allocation gating reads D1 directly. Each data center reuses one
- * read of the snapshot rows for this long instead of a D1 round trip per probe. */
+/** /healthz is the busiest public path and its capacity detail only a report
+ * (allocation gating reads D1 directly), so each data center reuses one read. */
 const CAPACITY_HEALTH_CACHE_SECONDS = 120;
 const CAPACITY_HEALTH_CACHE = "healthz-capacity";
 // Never routed. Bump the version when AccountSnapshot changes: copies outlive deploys.
@@ -116,10 +109,8 @@ function capacityCacheKey(config: ControlPlaneConfig): string {
   return new URL(CAPACITY_HEALTH_CACHE_PATH, config.authBaseURL).toString();
 }
 
-/** Drops the cached rows in this data center only; others keep theirs until
- * they expire. Cron runs land in an arbitrary data center, so this delete is
- * opportunistic: the cache TTL is the real staleness bound. Best effort,
- * never throws. */
+/** Drops the cached rows in this data center only. Cron runs land in an
+ * arbitrary data center, so the cache TTL is the real staleness bound. */
 export async function forgetCachedCapacity(config: ControlPlaneConfig): Promise<void> {
   await caches.open(CAPACITY_HEALTH_CACHE)
     .then((cache) => cache.delete(capacityCacheKey(config)))
@@ -177,12 +168,9 @@ export interface AccountCleanup {
   tunnels: number;
 }
 
-/** Called after a cleanup sweep. An account where it deleted an endpoint is
- * no longer answered locally: its next allocation may succeed. And the
- * account's last scan stops counting the tunnels and DNS records cleanup
- * deleted, so until the next scan neither the ranking nor a tunnel-creation
- * 429 judged by the scan (endpoints.ts classifyCreate429) takes a slot
- * cleanup freed for a used one. */
+/** An account where cleanup deleted an endpoint is no longer answered locally,
+ * and its last scan stops counting what cleanup deleted, so until the next scan
+ * neither the ranking nor a scan-judged create 429 mistakes a freed slot. */
 export async function releaseCleanedCapacity(
   env: Env,
   config: ControlPlaneConfig,
@@ -207,12 +195,14 @@ export async function releaseCleanedCapacity(
 // decides both the observe-mode count and the real mark, and a concurrent
 // reconcile, revocation, or installation check-in that lands between the
 // provider read and the write always wins. A row is only ever matched to a
-// tunnel listed in its own account.
+// tunnel listed in its own account. A 'provisioning' row qualifies only once
+// its request's lease has expired and nothing has touched the row for the
+// whole quiet period, so a provisioning still under way is never cut.
 const RECLAIM_GUARD_SQL = `installation_id = ?
         AND provider_account = ?
         AND tunnel_name = ?
         AND (tunnel_id IS NULL OR tunnel_id = ?)
-        AND status IN ('ready', 'error')
+        AND status IN ('ready', 'error', 'provisioning')
         AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
         AND updated_at <= ?
         AND COALESCE(last_reconciled_at, 0) <= ?
@@ -352,9 +342,8 @@ async function scanAccount(
   const managed = listing.tunnels.filter((tunnel) => (
     tunnel.managedConfig && MANAGED_TUNNEL_NAME.test(tunnel.name)
   ));
-  // Only rows this account acts on (endpointAccountFor): a row whose
-  // hostname is not one opaque label under the account's suffix is never
-  // touched, so its tunnel counts as unmatched.
+  // Only rows this account acts on: a row whose hostname is not one opaque label
+  // under the account's suffix is never touched, so its tunnel is unmatched.
   const rows = new Map<string, ScanEndpointRow>();
   if (managed.length > 0) {
     const found = await env.DB.prepare(
@@ -537,9 +526,7 @@ export async function scanTunnelCapacity(
 }
 
 /** Operator signals that need no provider call: ignored account config, and
- * endpoints no configured account acts on (`endpointAccountFor`): their
- * account is not, or no longer, configured, or their hostname is not one
- * opaque label under its suffix. Those endpoints refuse every action until
+ * endpoints no configured account acts on, which refuse every action until
  * their account is configured as it was. */
 export async function reportEndpointAccountProblems(
   env: Env,
@@ -624,12 +611,9 @@ function accountHealth(account: EndpointAccount, snapshot: AccountSnapshot, now:
   };
 }
 
-/** What a new installation sees: the best known status among the accounts
- * that take new endpoints (`open`; the primary always does). A new
- * installation runs the newest release, which meets every `minAppVersion`,
- * so a gated account counts: older releases are refused there by design
- * (README "Why minAppVersion"), and paging on that would page for as long as
- * older releases run. `accounts` is every account, for the report. */
+/** What a new installation sees: the best status among the accounts that take
+ * new endpoints. A new installation meets every `minAppVersion`, so a gated
+ * account counts. `accounts` is every account, for the report. */
 function poolHealth(
   config: ControlPlaneConfig,
   snapshots: ReadonlyMap<string, AccountSnapshot>,

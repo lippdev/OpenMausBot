@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Message } from "@/state/store";
-import { callRecordIsPartial, callRecordLines } from "./call-record";
+import { callConversation, callRecordIsPartial, callRecordLines } from "./call-record";
 
 let at = 0;
 const msg = (id: string, fields: Partial<Message>): Message => ({ id, role: "bot", kind: "text", at: ++at, ...fields }) as Message;
@@ -83,7 +83,6 @@ describe("callRecordLines", () => {
       spoken("m1", "search the web and run the tests", "c1"),
       step("s1", "m1", "WebSearch", { spoken: "searching the web" }),
       step("s2", "m1", "Bash", { spoken: "running the tests" }),
-      // what the harness writes beside them, each with no provider item behind it
       chip("h1", "m1", "approved WebSearch (web search): weather in Pune"),
       chip("h2", "m1", "approved Bash (saved command): pnpm test"),
       chip("h3", "m1", "approved Bash (full access): pnpm test"),
@@ -93,7 +92,6 @@ describe("callRecordLines", () => {
       chip("h7", "m1", "retrying — attempt 2/3 in 5s — the engine dropped the connection"),
       callRow("r1", "c1"),
     ];
-    // an auto-approved action is listed once, by its step, never by its receipt as well
     expect(ids(transcript, "c1")).toEqual(["step:s1", "step:s2"]);
   });
 
@@ -125,7 +123,6 @@ describe("callRecordLines", () => {
     const transcript = [
       spoken("m1", "set the bot up", "c1"),
       approval("o1", "m1"),
-      // a request id and a tool, like an approval: only questionRequest tells them apart
       approval("q1", "m1", {
         title: "Your bot has a question",
         subtitle: "Which model should it run on?",
@@ -187,8 +184,6 @@ describe("callRecordLines", () => {
     expect(ids(transcript, "c2")).toEqual(["step:s5", "approval:o1", "step:s7"]);
   });
 
-  // A steered line starts no turn: the turn it joins keeps the request it began
-  // with, and the server stamps that request on everything the turn adds.
   it("credits a typed line steered into a call's turn to the call: the turn is one request", () => {
     const transcript = [
       spoken("m1", "draft the report", "c1"),
@@ -223,9 +218,50 @@ describe("callRecordLines", () => {
   });
 });
 
-// The chat loads the newest page of a long conversation and the rest on
-// request. A call's work is read from what is loaded, so a call that began
-// before the oldest loaded message may have lines in the part not loaded yet.
+describe("callConversation", () => {
+  const entries = (transcript: Message[], callId: string) => callConversation(transcript, callId).map((entry) => `${entry.kind}:${entry.id}`);
+
+  it("lists each spoken request, then what its turn did and answered, in order", () => {
+    const transcript = [
+      spoken("m1", "check the build", "c1"),
+      step("s1", "m1", "Bash", { spoken: "running a command" }),
+      approval("o1", "m1", { answered: "allow" }),
+      msg("b1", { text: "The build is green.", requestMessageId: "m1" }),
+      spoken("m2", "and the tests?", "c1"),
+      msg("b2", { text: "All passing.", requestMessageId: "m2" }),
+      callRow("r1", "c1"),
+    ];
+    expect(entries(transcript, "c1")).toEqual(["said:m1", "step:s1", "approval:o1", "answer:b1", "said:m2", "answer:b2"]);
+  });
+
+  it("leaves out a typed message and its turn, another call, and the turn's receipts", () => {
+    const transcript = [
+      msg("t1", { role: "user", text: "typed while on the call" }),
+      msg("tb", { text: "Typed answer.", requestMessageId: "t1" }),
+      spoken("m1", "what's the weather", "c1"),
+      chip("h1", "m1", "auto-approved"),
+      msg("d1", { kind: "digest", text: "1 step", requestMessageId: "m1" }),
+      msg("b1", { text: "Sunny.", requestMessageId: "m1" }),
+      spoken("x1", "another call's request", "c2"),
+      msg("xb", { text: "Another answer.", requestMessageId: "x1" }),
+    ];
+    expect(entries(transcript, "c1")).toEqual(["said:m1", "answer:b1"]);
+  });
+
+  it("is empty for a call where nothing was asked", () => {
+    expect(callConversation([callRow("r1", "c1")], "c1")).toEqual([]);
+  });
+
+  it("skips a request or an answer with no words", () => {
+    const transcript = [
+      spoken("m1", "  ", "c1"),
+      msg("b1", { text: "", requestMessageId: "m1" }),
+      step("s1", "m1", "Read"),
+    ];
+    expect(entries(transcript, "c1")).toEqual(["step:s1"]);
+  });
+});
+
 describe("callRecordIsPartial", () => {
   const call = { startedAt: 1_000 };
   const loaded = (...times: number[]) => times.map((time, index) => msg(`l${index}`, { at: time }));
@@ -240,7 +276,6 @@ describe("callRecordIsPartial", () => {
 
   it("is false when the loaded messages reach back before the call began, though older ones remain", () => {
     expect(callRecordIsPartial(loaded(400, 5_000, 6_000), call, true)).toBe(false);
-    // a message at the very moment the call began is the oldest line it could hold
     expect(callRecordIsPartial(loaded(1_000, 5_000), call, true)).toBe(false);
   });
 

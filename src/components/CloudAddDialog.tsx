@@ -1,226 +1,139 @@
-// The Add a Cloud dialog (docs/cloud-pro.md, "Add a Cloud"): the one way to
-// buy OpenMausBot Cloud in the app, opened from the card after the update,
-// Show me how, the server menu, Settings and the routine screen. It covers the
-// buying journey only, one view per state from lib/cloud-plan cloudAddView:
-// the offer (the Admin's plans, trial, credit and money-back, nothing
-// hardcoded), signing in, the checkout open in the browser, the payment
-// received, My Cloud starting, and My Cloud ready. A payment problem, an ended
-// sign-in or a Cloud that can't be reached go to Settings → OpenMausBot Cloud.
-// Checkout never runs in the app: main opens Dodo's own checkout page in the
-// default browser, and the app follows its own session, never the return.
-import { useEffect, useState } from "react";
-import { Check, Loader2, X } from "lucide-react";
+// Security: checkout never runs in the app; main opens the provider's checkout page in the default browser and the app
+// follows its own session, never the return. The emailed code's attempt, the token and the checkout page stay in main.
+import { useEffect, useState, type ReactNode } from "react";
+import { X } from "lucide-react";
+import type { CloudColor } from "../../electron/cloud-buy.mjs";
 import type { CloudAccountState, CloudCheckoutOutcome } from "../../electron/cloud-account.mjs";
-import type { CloudOffer, CloudSetupStep } from "../../electron/cloud-home.mjs";
+import type { CloudOffer } from "../../electron/cloud-home.mjs";
 import { track } from "@/lib/analytics";
-import { activeLocale, t } from "@/lib/i18n";
-import { cloudAddView, cloudPlanLabel, moneyBackLine, offerPlan, offerPlanLabel, planRow, trialTimeline, usd, type CloudAddView } from "@/lib/cloud-plan";
-import type { LocaleKey } from "@/locales";
+import { cn } from "@/lib/cn";
+import { cloudColor, cloudNameShown, DEFAULT_CLOUD_COLOR } from "@/lib/cloud-look";
+import { cloudAddView, offerPlan, sameTerms, startedSleeps, type CloudAddView, type CloudSignInPhase } from "@/lib/cloud-plan";
+import { t } from "@/lib/i18n";
+import { welcomeOnScreen } from "@/lib/onboarding";
 import { useStore } from "@/state/store";
+import { ChooseScreen } from "./cloud-buy/ChooseScreen";
+import { OneCloudScreen, StatusScreen } from "./cloud-buy/OneCloudScreen";
+import { PayScreen } from "./cloud-buy/PayScreen";
+import { StagingMark } from "./cloud-buy/parts";
+import { SetupScreen, TeamReadyScreen, TeamSetupScreen } from "./cloud-buy/SetupScreen";
+import { BrowserSignInScreen, codeDigits, SignInScreen } from "./cloud-buy/SignInScreen";
 
-const SETUP_STEPS = [
-  ["reserving", "cloudHome.step.reserving"], ["storage", "cloudHome.step.storage"],
-  ["starting", "cloudHome.step.starting"], ["checking", "cloudHome.step.checking"],
-] as const satisfies ReadonlyArray<readonly [CloudSetupStep, LocaleKey]>;
-const shortDate = (value: number) => new Intl.DateTimeFormat(activeLocale(), { day: "numeric", month: "short" }).format(new Date(value));
-
-const PRIMARY = "inline-flex min-h-10 w-full items-center justify-center rounded-lg bg-accent px-4 py-2 text-[14px] font-medium text-accent-ink hover:opacity-90 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus";
-const QUIET = "py-2 text-[12.5px] text-ink-secondary hover:text-ink";
-
-/** The plan an arrow key moves the plan picker to (a radio group: Down and
- * Right go on, Up and Left back, wrapping; Home and End to either end), or
- * null for any other key. */
-export function planFromKey(tiers: readonly string[], current: string, key: string): string | null {
-  const at = tiers.indexOf(current);
-  if (at === -1 || !tiers.length) return null;
-  const next = key === "ArrowDown" || key === "ArrowRight" ? (at + 1) % tiers.length : key === "ArrowUp" || key === "ArrowLeft" ? (at - 1 + tiers.length) % tiers.length
-    : key === "Home" ? 0 : key === "End" ? tiers.length - 1 : null;
-  return next === null ? null : tiers[next]!;
-}
-
-/** What a view's buttons do. */
 export interface CloudAddActions {
-  choose(tier: string): void;
-  checkout(): void;
+  /** A plan card's button: the in-app sign-in when signed out, then (or else) that plan's checkout. */
+  start(tier: string): void;
   signIn(): void;
+  back(): void;
+  email(value: string): void;
+  sendCode(): void;
+  changeEmail(): void;
+  code(value: string): void;
+  resend(): void;
+  /** The browser approval: single sign-on, two-step, or an Admin without the email route. */
+  browser(): void;
   reopenBrowser(): void;
   cancelSignIn(): void;
+  reopenCheckout(): void;
+  copyLink(): void;
   changePlan(): void;
   retry(): void;
+  name(value: string): void;
+  color(value: CloudColor): void;
   openCloud(): void;
+  /** A Team or Business plan's Cloud: the team's, opened as the switcher opens it. */
+  openTeam(teamId: string): void;
+  notNow(): void;
+  interest(): void;
   close(): void;
 }
 
-/** The dialog's content for one view: no state of its own. `chosen`: the
- * plan picked (else the offer's preselected one); `offerShown`: the last
- * offer this dialog read, for the terms once the trial has started. */
-export function CloudAddPanel({ view, chosen, offerShown, now, busy = false, openFailed = false, actions }: {
-  view: CloudAddView; chosen: string | null; offerShown: CloudOffer | null; now: number; busy?: boolean; openFailed?: boolean; actions: CloudAddActions;
-}) {
-  // The heading takes focus when the view changes (CloudAddDialog), so a screen reader says the new step.
-  const heading = (title: string, subtitle?: string) => <>
-    <h2 id="cloud-add-title" tabIndex={-1} className="pe-8 text-[17px] font-semibold text-ink outline-none">{title}</h2>
-    {subtitle && <p className="mt-1 text-[13px] leading-relaxed text-ink-secondary">{subtitle}</p>}
-  </>;
-  const closeRow = (label = t("cloudAdd.close")) => <div className="mt-4 flex justify-end"><button type="button" className="ui-button" onClick={actions.close}>{label}</button></div>;
+/** What the sheet holds itself: typed words, the chosen plan, the countdown and short notes. Never a code or a token.
+ * `current` is the tier of the plan this account already has, from its verified entitlement. */
+export interface CloudAddUi {
+  chosen: string | null; current: string | null; offerShown: CloudOffer | null; now: number; busy: boolean; openFailed: boolean;
+  email: string; code: string; profileEmail: string | null;
+  look: { typed: string; name: string; color: CloudColor };
+  counting: number | null; copied: boolean; payFailed: boolean; interest: "sent" | "failed" | null;
+}
+
+export function CloudAddPanel({ view, ui, actions }: { view: CloudAddView; ui: CloudAddUi; actions: CloudAddActions }) {
   switch (view.kind) {
-    case "checking": return <div data-cloud-add="checking">
-      {heading(t("cloudAdd.title"))}
-      <p role="status" className="mt-4 flex items-center gap-2 text-[13px] text-ink-secondary"><Loader2 size={14} className="animate-spin" aria-hidden="true" />{t("cloudAdd.checking")}</p>
-      {closeRow()}
-    </div>;
-    case "unreachable": case "error": {
-      const line = view.kind === "unreachable" ? t("cloudAdd.unreachable") : view.reason === "rate-limited" ? t("cloudAdd.rateLimited") : t("cloudAdd.failed");
-      return <div data-cloud-add={view.kind === "error" ? `error-${view.reason}` : "unreachable"}>
-        {heading(t("cloudAdd.title"))}
-        <p role="alert" className="mt-4 text-[13px] leading-relaxed text-ink">{line}</p>
-        <div className="mt-4 flex items-center justify-end gap-3">
-          <button type="button" className={QUIET} onClick={actions.close}>{t("cloudAdd.close")}</button>
-          <button type="button" className="ui-button" onClick={actions.retry}>{t("cloudAdd.tryAgain")}</button>
-        </div>
-      </div>;
-    }
-    case "offer": {
-      const { offer } = view;
-      const plan = offerPlan(offer, chosen);
-      const trial = Boolean(plan.trialDays);
-      const timeline = trialTimeline(offer, plan, now);
-      const moneyBack = moneyBackLine(offer);
-      return <div data-cloud-add={trial ? "offer-trial" : "offer"}>
-        {heading(trial ? t("cloudAdd.titleTrial", { days: plan.trialDays! }) : t("cloudAdd.title"), t("cloudAdd.subtitle"))}
-        <ul className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-ink-secondary">
-          {(["cloudIntro.routines", "cloudIntro.phone", "cloudIntro.included"] as const).map(key => <li key={key} className="flex items-center gap-1.5"><Check size={12} aria-hidden="true" />{t(key)}</li>)}
-        </ul>
-        <div role="radiogroup" aria-label={t("cloudAdd.plans")} className="mt-4 flex flex-col gap-2">
-          {offer.plans.map(entry => {
-            const row = planRow(entry), selected = entry.tier === plan.tier;
-            // One tab stop for the group, on the plan picked; the arrow keys move between plans.
-            const onKeyDown = (event: { key: string; preventDefault(): void; currentTarget: { parentElement: HTMLElement | null } }) => {
-              const next = planFromKey(offer.plans.map(item => item.tier), plan.tier, event.key);
-              if (!next) return;
-              event.preventDefault();
-              actions.choose(next);
-              event.currentTarget.parentElement?.querySelector<HTMLElement>(`[data-plan="${next}"]`)?.focus();
-            };
-            return <button key={entry.tier} type="button" role="radio" aria-checked={selected} tabIndex={selected ? 0 : -1} data-plan={entry.tier} onClick={() => actions.choose(entry.tier)} onKeyDown={onKeyDown}
-              className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left ${selected ? "border-accent/70 bg-accent/10" : "border-hairline/50 hover:bg-raised"}`}>
-              <span aria-hidden="true" className={`mt-1 size-3.5 shrink-0 rounded-full border-2 ${selected ? "border-accent bg-accent" : "border-hairline"}`} />
-              <span className="min-w-0 flex-1">
-                <span className="flex flex-wrap items-baseline justify-between gap-x-3">
-                  <span className="text-[14px] font-medium text-ink">{row.name}{row.popular && <span className="ms-2 rounded-full bg-accent/15 px-2 py-0.5 text-[11px] font-medium text-accent-text">{t("cloudAdd.popular")}</span>}</span>
-                  <span className="text-[15px] font-semibold text-ink">{row.price}</span>
-                </span>
-                {row.details && <span className="mt-0.5 block text-[12px] text-ink">{row.details.main}</span>}
-                {row.details && <span className="block text-[11.5px] text-ink-secondary">{row.details.machine}</span>}
-              </span>
-            </button>;
-          })}
-        </div>
-        {timeline.length > 0 && <ol data-cloud-add-timeline className="mt-4 flex flex-col gap-1.5 text-[12.5px]">
-          {timeline.map(step => <li key={step.when} className="grid grid-cols-[64px_1fr] gap-2"><span className="font-medium text-ink">{step.when}</span><span className="text-ink-secondary">{step.text}</span></li>)}
-        </ol>}
-        {view.waited && <p role="status" className="mt-3 text-[12.5px] text-ink">{t(view.waited === "trial" ? "cloudAdd.waitedTrial" : "cloudAdd.waited")}</p>}
-        {view.notice && <p role="status" className="mt-3 text-[12.5px] text-ink">{t(view.notice === "code-expired" ? "cloudAdd.codeExpired" : view.notice === "signin-ended" ? "cloudAdd.signInEnded" : "cloudAdd.preparing")}</p>}
-        <div className="mt-4">
-          <button type="button" className={PRIMARY} disabled={busy} onClick={actions.checkout}>
-            {trial ? t("cloudIntro.start") : t("cloudAdd.buy", { plan: offerPlanLabel(plan), price: usd(plan.amount / 100) })}
-          </button>
-          <p className="mt-1.5 text-center text-[12px] text-ink-secondary">{[trial ? null : t("cloudAdd.buyNote"), moneyBack, trial ? t("cloudAdd.trialNote") : null].filter(Boolean).join(" ")}</p>
-        </div>
-        <div className="mt-2 flex items-center justify-between gap-3">
-          {view.signedOut ? <button type="button" className="py-2 text-left text-[12.5px] font-medium text-accent-text underline underline-offset-2 hover:text-ink" onClick={actions.signIn}>{t("cloudAccount.signIn")}</button> : <span />}
-          <button type="button" className={QUIET} onClick={actions.close}>{t("notice.notNow")}</button>
-        </div>
-      </div>;
-    }
-    case "signing-in": {
-      const trial = offerShown ? Boolean(offerPlan(offerShown, chosen).trialDays) : false;
-      return <div data-cloud-add="signing-in">
-        {heading(t("cloudAdd.browserTitle"))}
-        {view.code ? <ol className="mt-3 list-decimal ps-5 text-[13px] leading-relaxed text-ink">
-          <li>{t("cloudAdd.signInStep1")}</li>
-          <li>{t("cloudAccount.codeCheck")}<code dir="ltr" className="block select-all text-[16px] font-semibold tracking-widest">{view.code}</code></li>
-          <li>{t(!view.checkout ? "cloudAdd.signInStep3Connect" : trial ? "cloudAdd.signInStep3Trial" : "cloudAdd.signInStep3")}</li>
-        </ol> : <p role="status" className="mt-3 text-[13px] text-ink-secondary">{t("cloudAdd.opening")}</p>}
-        <div className="mt-4 flex items-center justify-end gap-3">
-          <button type="button" className={QUIET} disabled={busy} onClick={actions.cancelSignIn}>{t("cloudAdd.cancel")}</button>
-          <button type="button" className="ui-button" disabled={busy || !view.code} onClick={actions.reopenBrowser}>{t("cloudAdd.reopenBrowser")}</button>
-        </div>
-      </div>;
-    }
-    case "waiting": {
-      // Signed in on the way to a checkout: the browser's page after approval has the next step. If that tab is gone, this
-      // opens the same checkout (the Admin hands back an open one for the same offer).
-      const plan = view.browser === "signin" && offerShown ? offerPlan(offerShown, view.plan) : null;
-      return <div data-cloud-add={view.browser === "signin" ? "waiting-signin" : "waiting"}>
-        {heading(t("cloudAdd.browserTitle"), t(view.browser === "signin" ? "cloudAdd.waitingSignIn" : "cloudAdd.waiting"))}
-        <div className="mt-4 flex flex-wrap items-center justify-end gap-3">
-          <button type="button" className={QUIET} onClick={actions.close}>{t("cloudAdd.cancel")}</button>
-          <button type="button" className={QUIET} onClick={actions.changePlan}>{t("cloudAdd.changePlan")}</button>
-          <button type="button" className="ui-button" disabled={busy} onClick={actions.checkout}>{plan
-            ? plan.trialDays ? t("cloudIntro.start") : t("cloudAdd.buy", { plan: offerPlanLabel(plan), price: usd(plan.amount / 100) })
-            : t("cloudAdd.reopenCheckout")}</button>
-        </div>
-      </div>;
-    }
-    case "received": return <div data-cloud-add="received">
-      {heading(t("cloudAdd.receivedTitle"), view.line)}
-      <p className="mt-2 text-[13px] text-ink-secondary">{t("cloudAccount.purchaseNoteNoDate")}</p>
-      {closeRow()}
-    </div>;
-    case "starting": {
-      const at = SETUP_STEPS.findIndex(([step]) => step === view.step);
-      const trial = view.trial;
-      const terms = trial ? [
-        trial.amount !== null
-          ? t("cloudAdd.trialTerms", { date: shortDate(trial.endsAt), plan: trial.tier ? cloudPlanLabel(trial.tier) : "MausBot Cloud", price: t("cloudAdd.perMonth", { price: usd(trial.amount / 100) }) })
-          : t("cloudAdd.trialTermsNoPrice", { date: shortDate(trial.endsAt), plan: trial.tier ? cloudPlanLabel(trial.tier) : "MausBot Cloud" }),
-        offerShown?.reminderDays ? t("cloudAdd.reminderTerms", { days: offerShown.reminderDays }) : null,
-        t("cloudAdd.cancelAnyTime"),
-      ].filter(Boolean).join(" ") : null;
-      return <div data-cloud-add="starting">
-        {heading(t(trial ? "cloudAdd.trialStarted" : "cloudAdd.receivedTitle"), t("cloudAdd.starting"))}
-        <ol data-cloud-setup={view.step ?? "reserving"} className="mt-3 flex flex-col gap-1 text-[13px]">
-          {SETUP_STEPS.map(([step, key], index) => <li key={step} aria-current={index === Math.max(at, 0) ? "step" : undefined}
-            className={index === Math.max(at, 0) ? "font-medium text-ink" : index < at ? "text-ink-secondary line-through decoration-ink-secondary/40" : "text-ink-secondary"}>{t(key)}</li>)}
-        </ol>
-        {view.slow && <p role="status" className="mt-2 text-[12.5px] text-ink-secondary">{t("cloudHome.slow")}</p>}
-        {terms && <p className="mt-3 text-[12.5px] leading-relaxed text-ink-secondary">{terms}</p>}
-        <p className="mt-2 text-[12.5px] font-medium text-ink">{t("cloudAdd.nextJob")}</p>
-        {closeRow()}
-      </div>;
-    }
-    case "ready": case "has-cloud": return <div data-cloud-add={view.kind}>
-      {view.kind === "ready" ? heading(t("cloudAdd.readyTitle"), t("cloudAdd.ready")) : heading(t("cloudAdd.hasCloudTitle"), t("cloudAdd.hasCloud"))}
-      <div className="mt-4 flex items-center justify-end gap-3">
-        <button type="button" className={QUIET} onClick={actions.close}>{t(view.kind === "ready" ? "cloudAdd.later" : "cloudAdd.close")}</button>
-        <button type="button" className="ui-button" disabled={busy} onClick={actions.openCloud}>{t("cloudHome.connect")}</button>
-      </div>
-      {openFailed && <p role="alert" className="mt-2 text-[12.5px] text-danger">{t("cloudNotice.openFailed")}</p>}
-      <p className="mt-3 text-[12px] text-ink-secondary">{t("cloudAdd.switchHint")}</p>
-    </div>;
+    case "checking": return <StatusScreen kind="checking" line={null} onClose={actions.close} />;
+    case "unreachable": return <StatusScreen kind="unreachable" line={t("cloudAdd.unreachable")} onRetry={actions.retry} onClose={actions.close} />;
+    case "error": return <StatusScreen kind={`error-${view.reason}`} line={t(view.reason === "rate-limited" ? "cloudAdd.rateLimited" : "cloudAdd.failed")}
+      onRetry={actions.retry} onClose={actions.close} />;
+    case "offer": return <ChooseScreen offer={view.offer} current={ui.current} now={ui.now} busy={ui.busy} signedOut={view.signedOut}
+      notice={view.notice ? t(view.notice === "code-expired" ? "cloudAdd.codeExpired" : view.notice === "signin-ended" ? "cloudAdd.signInEnded"
+        : view.notice === "terms" ? "cloudBuy.termsChanged" : "cloudAdd.preparing") : null}
+      onStart={actions.start} onSignIn={actions.signIn} />;
+    case "sign-in": return <SignInScreen phase={view.phase} email={ui.email} code={ui.code} profileEmail={ui.profileEmail} busy={ui.busy} now={ui.now}
+      onBack={actions.back} onEmail={actions.email} onSend={actions.sendCode} onChangeEmail={actions.changeEmail} onCode={actions.code}
+      onResend={actions.resend} onBrowser={actions.browser} />;
+    case "signing-in": return <BrowserSignInScreen code={view.code} checkout={view.checkout} busy={ui.busy}
+      trial={ui.offerShown ? Boolean(offerPlan(ui.offerShown, ui.chosen).trialDays) : false} onReopen={actions.reopenBrowser} onCancel={actions.cancelSignIn} />;
+    case "waiting": return <PayScreen plan={view.plan} offer={ui.offerShown} browser={view.browser} late={view.late} link={view.link} email={view.email}
+      busy={ui.busy} copied={ui.copied} failed={ui.payFailed} onReopen={actions.reopenCheckout} onCopy={actions.copyLink} onChangePlan={actions.changePlan} />;
+    case "starting": case "ready": return <SetupScreen started={view} received={view.kind === "starting" && view.received} step={view.kind === "starting" ? view.step : null}
+      slow={view.kind === "starting" && view.slow} ready={view.kind === "ready"} sleeps={startedSleeps(view, ui.offerShown)} name={ui.look.name} typed={ui.look.typed} color={ui.look.color}
+      counting={ui.counting} busy={ui.busy} openFailed={ui.openFailed} onName={actions.name} onColor={actions.color} onOpen={actions.openCloud} onNotNow={actions.notNow} />;
+    case "has-cloud": return <OneCloudScreen name={ui.look.name} color={ui.look.color} busy={ui.busy} interest={ui.interest} openFailed={ui.openFailed}
+      onInterest={actions.interest} onOpen={actions.openCloud} />;
+    case "team-starting": return <TeamSetupScreen team={view.team} step={view.step} slow={view.slow} />;
+    case "team-ready": return <TeamReadyScreen name={view.team.name} busy={ui.busy} openFailed={ui.openFailed} onOpen={() => actions.openTeam(view.team.id)} />;
     case "settings": return null;
   }
 }
 
-/** The dialog, open while the store says (state.cloudAdd), on This computer's page only. */
+const WIDTH: Partial<Record<CloudAddView["kind"], string>> = { offer: "max-w-[900px]", starting: "max-w-[720px]", ready: "max-w-[720px]" };
+/** Mid sign-in, checkout or setup a stray click beside the sheet (say, back from paying in the browser) must not lose it: there only Close and Esc do. */
+const HELD: ReadonlySet<CloudAddView["kind"]> = new Set(["sign-in", "signing-in", "waiting", "starting", "team-starting"]);
+
+/** The sheet over the app: one width per screen, the close button, and the staging mark when the app is on staging.
+ * Above the z-50 layers (Settings, the welcome flow), which it may be opened over. */
+export function CloudAddSheet({ kind, staging, onClose, children }: { kind: CloudAddView["kind"]; staging: boolean; onClose: () => void; children: ReactNode }) {
+  return <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 sm:p-6" onMouseDown={event => event.target === event.currentTarget && !HELD.has(kind) && onClose()}>
+    <div role="dialog" aria-modal="true" aria-labelledby="cloud-add-title" data-cloud-add-dialog tabIndex={-1}
+      className={cn("animate-pop-in relative max-h-full w-full overflow-y-auto overscroll-contain rounded-[18px] border border-hairline/70 bg-panel shadow-2xl outline-none", WIDTH[kind] ?? "max-w-[540px]")}>
+      <button type="button" onClick={onClose} aria-label={t("cloudAdd.close")} className="ui-icon-button absolute end-3.5 top-3.5 z-10"><X size={18} /></button>
+      {staging && <StagingMark className="absolute end-14 top-[19px] z-10" />}
+      {children}
+    </div>
+  </div>;
+}
+const OFFER_VIEWS: ReadonlyArray<CloudAddView["kind"]> = ["offer", "checking", "unreachable", "waiting", "sign-in", "signing-in"];
+const FOCUSABLE = "button:not([disabled]):not([tabindex='-1']), input:not([disabled]):not([tabindex='-1']), [href], [tabindex='0']";
+const free = (state: CloudAccountState) => state.status === "connected" && state.entitlement?.plan === "free" && !state.purchase && !state.machine;
+const currentTier = (state: CloudAccountState | null | undefined) =>
+  state?.status === "connected" && state.entitlement?.plan === "pro" && state.entitlement.status === "active" ? state.entitlement.tier ?? "pro" : null;
+type AutoOpen = number | "off" | "done" | null;
+type Note = "copied" | "pay-failed" | "interest-sent" | "interest-failed" | null;
+
 export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
   const { state, dispatch } = useStore();
   const request = state.cloudAdd;
   const bridge = window.ogb?.remoteClient?.active ? undefined : window.ogb?.cloudAccount;
   const [account, setAccount] = useState<CloudAccountState | null>(null);
-  // What this person may buy (undefined while it is being read), the plan picked, and the last offer shown.
   const [offer, setOffer] = useState<CloudOffer | null | undefined>(undefined);
   const [chosen, setChosen] = useState<string | null>(null);
   const [error, setError] = useState<"failed" | "rate-limited" | null>(null);
-  // A checkout refused as a conflict that changed nothing here (one already being prepared): said with the offer.
   const [conflict, setConflict] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [openFailed, setOpenFailed] = useState(false);
   const [asked, setAsked] = useState(0);
   const [reported, setReported] = useState<string[]>([]);
+  const [signIn, setSignIn] = useState<CloudSignInPhase | null>(null);
+  const [form, setForm] = useState({ email: "", code: "" });
+  const [look, setLook] = useState<{ typed: string; color: CloudColor; dirty: boolean } | null>(null);
+  const [auto, setAuto] = useState<AutoOpen>(null);
+  const [note, setNote] = useState<Note>(null);
+  const [, setTick] = useState(0);
+  const [arrived, setArrived] = useState(false);
+  const [terms, setTerms] = useState(false);
   const open = Boolean(request && bridge);
+  const profileEmail = state.config?.profile?.email?.trim() || null;
+  // Over the welcome flow the sheet is as good as closed for "ready": main notifies, and nothing switches the window away.
+  const overWelcome = welcomeOnScreen();
   useEffect(() => {
     if (!open || !bridge) return;
     let active = true, updated = false;
@@ -228,46 +141,58 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
     void bridge.state().then(next => { if (active && !updated) setAccount(next); }).catch(() => {});
     return () => { active = false; unsubscribe(); };
   }, [open, bridge]);
-  const view = open ? cloudAddView(account, offer, { now: now(), error, choosing, conflict }) : null;
-  // The offer is read when the dialog opens, on Try again, and when what this account may buy changes.
-  const buying = view?.kind === "offer" || view?.kind === "checking" || view?.kind === "unreachable" || view?.kind === "waiting";
-  const offerKey = open && buying && account ? `${account.status}:${JSON.stringify(account.offer ?? null)}:${asked}` : null;
+  const view = open ? cloudAddView(account, offer, { now: now(), error, choosing, conflict, signIn, arrived, terms }) : null;
+  const offerKey = open && view && OFFER_VIEWS.includes(view.kind) && account ? `${account.status}:${JSON.stringify(account.offer ?? null)}:${asked}` : null;
   useEffect(() => {
     if (!offerKey || !bridge?.offer) return;
     let active = true;
     void bridge.offer().then(next => { if (active) setOffer(next); }, () => { if (active) setOffer(null); });
     return () => { active = false; };
   }, [offerKey, bridge]);
+  const defaultName = t("cloudSetup.myCloud");
+  const shownLook = { typed: look?.typed ?? defaultName, color: look?.color ?? DEFAULT_CLOUD_COLOR, name: cloudNameShown(look?.typed ?? defaultName, defaultName) };
   const close = () => {
+    if (signIn) void bridge?.signInCancel?.().catch(() => {});
     dispatch({ type: "closeCloudAdd" });
     setError(null); setConflict(false); setChoosing(false); setOpenFailed(false); setReported([]); setChosen(null);
+    setSignIn(null); setForm({ email: "", code: "" }); setLook(null); setAuto(null); setNote(null); setArrived(false); setTerms(false);
   };
-  // Escape closes it and Tab stays inside it, before anything underneath
-  // (Settings, when opened from there) hears the key: the capture phase, and
-  // the key marked handled.
+  // Capture phase, key marked handled: Escape and Tab reach this before anything underneath (Settings). Focus goes back to the opener.
   useEffect(() => {
     if (!open) return;
+    const active = document.activeElement as HTMLElement | null;
+    const opener = active && active !== document.body && typeof active.focus === "function" ? active : null;
+    if (request?.signIn) { setSignIn({ step: "email", intent: false, problem: null }); setForm({ email: profileEmail ?? "", code: "" }); }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") { event.preventDefault(); close(); return; }
       if (event.key !== "Tab") return;
-      // The plan picker is one tab stop (its other plans take tabindex -1).
-      const controls = [...(document.querySelector("[data-cloud-add-dialog]")?.querySelectorAll<HTMLElement>("button:not([disabled]):not([tabindex='-1'])") ?? [])];
+      const controls = [...(document.querySelector("[data-cloud-add-dialog]")?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])];
       if (!controls.length) return;
       event.preventDefault();
       const at = controls.indexOf(document.activeElement as HTMLElement);
       controls[at === -1 ? 0 : (at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length]!.focus();
     };
     window.addEventListener("keydown", onKey, true);
-    (document.querySelector("[data-cloud-add-dialog] button") as HTMLElement | null)?.focus();
-    return () => window.removeEventListener("keydown", onKey, true);
+    (document.querySelector("#cloud-add-title") as HTMLElement | null ?? document.querySelector("[data-cloud-add-dialog]") as HTMLElement | null)?.focus();
+    return () => { window.removeEventListener("keydown", onKey, true); if (opener?.isConnected) opener.focus(); };
   }, [open]);
-  // Payment problems, an ended sign-in and an unreachable Cloud have their one message and action in Settings.
-  const kind = view?.kind ?? null;
-  // A new step takes focus at its heading, so it is read out and Tab stays in the dialog (the button pressed may be gone).
   useEffect(() => {
-    if (!kind || kind === "checking" || kind === "settings") return;
+    if (!open || !bridge?.sheet || overWelcome) return;
+    void bridge.sheet(true).catch(() => {});
+    return () => { void bridge.sheet?.(false).catch(() => {}); };
+  }, [open, bridge, overWelcome]);
+  const kind = view?.kind ?? null;
+  const focusKey = view?.kind === "sign-in" ? `sign-in-${view.phase.step}` : kind;
+  useEffect(() => {
+    if (!focusKey || focusKey === "checking" || focusKey === "settings") return;
     if ((document.activeElement as HTMLElement | null)?.closest?.("[data-cloud-add-dialog]")) return;
-    (document.querySelector("#cloud-add-title") as HTMLElement | null)?.focus();
+    (document.querySelector("[data-cloud-add-dialog] [data-autofocus]") as HTMLElement | null ?? document.querySelector("#cloud-add-title") as HTMLElement | null)?.focus();
+  }, [focusKey]);
+  // Pay or Setting up seen in this sheet: when the Cloud is ready, it is theirs to open here (not "one Cloud for now").
+  // Ready shown here ends the purchase for main, so a later Add a Cloud… is one Cloud for now.
+  useEffect(() => {
+    if ((kind === "waiting" || kind === "starting" || kind === "ready") && !arrived) setArrived(true);
+    if (kind === "ready" || kind === "team-ready") void bridge?.readySeen?.().catch(() => {});
   }, [kind]);
   useEffect(() => {
     if (!kind || !request) return;
@@ -275,53 +200,176 @@ export function CloudAddDialog({ now = Date.now }: { now?: () => number }) {
     if (kind === "checking") return;
     const first = reported.length === 0;
     if (first) track("cloud_dialog_shown", { source: request.source, view: kind });
-    if (["received", "starting", "ready"].includes(kind) && !reported.includes(kind)) track("cloud_dialog_view", { view: kind });
+    if (["starting", "ready"].includes(kind) && !reported.includes(kind)) track("cloud_dialog_view", { view: kind });
     if (first || !reported.includes(kind)) setReported([...reported, kind]);
   }, [kind]);
-  if (!open || !view || !request || !bridge || view.kind === "settings") return null;
-
-  const offerShown = offer ?? null;
+  // The setup screen saves what its preview shows, even untouched, so the switcher matches it; One Cloud for now changes nothing.
+  useEffect(() => {
+    if (!kind || !["starting", "ready", "has-cloud"].includes(kind) || look || !bridge?.look) return;
+    let active = true;
+    void bridge.look().then(next => { if (active) setLook({ typed: next.name, color: cloudColor(next.color) ?? DEFAULT_CLOUD_COLOR, dirty: kind !== "has-cloud" }); }, () => {});
+    return () => { active = false; };
+  }, [kind]);
+  useEffect(() => {
+    if (!look?.dirty || !bridge?.setLook) return;
+    const timer = setTimeout(() => { void bridge.setLook?.(shownLook.name, look.color).catch(() => {}); }, 400);
+    return () => clearTimeout(timer);
+  }, [look?.typed, look?.color]);
+  // Ready while this sheet is open in the focused window: "Opening in 3…", then the Cloud opens; Not now stops it.
+  useEffect(() => {
+    if (kind !== "ready" || auto !== null) return;
+    setAuto(!overWelcome && typeof document.hasFocus === "function" && document.hasFocus() ? 3 : "off");
+  }, [kind]);
+  const resendAt = signIn?.step === "code" ? signIn.resendAt : 0;
+  useEffect(() => {
+    if (!resendAt || resendAt <= now()) return;
+    const timer = setTimeout(() => setTick(now()), 1000);
+    return () => clearTimeout(timer);
+  });
+  useEffect(() => {
+    if (note !== "copied") return;
+    const timer = setTimeout(() => setNote(null), 2500);
+    return () => clearTimeout(timer);
+  }, [note]);
   const run = (step: () => Promise<unknown>) => {
     if (busy) return;
     setBusy(true); setOpenFailed(false);
     void step().catch(() => setError("failed")).finally(() => setBusy(false));
   };
-  const checkout = () => run(async () => {
-    const plan = view.kind === "waiting" && !chosen ? view.plan : offerShown ? offerPlan(offerShown, chosen).tier : null;
+  const openCloud = () => {
+    if (busy || !bridge) return;
+    setBusy(true); setOpenFailed(false); setAuto("done");
+    void (async () => {
+      if (look?.dirty && bridge.setLook) await bridge.setLook(shownLook.name, look.color).catch(() => {});
+      await bridge.connectHome();
+    })().then(() => close(), () => setOpenFailed(true)).finally(() => setBusy(false));
+  };
+  const openTeam = (teamId: string) => {
+    if (busy || !bridge?.openTeam) return;
+    setBusy(true); setOpenFailed(false);
+    void bridge.openTeam(teamId).then(() => close(), () => setOpenFailed(true)).finally(() => setBusy(false));
+  };
+  useEffect(() => {
+    if (typeof auto !== "number") return;
+    const timer = setTimeout(() => { if (auto > 1) setAuto(auto - 1); else openCloud(); }, 1000);
+    return () => clearTimeout(timer);
+  }, [auto]);
+  // Focus left the window while counting: the person is elsewhere, so nothing switches; Open {name} waits for them.
+  const counting = typeof auto === "number";
+  useEffect(() => {
+    if (!counting) return;
+    const stop = () => setAuto("off");
+    window.addEventListener("blur", stop);
+    return () => window.removeEventListener("blur", stop);
+  }, [counting]);
+  if (!open || !view || !request || !bridge || view.kind === "settings") return null;
+
+  const offerShown = offer ?? null;
+  const planNow = () => view.kind === "waiting" && !chosen ? view.plan : offerShown ? offerPlan(offerShown, chosen).tier : null;
+  const openCheckout = async (plan: string | null) => {
     if (!plan || !bridge.checkout) { setError("failed"); return; }
-    const trial = Boolean(offerShown && offerShown.plans.find(entry => entry.tier === plan)?.trialDays);
+    const trial = Boolean(offerShown?.plans.find(entry => entry.tier === plan)?.trialDays);
     const result = await bridge.checkout(plan, request.source);
     const outcome: CloudCheckoutOutcome = result.outcome;
     setAccount(result.state);
-    if (outcome === "opened" || outcome === "signing-in") { setChoosing(false); setError(null); setConflict(false); track("cloud_checkout_opened", { plan, trial, source: request.source }); }
+    if (outcome === "opened" || outcome === "signing-in") {
+      setChoosing(false); setError(null); setConflict(false); setNote(null); setTerms(false); track("cloud_checkout_opened", { plan, trial, source: request.source });
+    }
     else if (outcome === "rate-limited") setError("rate-limited");
     else if (outcome === "failed") setError("failed");
-    // A conflict: the account changed (a plan, a payment being linked), and the state just read says what now; when it
-    // still offers the same, a checkout was already being prepared, and the offer says so.
     else setConflict(true);
-  });
+  };
+  const enterSignIn = (intent: boolean) => {
+    setSignIn({ step: "email", intent, problem: null });
+    setForm({ email: form.email || profileEmail || "", code: "" });
+  };
+  const sendCode = () => {
+    if (busy || !bridge.signInStart || !signIn || signIn.step === "done") return;
+    const phase = signIn;
+    setBusy(true);
+    void bridge.signInStart(form.email).then(result => {
+      if (result.outcome === "sent") {
+        setSignIn({ step: "code", intent: phase.intent, email: result.email, resendAt: result.resendAt, problem: null, triesLeft: null,
+          ...(result.signupOpen === false ? { signupOpen: false } : {}) });
+        setForm({ email: result.email, code: "" });
+        track("cloud_signin", { step: "code_sent", source: request.source });
+      } else setSignIn({ ...phase, problem: result.outcome });
+    }, () => setSignIn({ ...phase, problem: "failed" })).finally(() => setBusy(false));
+  };
+  const verify = (code: string) => {
+    if (!bridge.signInVerify || signIn?.step !== "code") return;
+    const phase = signIn, plan = phase.intent ? planNow() : null;
+    setBusy(true);
+    void (async () => {
+      try {
+        const result = await bridge.signInVerify!(code);
+        if (result.outcome !== "signed-in") {
+          setForm({ email: form.email, code: "" });
+          setSignIn({ ...phase, problem: result.outcome, triesLeft: result.outcome === "wrong-code" ? result.triesLeft : null });
+          return;
+        }
+        setAccount(result.state); setArrived(true);
+        track("cloud_signin", { step: "signed_in", source: request.source });
+        if (plan && free(result.state)) {
+          // The account's own offer may differ from the one shown signed out (a trial already used, another price).
+          if (sameTerms(offerShown, result.state.offer, plan)) { setSignIn({ step: "done", intent: true }); await openCheckout(plan); }
+          else { setTerms(true); setChosen(plan); }
+        }
+        setSignIn(null); setForm({ email: form.email, code: "" });
+      } catch { setSignIn({ ...phase, problem: "failed", triesLeft: null }); }
+      finally { setBusy(false); }
+    })();
+  };
   const actions: CloudAddActions = {
-    choose: tier => { setChosen(tier); setChoosing(true); setConflict(false); },
-    checkout,
-    // Signed out, someone who already pays signs in; the dialog follows that sign-in.
-    signIn: () => run(async () => setAccount(await bridge.begin())),
+    start: tier => {
+      setChosen(tier); setConflict(false);
+      if (view.kind === "offer" && view.signedOut && bridge.signInStart) { enterSignIn(true); return; }
+      run(() => openCheckout(tier));
+    },
+    signIn: () => enterSignIn(false),
+    back: () => { setSignIn(null); void bridge.signInCancel?.().catch(() => {}); },
+    email: value => setForm({ email: value, code: form.code }),
+    sendCode,
+    changeEmail: () => { if (signIn) { setSignIn({ step: "email", intent: signIn.intent, problem: null }); void bridge.signInCancel?.().catch(() => {}); } },
+    code: value => {
+      const digits = codeDigits(value);
+      setForm({ email: form.email, code: digits });
+      if (digits.length === 8 && !busy) verify(digits);
+    },
+    resend: sendCode,
+    browser: () => run(async () => {
+      const plan = signIn?.intent ? planNow() : null;
+      setSignIn(null);
+      await bridge.signInCancel?.().catch(() => {});
+      track("cloud_signin", { step: "browser", source: request.source });
+      if (plan) await openCheckout(plan);
+      else setAccount(await bridge.begin());
+    }),
     reopenBrowser: () => run(async () => setAccount(await bridge.reopen())),
     cancelSignIn: () => run(async () => setAccount(await bridge.cancel())),
-    changePlan: () => setChoosing(true),
+    reopenCheckout: () => {
+      if (view.kind !== "waiting" || busy) return;
+      setBusy(true); setNote(null);
+      const again = bridge.reopenCheckout ? bridge.reopenCheckout(view.plan, request.source) : bridge.checkout!(view.plan, request.source);
+      void again.then(result => { setAccount(result.state); if (result.outcome !== "opened") setNote("pay-failed"); }, () => setNote("pay-failed")).finally(() => setBusy(false));
+    },
+    copyLink: () => { void bridge.copyCheckoutLink?.().then(copied => setNote(copied ? "copied" : "pay-failed"), () => setNote("pay-failed")); },
+    changePlan: () => { setChosen(view.kind === "waiting" ? view.plan : chosen); setChoosing(true); setNote(null); },
     retry: () => { setError(null); setConflict(false); setOffer(undefined); setAsked(asked + 1); },
-    openCloud: () => {
-      if (busy) return;
-      setBusy(true); setOpenFailed(false);
-      void bridge.connectHome().then(() => close(), () => setOpenFailed(true)).finally(() => setBusy(false));
+    name: value => setLook({ typed: value, color: shownLook.color, dirty: true }),
+    color: value => setLook({ typed: shownLook.typed, color: value, dirty: true }),
+    openCloud,
+    openTeam,
+    notNow: () => setAuto("off"),
+    interest: () => {
+      if (busy || !bridge.interest) return;
+      setBusy(true);
+      void bridge.interest().then(() => setNote("interest-sent"), () => setNote("interest-failed")).finally(() => setBusy(false));
     },
     close,
   };
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6" onMouseDown={event => event.target === event.currentTarget && close()}>
-    <div role="dialog" aria-modal="true" aria-labelledby="cloud-add-title" data-cloud-add-dialog
-      className="relative max-h-full w-full max-w-[560px] overflow-y-auto rounded-2xl border border-hairline/50 bg-panel p-6 shadow-2xl">
-      <button type="button" onClick={close} aria-label={t("cloudAdd.close")} className="ui-icon-button absolute end-4 top-4"><X size={16} /></button>
-      <CloudAddPanel view={view} chosen={chosen} offerShown={offerShown} now={now()} busy={busy} openFailed={openFailed} actions={actions} />
-    </div>
-  </div>;
+  const ui: CloudAddUi = { chosen, current: currentTier(account), offerShown, now: now(), busy, openFailed, email: form.email, code: form.code, profileEmail, look: shownLook,
+    counting: typeof auto === "number" ? auto : null, copied: note === "copied", payFailed: note === "pay-failed",
+    interest: note === "interest-sent" ? "sent" : note === "interest-failed" ? "failed" : null };
+  return <CloudAddSheet kind={view.kind} staging={account?.staging === true} onClose={close}><CloudAddPanel view={view} ui={ui} actions={actions} /></CloudAddSheet>;
 }
-

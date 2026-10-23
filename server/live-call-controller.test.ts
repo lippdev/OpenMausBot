@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveCallState } from "../shared/wire.ts";
 import {
   ATTACH_TIMEOUT_MS, CLOSE_TIMEOUT_MS, CONSENT_SETTLE_MS, DELEGATION_SETTLE_MS, IDLE_CHECK_MS, PROGRESS_INTERVAL_MS,
-  LiveCallBusyError, LiveCallController, LiveCallNeedsProError, LiveCallSignedOutError, type LiveActivity, type LiveCallDeps, type LiveSocket,
+  LiveCallBusyError, LiveCallController, LiveCallSignedOutError, type LiveActivity, type LiveCallDeps, type LiveSocket,
 } from "./live-call-controller.ts";
 import { LIVE_COPY } from "../shared/live-approval.ts";
-import { LiveSessionError } from "./live-call.ts";
+import { LIVE_NEEDS_KEY, LiveSessionError } from "./live-call.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { Message, StoreChange } from "./store.ts";
 
@@ -38,7 +38,6 @@ function setup(overrides: Partial<LiveCallDeps> = {}) {
   const logs: string[] = [];
   let activity: LiveActivity = "idle";
   const settings = { key: "sk-test", voice: "sol", readTypedReplies: true, idleMinutes: 5 };
-  /** the thread's queue: ids of sends still waiting there */
   const queue = new Set<string>();
   let messageCounter = 0;
   const deps: LiveCallDeps = {
@@ -48,7 +47,6 @@ function setup(overrides: Partial<LiveCallDeps> = {}) {
     queued: vi.fn((_botId: string, _threadId: string, queueId: string) => queue.has(queueId)),
     activity: () => activity,
     broadcast: (frame) => frames.push(frame.call),
-    pro: () => true,
     settings: () => settings,
     createSession: vi.fn(async () => ({ sessionId: "sess_1", sdp: "answer-sdp" })),
     openSocket: (url, key) => { const socket = new FakeSocket(url, key); sockets.push(socket); return socket; },
@@ -96,75 +94,27 @@ describe("LiveCallController lifecycle", () => {
     expect(t.deps.createSession).toHaveBeenCalledTimes(1);
   });
 
-  it("asks for a key when none is set", async () => {
-    const t = setup();
-    t.settings.key = " ";
-    await expect(t.controller.start({ auth: owner, ...BOT, client: "desktop", sdp: "a" })).rejects.toMatchObject({ status: 409 });
-    expect(t.deps.createSession).not.toHaveBeenCalled();
-  });
-
-  // Live calls from a phone need an active Pro plan (electron/pro-plan.mjs);
-  // the desktop app's own calls are free. The plan is asked when a phone's
-  // call starts and never after, so a running call is never cut off by a
-  // plan change.
-  it("refuses a phone's start without Pro, before the key and before OpenAI", async () => {
-    const t = setup({ pro: () => false });
-    t.settings.key = "";
-    const refused = t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "a" });
-    await expect(refused).rejects.toBeInstanceOf(LiveCallNeedsProError);
-    await expect(refused).rejects.toMatchObject({ status: 402, message: "Live calls from your phone need a Pro plan." });
-    expect(t.deps.createSession).not.toHaveBeenCalled();
-    expect(t.controller.current()).toBeNull();
-    expect(t.frames).toEqual([]);
-    // the one slot is still free: once the plan allows it, a call starts
-    t.settings.key = "sk-test";
-    t.deps.pro = () => true;
-    await expect(t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "a" })).resolves.toMatchObject({ sdp: "answer-sdp" });
-  });
-
-  it("starts a call from the desktop app, or a browser on this computer, without Pro and without asking the plan", async () => {
-    for (const client of ["desktop", "web"] as const) {
-      const asked = vi.fn(() => false);
-      const t = setup({ pro: asked });
-      await expect(t.controller.start({ auth: owner, ...BOT, client, sdp: "a" })).resolves.toMatchObject({ sdp: "answer-sdp" });
-      expect(asked).not.toHaveBeenCalled();
-      expect(t.deps.createSession).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  it("counts a call through the companion as a phone's, whatever client it names", async () => {
-    for (const client of ["desktop", "web", "android"] as const) {
-      const t = setup({ pro: () => false });
-      await expect(t.controller.start({ auth: owner, ...BOT, device: "phone-1", client, sdp: "a" })).rejects.toBeInstanceOf(LiveCallNeedsProError);
+  it("asks every client for the person's own key when none is set, never for a plan", async () => {
+    for (const input of [{ client: "desktop" }, { client: "web" }, { client: "ios" }, { client: "android" }, { client: "ios", device: "phone-1" }] as const) {
+      const t = setup();
+      t.settings.key = " ";
+      const refused = t.controller.start({ auth: owner, ...BOT, ...input, sdp: "a" });
+      await expect(refused, JSON.stringify(input)).rejects.toMatchObject({ status: 409, message: LIVE_NEEDS_KEY });
       expect(t.deps.createSession).not.toHaveBeenCalled();
+      expect(t.controller.current()).toBeNull();
     }
+    expect(LIVE_NEEDS_KEY).toBe("Live calls use your own OpenAI key. Add it in Settings → API keys.");
   });
 
-  it("asks for the key only once the plan allows the call", async () => {
-    const t = setup({ pro: () => true });
-    t.settings.key = " ";
-    const refused = t.controller.start({ auth: owner, ...BOT, client: "desktop", sdp: "a" });
-    await expect(refused).rejects.toMatchObject({ status: 409, message: "Add an OpenAI API key to use Live calls." });
-    await expect(refused).rejects.not.toBeInstanceOf(LiveCallNeedsProError);
-  });
-
-  it("never ends a phone's running call when the plan changes; the phone's next start is refused", async () => {
-    let pro = true;
-    const asked = vi.fn(() => pro);
-    const t = setup({ pro: asked });
-    const { call } = await t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "offer-sdp" });
-    t.socket().open();
-    pro = false;
-    await vi.advanceTimersByTimeAsync(IDLE_CHECK_MS * 4);
-    expect(t.controller.current()).toMatchObject({ callId: call.callId, status: "live" });
-    expect(t.frames.map((f) => f?.status)).toEqual(["connecting", "live"]);
-    // asked once, when the call started
-    expect(asked).toHaveBeenCalledTimes(1);
-    const ending = t.controller.end(call.callId);
-    t.socket().receive({ type: "session.closed", reason: "close_requested" });
-    await expect(ending).resolves.toMatchObject({ status: "ended", endReason: "hung-up" });
-    await expect(t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "b" })).rejects.toBeInstanceOf(LiveCallNeedsProError);
-    expect(t.deps.createSession).toHaveBeenCalledTimes(1);
+  it("starts a phone's call with no plan at all once a key exists, through the companion or by the phone's own client", async () => {
+    for (const input of [{ client: "ios", device: "phone-1" }, { client: "android", device: "phone-2" }, { client: "ios" }, { client: "android" }] as const) {
+      const t = setup();
+      const { call } = await t.controller.start({ auth: owner, ...BOT, ...input, sdp: "offer-sdp" });
+      expect(call, JSON.stringify(input)).toMatchObject({ client: input.client, status: "connecting" });
+      expect(t.deps.createSession).toHaveBeenCalledWith(expect.objectContaining({ key: "sk-test" }));
+      t.socket().open();
+      expect(t.controller.current()).toMatchObject({ callId: call.callId, status: "live" });
+    }
   });
 
   it("frees the slot when OpenAI refuses the session", async () => {
@@ -311,9 +261,6 @@ describe("LiveCallController lifecycle", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  // Hung up (or the harness shut down) while OpenAI was creating the
-  // session: nobody will ever attach to that session, so the harness closes
-  // it instead of leaving it open until OpenAI gives up on it.
   describe("a start cancelled while OpenAI creates the session", () => {
     function pendingSession() {
       let resolve!: (value: { sessionId: string; sdp: string }) => void;
@@ -358,7 +305,6 @@ describe("LiveCallController lifecycle", () => {
     await expect(t.controller.start({ auth: owner, ...BOT, client: "desktop", sdp: "a" })).rejects.toThrow("no such bot");
     expect(t.controller.current()).toBeNull();
     expect(t.frames.at(-1)).toMatchObject({ status: "ended", endReason: "error" });
-    // no client will attach to the session OpenAI made: it is closed
     const orphan = t.socket();
     expect(orphan.url).toBe("ws://fake/sess_1/attach");
     orphan.open();
@@ -389,10 +335,6 @@ describe("LiveCallController lifecycle", () => {
     expect(t.logs.at(-1)).toMatch(/errors=internal,internal,internal,broadcast$/);
   });
 
-  // A phone's requests reach the harness as the computer's own (loopback), so
-  // the sign-in check never fires for them. The call is bound to the paired
-  // phone the companion vouches for instead, and ends when that phone is
-  // unpaired.
   describe("a call bound to the phone or sign-in that started it", () => {
     const fromPhone = (t: ReturnType<typeof setup>, device = "phone-1") =>
       t.controller.start({ auth: owner, device, ...BOT, client: "ios", sdp: "offer-sdp" });
@@ -486,7 +428,6 @@ describe("LiveCallController relay", () => {
       expect(signedOut(t)).toEqual([expect.objectContaining({ delegation_id: "del_1" })]);
       expect(t.socket().appends("commentary").some((e) => String(e.content).includes("could not be sent"))).toBe(false);
       expect(t.socket().sent.at(-1)).toMatchObject({ type: "session.close" });
-      // a second request while the call ends is refused the same way, and not answered again
       hear(t, "and tomorrow", 2_000);
       await delegate(t, "del_2", 2_300);
       expect(signedOut(t)).toHaveLength(1);
@@ -630,13 +571,8 @@ describe("LiveCallController relay", () => {
     expect(t.socket().appends("commentary").at(-1)).toMatchObject({ content: "I'm done. The result, or what went wrong, is in the chat." });
   });
 
-  // A request spoken while the bot works can wait in the thread's queue. It
-  // holds back "the result is in the chat" until it is delivered. Edited or
-  // cancelled in a client, it leaves the queue without ever arriving: from
-  // then on it must hold nothing back.
   describe("a spoken request that waits in the queue", () => {
     const noAnswer = (t: ReturnType<typeof setup>) => t.socket().appends("commentary").filter((e) => e.content === LIVE_COPY.noAnswer);
-    /** The next request is queued, the way the harness queues a send. */
     const queueNext = (t: ReturnType<typeof setup>, queueId: string) =>
       vi.mocked(t.deps.send).mockImplementationOnce(async () => {
         t.queue.add(queueId);
@@ -652,7 +588,6 @@ describe("LiveCallController relay", () => {
       t.setActivity("idle");
       await vi.advanceTimersByTimeAsync(0);
       expect(t.socket().appends("commentary")).toHaveLength(0);
-      // the drain takes it out of the queue and onto the thread, and its turn answers
       t.queue.delete("q1");
       t.message({ id: "m9", role: "user", kind: "text", text: "and then the weather", via: "call", queueId: "q1" });
       t.setActivity("working");
@@ -672,15 +607,12 @@ describe("LiveCallController relay", () => {
       queueNext(t, "q1");
       hear(t, "and then the weather", 2_000);
       await delegate(t, "del_2", 2_200);
-      // the first request's turn ends without an answer; the second still waits
       t.setActivity("idle");
       await vi.advanceTimersByTimeAsync(0);
       expect(noAnswer(t)).toHaveLength(0);
       expect(t.deps.queued).toHaveBeenCalledWith("bot1", "t1", "q1");
     });
 
-    // A drain delivers every waiting line at once, as one turn whose request
-    // is the last line. The spoken lines before it are answered by it too.
     it("answers a drained batch of spoken lines once, without saying the result is in the chat", async () => {
       const t = await live();
       t.setActivity("working");
@@ -725,11 +657,9 @@ describe("LiveCallController relay", () => {
       queueNext(t, "q1");
       hear(t, "and then the weather", 100);
       await delegate(t, "del_1", 300);
-      // the person edits (or cancels) the waiting line: it leaves the queue and never arrives
       t.queue.delete("q1");
       t.setActivity("idle");
       await vi.advanceTimersByTimeAsync(0);
-      // a later spoken request's turn ends without an answer
       hear(t, "do it", 2_000);
       await delegate(t, "del_2", 2_200);
       t.setActivity("working");
@@ -740,8 +670,6 @@ describe("LiveCallController relay", () => {
     });
   });
 
-  // Without facts about a long turn the voice guessed ("I see it is stuck").
-  // While the bot works it now gets a quiet status note every 30 s.
   describe("status notes while the bot works", () => {
     const notes = (t: ReturnType<typeof setup>) =>
       t.socket().appends("thinking").filter((e) => String(e.content).startsWith("Status note"));
@@ -801,9 +729,6 @@ describe("LiveCallController relay", () => {
     });
   });
 
-  // A typed message goes to the bot, not to the voice. Mirroring it into the
-  // voice when it is typed made GPT-Live answer it at once, and then again
-  // when the bot's answer was relayed: the person heard two answers.
   it("says nothing when a message is typed, then reads the bot's answer once, with what was typed", async () => {
     const t = await live();
     const before = t.socket().sent.length;
@@ -819,9 +744,6 @@ describe("LiveCallController relay", () => {
     expect(t.socket().appends("thinking")).toHaveLength(0);
   });
 
-  // "Read replies to typed messages" off means nothing about a typed
-  // exchange reaches OpenAI: not what was typed, not the answer, not the
-  // steps the bot took for it.
   it("sends OpenAI nothing about a typed exchange when reading typed replies is off", async () => {
     const t = await live();
     t.settings.readTypedReplies = false;
@@ -851,9 +773,6 @@ describe("LiveCallController relay", () => {
     expect(thinking.some((c) => c.startsWith("Status note"))).toBe(true);
   });
 
-  // A peer bot's words land as user-role lines too: an ask_bot request, or
-  // context from the aside lane folded into the running turn. The person did
-  // not type them, so neither they nor the bot's answer to them is relayed.
   it("never relays a peer bot's line, or the answer to it, as something the person typed", async () => {
     const t = await live();
     const before = t.socket().sent.length;
@@ -872,9 +791,6 @@ describe("LiveCallController relay", () => {
     expect(t.socket().sent.length).toBe(before);
   });
 
-  // Only what the caller typed in a client is "what you typed": not a
-  // member's line in a shared workspace, not a routine's or a webhook's
-  // line, not a line sent through the local API.
   it("relays only a line the caller typed in a client", async () => {
     const t = await live();
     const before = t.socket().sent.length;
@@ -896,10 +812,6 @@ describe("LiveCallController relay", () => {
     expect(t.socket().appends("commentary")).toEqual([expect.objectContaining({ content: expect.stringContaining("and mine") })]);
   });
 
-  // A worker (the Slack relay, or any send through the guarded route) posts
-  // for someone else as this computer: no sender, a sendId of its own, so it
-  // looked exactly like the owner's typed line. Its line is marked relayed,
-  // and neither it nor its answer is read back to the caller.
   it("never reads a line a worker relayed into the call's chat back as the caller's own", async () => {
     const t = await live();
     const before = t.socket().sent.length;
@@ -991,8 +903,7 @@ describe("LiveCallController relay", () => {
       expect(t.deps.respond).toHaveBeenCalledWith(expect.objectContaining({ behavior: "allow" }));
     });
 
-    // The voice's own opener ("Okay, I need your permission…") comes back
-    // through a phone's speaker as input, and "okay…" is a hedge, not a yes.
+    // The voice's own opener comes back through a phone's speaker as input, and "okay…" is a hedge, not a yes.
     describe("on the open microphone of a Live call", () => {
       const speak = (t: ReturnType<typeof setup>, text: string, at: number, until: number) =>
         t.socket().receive({ type: "session.output_transcript.delta", delta: text, start_ms: at, end_ms: until });
@@ -1064,7 +975,6 @@ describe("LiveCallController relay", () => {
       expect(t.socket().appends("instructions").some((e) => String(e.content).includes("not heard clearly"))).toBe(false);
       expect(t.socket().appends("thinking").at(-1)).toMatchObject({ delegation_id: "del_2", content: "Thanks, I'll go ahead." });
       expect(t.deps.send).not.toHaveBeenCalled();
-      // an empty delegation well after the decision is a new, unheard request
       await delegate(t, "del_3", 20_000);
       expect(t.socket().appends("instructions").at(-1)).toMatchObject({ delegation_id: "del_3", content: expect.stringContaining("not heard clearly") });
     });
@@ -1097,7 +1007,6 @@ describe("LiveCallController relay", () => {
     it("stays quiet when a tap on screen settled the card just before the spoken decision", async () => {
       let t!: ReturnType<typeof setup>;
       const respond = vi.fn(async () => {
-        // the tap landed first: the card is settled, and the harness refuses without side effects
         t.patch({ ...approval({ answered: "allow" }) });
         return { ok: false as const, error: "The request is no longer open." };
       });
@@ -1135,8 +1044,6 @@ describe("LiveCallController relay", () => {
       expect(t.deps.respond).not.toHaveBeenCalled();
     });
 
-    // A connect-an-app or credential card waits on the person in the chat;
-    // without a word the call went silent until the idle hang-up.
     it("points the person at the chat when the bot needs an app connected", async () => {
       const t = await live();
       const connector = { slug: "gmail", label: "Gmail", description: "Read mail", status: "required" as const, resumeKey: "k1" };
@@ -1221,7 +1128,7 @@ describe("LiveCallController record", () => {
     const ending = t.controller.end(call.callId);
     t.socket().receive({ type: "session.closed", reason: "close_requested", usage: { seconds: 61.4 } });
     await ending;
-    await t.controller.shutdown(); // already over: nothing more is written
+    await t.controller.shutdown();
     expect(recorded(t)).toEqual([{
       threadId: "t1",
       botName: "Ada",
@@ -1261,7 +1168,6 @@ describe("LiveCallController record", () => {
     expect(t.frames.at(-1)).toMatchObject({ status: "ended", endReason: "sideband-lost" });
     expect(t.controller.current()).toBeNull();
     expect(t.logs.at(-1)).toContain("errors=record");
-    // the line is free for the next call
     await expect(t.start()).resolves.toBeTruthy();
   });
 });

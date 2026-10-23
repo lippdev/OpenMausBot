@@ -1,8 +1,4 @@
-// engine set / engine list: give a workspace an engine without a screen.
-// A key is read from an environment variable or a file, written once with
-// the same PUT /api/config the Settings screen uses (keys are write-only
-// there), and never printed. An engine that is already set up is left alone
-// unless --rotate, so a script can run this on every start.
+// A key is read from an environment variable or a file and never printed; an engine already set up is left alone unless --rotate.
 import { readFileSync } from "node:fs";
 
 import { EXIT, flag, usageError } from "./args.ts";
@@ -11,7 +7,6 @@ import type { VerbContext, VerbOutcome } from "./context.ts";
 
 type Rec = Record<string, any>;
 
-/** Each KIND: its key in the workspace config, the engine it runs, and whether it takes a base URL. */
 export const ENGINE_KINDS: Record<string, { config: string; instance: string; apiInstance?: string; baseUrl: "no" | "allowed" | "required" }> = {
   claude: { config: "anthropic", instance: "claude", apiInstance: "claudeApi", baseUrl: "allowed" },
   openai: { config: "openai", instance: "openai", baseUrl: "no" },
@@ -23,7 +18,7 @@ export const ENGINE_KINDS: Record<string, { config: string; instance: string; ap
   cerebras: { config: "cerebras", instance: "cerebras", baseUrl: "no" },
 };
 
-/** A secret from `{ env }` or `{ file }`: never from the command line itself. */
+/** Never from the command line itself. */
 export function readSecret(source: { env?: string; file?: string }, env: NodeJS.ProcessEnv, what: string): string {
   if (source.env !== undefined) {
     const value = env[source.env]?.trim();
@@ -47,21 +42,15 @@ export interface EngineRequest {
   kind: string;
   key: string;
   baseUrl?: string;
-  /** Claude: the key runs only "Claude (API key)" bots, not every Claude bot. */
   onlyClaudeApi?: boolean;
   install?: boolean;
   rotate?: boolean;
   dryRun?: boolean;
-  /** Told when a long step starts (an install), for a progress line. */
   progress?(event: Rec): void;
 }
 
-/** How long an engine's install may take. The server answers only once its
- * npm install is done, which on a fresh machine is minutes, not the half
- * minute an ordinary request is given. */
 export const INSTALL_TIMEOUT_MS = 15 * 60_000;
 
-/** Install an engine's command on the server and wait for it to finish. */
 async function installEngine(client: HeadlessClient, instanceId: string): Promise<string | undefined> {
   const response = await client.raw(`/api/instances/${encodeURIComponent(instanceId)}/install`, {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}", stream: true, signal: AbortSignal.timeout(INSTALL_TIMEOUT_MS),
@@ -69,11 +58,10 @@ async function installEngine(client: HeadlessClient, instanceId: string): Promis
   const text = await response.text();
   if (!response.ok) throw Object.assign(new Error(`OpenMausBot API error (${response.status}): ${text || response.statusText}`), { status: response.status });
   let body: Rec = {};
-  try { body = JSON.parse(text) as Rec; } catch { /* an answer without the engines in it */ }
+  try { body = JSON.parse(text) as Rec; } catch { }
   return (body.instances as Rec[] | undefined)?.find((instance) => instance.instanceId === instanceId)?.snapshot?.state;
 }
 
-/** Write one engine's key (and settings) unless it is already set, then optionally install its CLI. */
 export async function applyEngine(client: HeadlessClient, request: EngineRequest): Promise<Rec> {
   const kind = ENGINE_KINDS[request.kind];
   if (!kind) throw usageError(`unknown engine ${request.kind}: use one of ${Object.keys(ENGINE_KINDS).join(", ")}`);
@@ -94,7 +82,6 @@ export async function applyEngine(client: HeadlessClient, request: EngineRequest
     patch.url = request.baseUrl;
     changed.push("baseUrl");
   }
-  // Claude: whether the key runs every Claude bot (the default) or only "Claude (API key)" ones.
   if (request.kind === "claude" && (patch.key !== undefined || status.everyClaudeBot !== !request.onlyClaudeApi)) {
     patch.everyClaudeBot = !request.onlyClaudeApi;
     if (status.everyClaudeBot !== !request.onlyClaudeApi) changed.push("everyClaudeBot");
@@ -106,7 +93,6 @@ export async function applyEngine(client: HeadlessClient, request: EngineRequest
   if (request.dryRun) return result;
   if (Object.keys(patch).length) await client.json("/api/config", { method: "PUT", body: JSON.stringify({ [kind.config]: patch }) });
   if (request.install) {
-    // An engine that already runs is left as it is, so a script can ask on every start.
     const state = ((await client.json<Rec>("/api/instances")).instances as Rec[] | undefined)?.find((instance) => instance.instanceId === instanceId)?.snapshot?.state;
     if (state === "available") result.installed = "already";
     else {

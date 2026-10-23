@@ -1,9 +1,4 @@
-// Server-side chart images (PLAN D6, D18): the same Vega-Lite the panel
-// draws, compiled with the same config, rendered headless to SVG for the
-// phone apps and rasterised with resvg for Slack, email and export. No
-// node-canvas: Vega estimates text widths without one, which can leave a
-// label a few pixels off its true extent; acceptable for v1, and the panel
-// (a real browser) measures exactly.
+// No node-canvas: Vega estimates text widths without one, so a label can sit a few pixels off its true extent.
 import type { Resvg as ResvgClass } from "@resvg/resvg-js";
 import { None, logger, parse, View } from "vega";
 import { compile, type Config, type TopLevelSpec } from "vega-lite";
@@ -13,24 +8,18 @@ import { columnClass } from "./chart-compiler.ts";
 import { nativeRequire } from "./engine.ts";
 import type { ChartRenderer, DataColumn, RunResult } from "./types.ts";
 
-/** resvg is a native module. The packaged server has no node_modules, so it
- * is required at first use from the same staged tree as DuckDB (a static
- * import would make esbuild bundle its .node file, which it cannot). */
+/** Required at first use from the staged tree: a static import would make esbuild bundle its .node file, which it cannot. */
 let resvgModule: { Resvg: typeof ResvgClass } | null = null;
 function loadResvg(): typeof ResvgClass {
   resvgModule ??= nativeRequire()("@resvg/resvg-js") as { Resvg: typeof ResvgClass };
   return resvgModule.Resvg;
 }
 
-/** A card's width on a laptop; phones ask for their own. */
 export const DEFAULT_WIDTH = 720;
 
 type Cell = RunResult["rows"][number][number];
 
-/** DuckDB's JSON gives dates and timestamps as text without a zone unless
- * the column has one. A naive value is wall-clock time, so it is parsed in
- * the renderer's local zone: `new Date("2024-03-01")` would be UTC midnight,
- * which is the evening of 29 February anywhere west of Greenwich. */
+/** A naive date or timestamp is wall-clock time, parsed in the local zone: `new Date("2024-03-01")` would be UTC midnight. */
 const NAIVE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?)?$/;
 export function parseTemporal(text: string): Date | string {
   const m = NAIVE.exec(text);
@@ -42,9 +31,6 @@ export function parseTemporal(text: string): Date | string {
   return Number.isNaN(zoned.getTime()) ? text : zoned;
 }
 
-/** Rows as Vega wants them: objects keyed by column, numbers as numbers.
- * Bigints, hugeints and decimals arrive as strings so they lose nothing in
- * JSON; a chart needs them as numbers. */
 export function coerceRows(rows: RunResult["rows"], columns: DataColumn[]): Array<Record<string, unknown>> {
   const coercers = columns.map((column) => {
     const cls = columnClass(column.type);
@@ -63,8 +49,6 @@ export function coerceRows(rows: RunResult["rows"], columns: DataColumn[]): Arra
 
 const silent = logger(None);
 
-/** "container" means the card's width in the panel; here there is no
- * container, so the caller's width takes its place. */
 function sized(vegaLite: Record<string, unknown>, width: number): Record<string, unknown> {
   const spec = { ...vegaLite };
   if (spec.width === "container" || (spec.width === undefined && ("mark" in spec || "layer" in spec))) spec.width = width;
@@ -91,8 +75,7 @@ async function png(
 ): Promise<Buffer> {
   const width = options.width ?? DEFAULT_WIDTH;
   const markup = await svg(vegaLite, rows, columns, { theme: options.theme, width });
-  // The SVG is transparent for the panel; a PNG lands in an email or a Slack
-  // message that paints no ground of its own, so it gets the theme's surface.
+  // A PNG lands in an email or Slack message that paints no ground of its own, so it gets the theme's surface.
   const Resvg = loadResvg();
   const image = new Resvg(markup, {
     fitTo: { mode: "width", value: Math.round(width * (options.scale ?? 1)) },

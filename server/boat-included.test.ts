@@ -21,6 +21,10 @@ let state = "ready";
 let wakeOnResume = true;
 /** When set, every request is refused as an invalid credential. */
 let rejectCredentials = false;
+/** When set, every request fails as an outage would. */
+let serverError = false;
+/** This many listings are cut off before any answer, as a dropped connection is. */
+let dropLists = 0;
 /** Replies to POST /resume in order; the last one repeats. A 2xx wakes the computer. */
 let resumeReplies: Array<{ status: number; body: unknown }> = [];
 const requests: Array<{ method: string; path: string; auth: string }> = [];
@@ -30,7 +34,7 @@ let loadConfig: typeof import("./config.ts").loadConfig;
 const underBoat = () => requests.filter((request) => request.path.startsWith("/boat/"));
 const underRelay = () => requests.filter((request) => request.path.startsWith("/relay/"));
 
-// The legacy deterministic name findBoat still recognises (boat-lifecycle.test.ts).
+// The legacy deterministic name findBoat still recognises.
 const machineName = `ogb-${botId.slice(0, 8).toLowerCase().replace(/[^a-z0-9]/g, "")}-${createHash("sha256").update(botId).digest("hex").slice(0, 6)}`;
 
 beforeAll(async () => {
@@ -44,11 +48,12 @@ beforeAll(async () => {
         res.end(JSON.stringify(body));
       };
       if (rejectCredentials) return send(401, { ok: false, code: "unauthorized", message: "This cloud computer key is not valid." });
-      // Boat speaks its public API v1; the Admin relay wired at /api/box/v1
-      // still speaks the old box dialect (boat-relay.ts), and at /api/v1, v1.
+      if (serverError) return send(500, { ok: false, message: "internal error" });
+      // Boat speaks its public API v1; the Admin relay at /api/box/v1 still speaks the old box dialect, and at /api/v1, v1.
       const [, base = "", rest = ""] = /^(\/boat\/api\/v1|\/relay\/api\/box\/v1|\/relay\/api\/v1)(\/.*)$/.exec(url.pathname) ?? [];
       const legacy = base === "/relay/api/box/v1";
       const [root, one, many] = legacy ? ["/boxes", "box", "boxes"] : ["/sandboxes", "sandbox", "sandboxes"];
+      if (rest === root && dropLists > 0) { dropLists--; return void req.socket.destroy(); }
       if (rest === root) return send(200, { ok: true, [many]: [{ id: boxId, name: machineName, state }] });
       if (rest === `${root}/${boxId}` && req.method === "GET") return send(200, { ok: true, [one]: { id: boxId, name: machineName, state } });
       if (rest === `${root}/${boxId}` && req.method === "DELETE") {
@@ -78,6 +83,8 @@ beforeEach(async () => {
   state = "ready";
   resumeReplies = [];
   rejectCredentials = false;
+  serverError = false;
+  dropLists = 0;
   wakeOnResume = true;
   vi.stubEnv("BOX_TOKEN", undefined);
   vi.stubEnv("OMB_BOAT_API", `${base}/boat/api/v1`);
@@ -127,7 +134,6 @@ describe("included Boat computers", () => {
   });
 
   it("a cloud computer tool call with the included token still reaches only the relay", async () => {
-    // What cloud-computer-tools.ts runs for /api/internal/computer/mcp.
     await boat.runCommand({ box: { token: boat.boatAccount({})!.token } }, boxId, "true");
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({ path: `/relay/api/box/v1/boxes/${boxId}/commands`, auth: `Bearer ${INCLUDED}` });
@@ -169,16 +175,37 @@ describe("included Boat computers", () => {
 
   it("tells a revoked Boat key (boat_, or box_ from before v1) from something that is no Boat key", async () => {
     rejectCredentials = true;
-    const revoked = { ok: false, message: "boat.dev rejected that key — it may have been revoked or expired. Copy a fresh one from your boat.dev account." };
+    const revoked = { ok: false, rejected: true, message: "boat.dev rejected that key — it may have been revoked or expired. Copy a fresh one from your boat.dev account." };
     expect(await boat.verifyToken("boat_revoked")).toEqual(revoked);
     expect(await boat.verifyToken("box_revoked")).toEqual(revoked);
-    expect(await boat.verifyToken("sk-ant-not-a-boat-key")).toEqual({ ok: false, message: expect.stringMatching(/^That doesn't look like a Boat API key: they start with boat_/) });
+    expect(await boat.verifyToken("sk-ant-not-a-boat-key")).toEqual({ ok: false, rejected: true, message: expect.stringMatching(/^That doesn't look like a Boat API key: they start with boat_/) });
+  });
+
+  it("does not call a key rejected when boat.dev could not check it", async () => {
+    serverError = true;
+    expect(await boat.verifyToken("boat_maybe")).toEqual({ ok: false, message: "boat.dev returned 500 for that token — try again in a moment." });
   });
 
   it("lists the computers with the included wording when the relay rejects its token", async () => {
     rejectCredentials = true;
     expect((await boat.listManagedBoats({}, [])).problem).toBe("The cloud computers included with your Cloud plan aren't available right now. Try again later.");
     expect((await boat.listManagedBoats({ box: { token: "box_own" } }, [])).problem).toMatch(/update it in Settings/);
+  });
+
+  it("lists again once after a dropped connection, and names MausBot Cloud's computer service when it stays unreachable", async () => {
+    const lists = () => requests.filter((request) => request.path === "/relay/api/box/v1/boxes");
+    dropLists = 1;
+    await expect(boat.findBoat({}, "unlisted-bot")).resolves.toBeNull();
+    expect(lists()).toHaveLength(2);
+    dropLists = 2;
+    await expect(boat.findBoat({}, "unlisted-bot")).rejects.toMatchObject({
+      message: "Could not reach MausBot Cloud's computer service to list cloud computers — check your connection and refresh", status: 503, transient: true,
+    });
+    expect(lists()).toHaveLength(4);
+    dropLists = 2;
+    expect((await boat.listManagedBoats({ box: { token: "box_own" } }, [])).problem).toBe("Could not reach boat.dev to list cloud computers — check your connection and refresh");
+    rejectCredentials = true;
+    await expect(boat.findBoat({}, "unlisted-bot")).rejects.toMatchObject({ transient: false });
   });
 
   it("reports configured and included to Settings, never the token", () => {
@@ -248,7 +275,6 @@ describe("waking a sleeping computer", () => {
     state = "archived";
     resumeReplies = [{ status: 401, body: { ok: false, code: "unauthorized", message: "This cloud computer key is not valid." } }];
     await expect(boat.readyBoat({}, botId)).rejects.toThrow("The cloud computers included with your Cloud plan aren't available right now. Try again later.");
-    // The same refusal on the person's own key still points them at Settings.
     await expect(boat.readyBoat({ box: { token: "box_own" } }, botId)).rejects.toThrow("boat.dev rejected your Boat API key — paste a current one in Settings → API keys");
   });
 });

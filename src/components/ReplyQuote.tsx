@@ -6,8 +6,6 @@ import { replyAuthor, replySnippet } from "@/lib/replies";
 import { t } from "@/lib/i18n";
 import type { Message } from "@/state/store";
 
-/** The message a sent message answers, in the same soft strip family as the
- * composer's reply strip: arrow, who, a one-line excerpt. A click jumps to it. */
 export function ReplyQuote({
   message,
   fallbackName,
@@ -51,9 +49,6 @@ export function ReplyQuote({
   );
 }
 
-/** The message being replied to, as one soft strip at the top of the
- * composer box: the reply arrow, a one-line excerpt and a small x. Who it
- * answers is in its accessible name and tooltip. */
 export function ComposerReplyStrip({
   message,
   fallbackName,

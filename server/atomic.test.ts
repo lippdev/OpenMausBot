@@ -81,8 +81,7 @@ describe("writeFileAtomic", () => {
   });
 });
 
-// fsync is F_FULLFSYNC on macOS, ~4 ms of blocked event loop per call, and
-// several per-turn saves put back exactly what the file already holds.
+// fsync is F_FULLFSYNC on macOS (~4 ms of blocked event loop), and several per-turn saves rewrite identical bytes.
 describe("writeFileAtomic durability", () => {
   let dir: string;
   beforeEach(() => {
@@ -206,10 +205,7 @@ describe("writeFileAtomicIfChanged", () => {
   });
 });
 
-// Windows refuses a rename onto an existing path while anything else holds a
-// handle to either file, and a virus scanner or the search indexer opening a
-// just-closed file for a few milliseconds is enough. Callers treat a throw here
-// as a failed save, so a transient error used to lose the write.
+// Windows refuses a rename onto a path while a virus scanner or the indexer holds a handle for a few milliseconds.
 describe("renameWithRetry", () => {
   function failing(times: number, code: string) {
     let calls = 0;

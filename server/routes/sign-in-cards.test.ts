@@ -1,6 +1,3 @@
-// The sign-in card's Done and Cancel through the route table: each names the
-// card's bot, thread and message, and passes the server's answer through.
-// Settling itself is covered by server/index.test.ts and the e2e.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,15 +15,21 @@ afterEach(async () => {
 async function serve() {
   const settled: Array<{ botId: string; threadId: string; messageId: string; outcome: SignInOutcome }> = [];
   const saved: Array<{ botId: string; threadId: string; messageId: string; body: Record<string, unknown> }> = [];
+  const targets: Array<{ botId: string; threadId: string; messageId: string }> = [];
   const routes = [createSignInCardRoutes({
     settle: (botId, threadId, messageId, outcome) => {
       settled.push({ botId, threadId, messageId, outcome });
       return messageId === "gone" ? { status: 404, body: { error: "no such sign-in request" } } : { status: 200, body: { resumed: true } };
     },
-    saveLogin: (botId, threadId, messageId, body) => {
+    saveLogin: async (botId, threadId, messageId, body) => {
       saved.push({ botId, threadId, messageId, body });
-      return { status: 200, body: { done: true, resumed: true, saved: true, host: "accounts.example.com" } };
+      return { status: 200, body: { done: true, resumed: true, saved: true, site: "example.com" } };
     },
+    saveTarget: async (botId, threadId, messageId) => {
+      targets.push({ botId, threadId, messageId });
+      return { status: 200, body: { site: "example.com", signInHost: "login.microsoftonline.com" } };
+    },
+    threadVisible: (_auth, threadId) => threadId !== "hidden",
   })];
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -37,7 +40,7 @@ async function serve() {
   await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const post = (path: string, body: unknown, type = "application/json") => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": type }, body: JSON.stringify(body) });
-  return { base, settled, saved, post };
+  return { base, settled, saved, targets, post };
 }
 
 describe("sign-in card routes", () => {
@@ -61,21 +64,42 @@ describe("sign-in card routes", () => {
   });
 
   it("leaves other methods and paths to the next route", async () => {
-    const { base, settled, post } = await serve();
+    const { base, settled, targets, post } = await serve();
     expect(await (await fetch(`${base}/api/bots/scout/sign-in-cards/m1/done`)).json()).toEqual({ from: "inline routes" });
+    expect(await (await fetch(`${base}/api/bots/scout/sign-in-cards/m1/save-login`, { method: "PUT" })).json()).toEqual({ from: "inline routes" });
+    expect(targets).toEqual([]);
     expect(await (await post("/api/bots/scout/sign-in-cards/m1/open", { threadId: "t1" })).json()).toEqual({ from: "inline routes" });
     expect(settled).toEqual([]);
   });
 
-  it("saves a login for the card and answers with the host only, never the password", async () => {
+  it("says where a login saved from the card would fill, before anything is saved", async () => {
+    const { base, saved, targets } = await serve();
+    const response = await fetch(`${base}/api/bots/scout/sign-in-cards/m1/save-login?threadId=t1`);
+    expect(await response.json()).toEqual({ site: "example.com", signInHost: "login.microsoftonline.com" });
+    expect(targets).toEqual([{ botId: "scout", threadId: "t1", messageId: "m1" }]);
+    expect(saved).toEqual([]);
+  });
+
+  it("saves a login for the card and answers with the site only, never the password", async () => {
     const { saved, settled, post } = await serve();
     const response = await post("/api/bots/scout/sign-in-cards/m1/save-login", { threadId: "t1", username: "alice", password: "fake-card-pass" });
     expect(response.status).toBe(200);
     const text = await response.text();
-    expect(JSON.parse(text)).toEqual({ done: true, resumed: true, saved: true, host: "accounts.example.com" });
+    expect(JSON.parse(text)).toEqual({ done: true, resumed: true, saved: true, site: "example.com" });
     expect(text).not.toContain("fake-card-pass");
     expect(saved).toEqual([{ botId: "scout", threadId: "t1", messageId: "m1", body: { threadId: "t1", username: "alice", password: "fake-card-pass" } }]);
     expect(settled).toEqual([]);
+  });
+
+  it("answers a card in a thread the caller cannot see as one that does not exist, and touches nothing", async () => {
+    const { base, settled, saved, targets, post } = await serve();
+    for (const action of ["done", "cancel"]) {
+      const response = await post(`/api/bots/scout/sign-in-cards/m1/${action}`, { threadId: "hidden" });
+      expect({ status: response.status, body: await response.json() }).toEqual({ status: 404, body: { error: "no such sign-in request" } });
+    }
+    expect((await post("/api/bots/scout/sign-in-cards/m1/save-login", { threadId: "hidden", password: "fake-card-pass" })).status).toBe(404);
+    expect((await fetch(`${base}/api/bots/scout/sign-in-cards/m1/save-login?threadId=hidden`)).status).toBe(404);
+    expect([settled, saved, targets]).toEqual([[], [], []]);
   });
 
   it("takes a login as JSON only, so another page's form cannot post one", async () => {

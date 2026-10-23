@@ -1,10 +1,4 @@
-// A conversation's recorded browser steps (server/browser-evidence.ts):
-//   GET /api/threads/:id/evidence?generation=&after=&limit=  the steps, in step order
-//   GET /api/threads/:id/evidence/:generation/step-NNNNNN.jpg  one screenshot
-//   GET /api/threads/:id/evidence.tar  all of it, to keep
-// A client session reads them as it reads the transcript (request-auth.ts
-// CLIENT_ALLOW), and a member only in conversations shown to them: bot
-// visibility answers an unseen conversation with "not found" before this runs.
+// A member reads only conversations shown to them: bot visibility answers an unseen one with "not found" before this runs.
 import { createReadStream } from "node:fs";
 
 import type { BrowserEvidence } from "../browser-evidence.ts";
@@ -59,7 +53,6 @@ export function createBrowserEvidenceRoutes(deps: BrowserEvidenceRouteDeps): Rou
     res.writeHead(200, {
       "content-type": "image/jpeg",
       "x-content-type-options": "nosniff",
-      // A step's screenshot is written once and never changes.
       "cache-control": "private, max-age=31536000, immutable",
     });
     await new Promise<void>((resolve) => {

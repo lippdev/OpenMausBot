@@ -1,12 +1,3 @@
-// The first thing an OMB Cloud home asks: what should it do while you're away
-// (lib/cloud-intent, docs/cloud-pro.md). The answer is sent as a `/setup`
-// request, so the bot interviews the person and sets itself up for the job in
-// the chat; that conversation is the rest of the onboarding.
-//
-// The box is drawn from the composer's own tokens, and on send it becomes the
-// composer: a View Transition carries it to the foot of the chat while the
-// request lands as the first message. With no AI signed in yet the job waits,
-// shown above the engine sign-in, and starts the moment one can run.
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowUp, CalendarCheck, Eye, Newspaper, Search, type LucideIcon } from "lucide-react";
 import { MausAvatar } from "@/components/Avatar";
@@ -33,8 +24,6 @@ const IDEAS: Array<{ id: string; icon: LucideIcon; label: LocaleKey; text: Local
   { id: "plan", icon: CalendarCheck, label: "cloudIntent.idea.plan", text: "cloudIntent.idea.planText" },
 ];
 
-/** Note in the Cloud's own record that the question was answered (and with a
- * job, when there is one), so no device asks again. */
 export function rememberIntent(record: OnboardingStatus | undefined, ids: string[], dispatch: (action: Action) => void): void {
   const seen = record?.hintsSeen ?? [];
   if (ids.every((id) => seen.includes(id))) return;
@@ -43,9 +32,6 @@ export function rememberIntent(record: OnboardingStatus | undefined, ids: string
     .then((config) => dispatch({ type: "configStatus", config })).catch(() => {});
 }
 
-/** Send a first job to the bot as `/setup …`. The job's box becomes the
- * composer on the way (a named View Transition; styles.css "Cloud intent"),
- * and the request is the chat's first message. False when there is no bot. */
 export function startCloudSetup(job: string, state: Pick<AppState, "bots" | "selectedId">, dispatch: (action: Action) => void): boolean {
   const bot = state.bots.find((candidate) => candidate.id === state.selectedId && !candidate.hidden) ?? state.bots.find((candidate) => !candidate.hidden);
   if (!bot) return false;
@@ -53,14 +39,12 @@ export function startCloudSetup(job: string, state: Pick<AppState, "bots" | "sel
   const root = document.documentElement;
   root.dataset.cloudIntentMorph = "";
   const transition = withViewTransition(() => {
-    // In the same frame the job stops waiting, it is the bot's: the setup
-    // card never sees it as not given in between.
+    // Same frame as the send: the setup card must never see the job as not given in between.
     markIntentSent(bot.id);
     dispatch({ type: "showChat" });
     dispatch({ type: "select", id: bot.id });
     dispatch({
       type: "send", botId: bot.id, text, sendId: crypto.randomUUID(), threadId: bot.threadId,
-      // A send that fails leaves the request in the composer, ready to retry.
       onError: () => restoreComposerDraft(`bot:${bot.id}:${bot.threadId}`, { text, attachments: [] }),
     });
   });
@@ -76,7 +60,6 @@ export function CloudIntent() {
   const intent = useCloudIntent();
   const [job, setJob] = useState(intent.pending ?? "");
   const [idea, setIdea] = useState<string | null>(null);
-  // An idea under the pointer or keyboard shows its full text in the empty box.
   const [peek, setPeek] = useState<string | null>(null);
   const [motion, setMotion] = useState<{ kind: MausMotion; key: number }>({ kind: "none", key: 0 });
   const box = useRef<HTMLTextAreaElement>(null);
@@ -86,16 +69,14 @@ export function CloudIntent() {
   const record = state.config?.onboarding;
   const sendKey = useSendKey();
 
-  // One frame late, as in WelcomeFlow: a motion issued in the mounting commit is lost.
+  // One frame late: a motion issued in the avatar's mounting commit is lost.
   useEffect(() => {
     const frame = requestAnimationFrame(() => setMotion({ kind: "arrive", key: 1 }));
     return () => cancelAnimationFrame(frame);
   }, []);
-  // The text starts after the /setup tag on its first line.
   useLayoutEffect(() => {
     if (token.current) setIndent(token.current.offsetWidth + 8);
   }, []);
-  // Grows with what is typed, up to six lines, then scrolls.
   useLayoutEffect(() => {
     const element = box.current;
     if (!element) return;
@@ -109,7 +90,6 @@ export function CloudIntent() {
     track("cloud_intent_submitted", { idea, edited: idea ? text !== t(IDEAS.find((candidate) => candidate.id === idea)!.text) : true });
     rememberIntent(record, [CLOUD_INTENT_ASKED, CLOUD_INTENT_GIVEN], dispatch);
     if (ready && startCloudSetup(text, state, dispatch)) return;
-    // No AI yet: the job waits above the sign-in, and the box moves up into it.
     withViewTransition(() => { setPendingIntent(text); reopenCloudIntent(false); });
   };
   const skip = () => {
@@ -118,8 +98,6 @@ export function CloudIntent() {
     withViewTransition(dismissCloudIntent);
   };
 
-  // Never a gate. Escape on an empty box skips; picking a bot in the sidebar
-  // goes to that bot, and the question waits in the setup card meanwhile.
   const latestSkip = useRef(skip);
   latestSkip.current = skip;
   useEffect(() => {
@@ -132,7 +110,6 @@ export function CloudIntent() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-  // The store may pick a bot just after load; only a change after that is the person's.
   const arrivedOn = useRef(state.selectedId);
   useEffect(() => {
     if (!arrivedOn.current) arrivedOn.current = state.selectedId;
@@ -157,7 +134,6 @@ export function CloudIntent() {
     });
   };
   const filled = job.trim().length > 0;
-  // The guide listens while a job is typed, and is curious about a previewed idea.
   let face: MausState = "happy";
   if (filled) face = "listening";
   else if (peek) face = "curious";
@@ -179,7 +155,6 @@ export function CloudIntent() {
           {t("cloudIntent.intro")}
         </p>
 
-        {/* The composer, before there is a chat: same surface, same ring. */}
         <div className="animate-rise mt-8" style={staggerIndex(3)}>
           <div
             className="relative rounded-[22px] bg-composer py-3.5 pl-4 pr-14 shadow-[0_22px_50px_-30px_rgba(0,0,0,0.65)] ring-1 ring-composer-ring transition-[box-shadow] duration-200 ease-out focus-within:ring-accent/30"
@@ -245,7 +220,6 @@ export function CloudIntent() {
           })}
         </div>
 
-        {/* The way out, said plainly where it can be seen. */}
         <p className="animate-rise mt-10 text-center text-[12.5px] leading-relaxed text-ink-secondary" style={staggerIndex(8)}>
           {t("cloudIntent.notSure")}{" "}
           <button type="button" onClick={skip} className="rounded font-medium text-ink underline decoration-ink-secondary/40 underline-offset-[3px] transition-colors hover:decoration-ink">

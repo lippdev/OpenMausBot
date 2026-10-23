@@ -1,7 +1,3 @@
-// Message hits under the sidebar's search box. The box already filters bots
-// by name; from two characters on it also asks the server for messages
-// across every bot task and room, and a click lands on the message — right
-// bot, right task, right branch — rather than just opening the chat.
 import { useEffect, useState } from "react";
 import { GitBranch, Wrench } from "lucide-react";
 import { api, useStore, formatTime } from "@/state/store";
@@ -27,8 +23,6 @@ export function SearchResults({ query, onLanded }: { query: string; onLanded: ()
       setError(null);
       return;
     }
-    // Do not leave the previous query's hits clickable while the debounced
-    // request for this query is still in flight.
     setHits(null);
     setError(null);
     let alive = true;

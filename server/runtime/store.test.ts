@@ -1,5 +1,3 @@
-// The runtime store: rows, events, the inbox lane, pruning and nested
-// transactions over node:sqlite, in memory and on disk.
 import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,7 +42,6 @@ describe("runtime store", () => {
     expect(store.children("root").map(c => c.id)).toEqual(["early", "late"]);
     expect(store.root("late")?.id).toBe("root");
     expect(store.root("missing")).toBeUndefined();
-    // update rewrites the whole row and (optionally) appends an event
     early.status = "running"; early.startedAt = 2_500; early.executions = 1;
     store.update(early, { kind: "started", at: 2_500, detail: "running: turn 1" });
     expect(store.get("early")).toEqual(early);
@@ -79,11 +76,9 @@ describe("runtime store", () => {
         store.insert(child("c", root), { kind: "enqueued" });
         throw new Error("inner");
       })).toThrow("inner");
-      // the inner savepoint is gone, the outer transaction goes on
       store.insert(child("d", root), { kind: "enqueued" });
     });
     expect(store.all().map(x => x.id)).toEqual(["root", "d"]);
-    // an outer failure takes everything with it, including nested joins
     expect(() => store.transaction(() => {
       store.insert(child("e", root), { kind: "enqueued" });
       store.transaction(() => store.insert(child("f", root), { kind: "enqueued" }));
@@ -91,7 +86,6 @@ describe("runtime store", () => {
     })).toThrow("outer");
     expect(store.all().map(x => x.id)).toEqual(["root", "d"]);
     expect(store.events("e")).toEqual([]);
-    // a failed insert leaves neither the row nor its event behind
     expect(() => store.insert(root, { kind: "enqueued" })).toThrow();
     expect(store.events("root")).toHaveLength(1);
   });
@@ -134,7 +128,6 @@ describe("runtime store", () => {
   it("refuses a row that no longer matches the record schema", () => {
     const store = open();
     store.insert(assignment("ok"), { kind: "enqueued" });
-    // a row written with a status this build does not know
     const broken = { ...assignment("bad"), status: "sleeping" } as unknown as Assignment;
     store.insert(broken, { kind: "enqueued" });
     expect(() => store.get("bad")).toThrow(/record schema/);
@@ -156,7 +149,6 @@ describe("runtime store", () => {
       const again = openRuntimeStore(path);
       expect(again.all({ nonTerminal: true }).map(x => x.id)).toEqual(["live"]);
       again.close();
-      // all({ nonTerminal: true }) as SQLite plans it: the index, in created order, no sort.
       const probe = new DatabaseSync(path, { readOnly: true });
       const terminal = TERMINAL.map(s => `'${s}'`).join(", ");
       const plan = probe.prepare(`EXPLAIN QUERY PLAN SELECT id, json FROM assignments WHERE status NOT IN (${terminal}) ORDER BY created_at, rowid`).all() as Array<{ detail: string }>;
@@ -227,7 +219,6 @@ describe("runtime store: a root's cards and continuation", () => {
     store.insert(plain, { kind: "enqueued", at: 4_000 });
     expect("cards" in store.get("plain")!).toBe(false);
     expect("continuation" in store.get("plain")!).toBe(false);
-    // cleared fields stay cleared on the next read
     delete parked.cards;
     store.update(parked);
     expect("cards" in store.get("parked")!).toBe(false);

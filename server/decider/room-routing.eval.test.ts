@@ -1,26 +1,7 @@
-// Live eval of room routing against the real decision model, on the bench's
-// labelled room messages (fixtures/room-routing.json). It spends real money
-// (about $0.002 a run: 53 calls of ~700 input tokens at $0.042/M), so it runs
-// only when asked:
-//
+// Live eval against the real decision model; spends real money, so it runs only when asked:
 //   OMB_JEV_LIVE_EVAL=1 OMB_JEV_API_KEY=… npx vitest run server/decider/room-routing.eval.test.ts --reporter=default
-//
-// (--reporter=default keeps the printed summary visible where vitest would
-// otherwise pick a quieter reporter, such as under a coding agent.)
-//
-// The same eval runs against an OpenRouter model, with its own flag and key:
-//
-//   OMB_OPENROUTER_LIVE_EVAL=1 OMB_OPENROUTER_DECIDER_KEY=… [OMB_OPENROUTER_EVAL_MODEL=vendor/model] npx vitest run server/decider/room-routing.eval.test.ts --reporter=default
-//
-// An OpenRouter model's probabilities are its own estimate, not Jev's
-// calibrated score, so this is where the 0.6 threshold is checked for it. The
-// cost depends on the model; the token count is printed.
-//
-// CI never sets the flag, so the suite is skipped there. It routes through the
-// same request builder and threshold the server uses. The option set is the
-// production one (members + __everyone__, no "nobody"), so messages labelled
-// "nobody" are reported, not scored: an Auto room has no silent answer and
-// they end with the lead, as a lead-mode room does today.
+//   OMB_OPENROUTER_LIVE_EVAL=1 OMB_OPENROUTER_DECIDER_KEY=… [OMB_OPENROUTER_EVAL_MODEL=vendor/model] (same command)
+// Messages labelled "nobody" are reported, not scored: an Auto room has no silent answer.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 

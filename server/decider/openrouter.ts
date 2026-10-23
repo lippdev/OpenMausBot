@@ -1,42 +1,20 @@
-// OpenRouter as a decision-model backend: POST {base}/chat/completions
-// (OpenAI-compatible) with a Bearer key and a strict JSON schema, then the
-// same checks Jev's answers get.
-//
-// The model is asked for exactly Jev's wire shape, { answers: { id: { choice,
-// probabilities } | { score, probabilities } | { noul } } }, and the reply
-// goes through parseJevResponse: a choice must be one of the offered keys and
-// the most likely one, every probability a number in [0, 1] summing to about
-// 1. Anything else is `malformed`, and the caller keeps today's rule. The
-// probabilities are the model's own estimate, not a calibrated score.
-//
-// OpenRouter's own decisions models (output modality `decisions`) are not chat
-// models: they take Jev's request as it is at POST /api/alpha/decisions
-// (beside /api/v1, hence the `../`) and answer in Jev's shape, so a model saved
-// with `api: "decisions"` skips the schema and the chat envelope.
-//
-// No `reasoning` parameter is sent, and `provider.require_parameters` keeps
-// the request on hosts that honour the schema. Error bodies are never read
-// into a message: they can echo the request.
+// No `reasoning` parameter is sent, and `provider.require_parameters` keeps the request on hosts that honour the
+// schema. Error bodies are never read into a message: they can echo the request.
 import type { BackendRequest, BackendResult, DeciderBackend, DeciderQuestion, OpenRouterApi } from "./types.ts";
 import { isLoopback } from "../provider-key-check.ts";
 import { jevRequestBody, parseJevResponse, questionsFit, refusal } from "./jev.ts";
 
 export const OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
-// Jev through OpenRouter's Decisions API: the same model the default provider
-// runs, billed to the OpenRouter account.
 export const OPENROUTER_DEFAULT_MODEL = "typesafe/jev-1.13";
 export const OPENROUTER_DEFAULT_API: OpenRouterApi = "decisions";
 const MAX_TOKENS_FLOOR = 96;
 const MAX_TOKENS_PER_OPTION = 24;
 const MAX_TOKENS_CEILING = 2_048;
-// Each choice key is spelled twice in a reply (`choice`, then `probabilities`),
-// and ids tokenize at about two characters each at worst.
+// Each choice key is spelled twice in a reply, and ids tokenize at about two characters each at worst.
 const MAX_TOKENS_PER_KEY_CHAR = 1;
 const MODEL_ECHO_MAX = 80;
 
-/** An endpoint under a base URL, or null when a key must not be sent there:
- * https anywhere, plain http only to this machine (a test double or a local
- * OpenAI-compatible server). The chat endpoint unless `path` says otherwise. */
+/** Null when a key must not be sent there: https anywhere, plain http only to this machine. */
 export function openrouterEndpoint(baseUrl?: string | null, path = "chat/completions"): URL | null {
   const root = (baseUrl?.trim() || OPENROUTER_DEFAULT_BASE_URL).replace(/\/+$/, "");
   let url: URL;
@@ -50,7 +28,7 @@ export function openrouterEndpoint(baseUrl?: string | null, path = "chat/complet
   return url.protocol === "http:" && isLoopback(url.hostname) ? url : null;
 }
 
-/** The Decisions API endpoint, under the same rules as the chat one. */
+/** OpenRouter serves it at /api/alpha/decisions, beside /api/v1: hence the `../`. */
 export const openrouterDecisionsEndpoint = (baseUrl?: string | null): URL | null => openrouterEndpoint(baseUrl, "../alpha/decisions");
 
 type Schema = Record<string, unknown>;
@@ -130,13 +108,11 @@ export function openrouterRequestBody(state: unknown, questions: Record<string, 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-/** The Decisions API: Jev's request with the chosen model, Jev's answers back. */
 export function openrouterDecisionsBody(state: unknown, questions: Record<string, DeciderQuestion>, model: string) {
   return { ...jevRequestBody(state, questions), model };
 }
 
 async function decide(request: BackendRequest): Promise<BackendResult> {
-  // No model asked is the default model, whatever API that is.
   const decisions = (request.api ?? (request.model?.trim() ? "chat" : OPENROUTER_DEFAULT_API)) === "decisions";
   const endpoint = decisions ? openrouterDecisionsEndpoint(request.baseUrl) : openrouterEndpoint(request.baseUrl);
   if (!endpoint || !questionsFit(request.questions)) return { ok: false, reason: "misconfigured" };
@@ -159,7 +135,6 @@ async function decide(request: BackendRequest): Promise<BackendResult> {
       redirect: "error",
     });
   } catch {
-    // The caller tells a timeout or a Stop from a dead network by its own signals.
     return { ok: false, reason: "unreachable" };
   }
   if (!response.ok) {

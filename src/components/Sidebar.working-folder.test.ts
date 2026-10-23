@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
-// Exercise the production entry point, including the menu closing while the
-// Sidebar-owned dialog remains open. An unmounted picker export is not proof
-// that a person can reach this workflow.
+// Exercises the production entry point: an unmounted picker export is no proof that a person can reach this workflow.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";

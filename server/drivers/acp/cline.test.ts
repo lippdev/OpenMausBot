@@ -198,8 +198,7 @@ describe("Cline ACP driver", () => {
     const { instance, recorder } = await create("permission");
     const first = await instance.adapter.sendTurn({ threadId: "cline-policy", text: "edit", approvalMode: "full" });
     const fullAsk = await recorder.until((event) => event.type === "request.opened" && event.turnId === first.turnId);
-    // The harness applies Full to canonical permission requests. The native
-    // process must still ask, so no provider-wide auto-approval can outlive it.
+    // The native process must still ask, so no provider-wide auto-approval can outlive the turn.
     await instance.adapter.respondToRequest("cline-policy", fullAsk.requestId!, { behavior: "allow" });
     await recorder.until((event) => event.type === "turn.completed" && event.turnId === first.turnId);
     const launch = JSON.parse(readFileSync(join(scratch, "launch.json"), "utf8"));

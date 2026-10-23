@@ -1,6 +1,3 @@
-// Setup mode: only a /setup message turns on a coaching block
-// that makes the bot clarify the job and use result-aware configuration tools,
-// and connect the apps it needs in the chat whenever the turn can.
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,7 +10,6 @@ import {
 } from "./setup-mode.ts";
 
 const AVAILABLE: SetupConnectedApps = { state: "available" };
-/** Every state the block can be told, each with a name for failure messages. */
 const EVERY_STATE: Array<[string, SetupConnectedApps]> = [
   ["available", AVAILABLE],
   ["switched off", { state: "off", noTools: false }],
@@ -80,7 +76,7 @@ describe("setupSystemPrompt", () => {
   it("is the skill_manage-naming block when active with skills on", () => {
     const prompt = setupSystemPrompt(true, { skills: true, connectedApps: AVAILABLE });
     expect(prompt.startsWith("\n\n")).toBe(true);
-    for (const tool of ["propose_profile", "propose_routine", "skill_manage", "request_credential"]) {
+    for (const tool of ["propose_profile", "create_trigger", "skill_manage", "request_credential"]) {
       expect(prompt).toContain(tool);
     }
     expect(prompt).toContain("at most four questions");
@@ -91,7 +87,7 @@ describe("setupSystemPrompt", () => {
     for (const prompt of [setupSystemPrompt(true, { connectedApps: AVAILABLE }), setupSystemPrompt(true, { skills: false, connectedApps: AVAILABLE })]) {
       expect(prompt).not.toContain("skill_manage");
       expect(prompt).toContain("propose_profile");
-      expect(prompt).toContain("propose_routine");
+      expect(prompt).toContain("create_trigger");
       expect(prompt).toContain("request_credential");
       expect(prompt).toContain("describe procedures plainly in your standing instructions");
     }
@@ -135,9 +131,7 @@ describe("connectedAppsForSetup", () => {
 
   it("is off when this bot's switch is off or it was given no tools, even with the tools mounted", () => {
     expect(connectedAppsForSetup({ ...facts, mounted: false, enabled: false })).toEqual({ state: "off", noTools: false });
-    // a grants record naming no service hides the connection tool from the model
     expect(connectedAppsForSetup({ ...facts, grants: {} })).toEqual({ state: "off", noTools: true });
-    // what a Chief-created bot starts with: switch off and no tools
     expect(connectedAppsForSetup({ ...facts, mounted: false, enabled: false, grants: {} })).toEqual({ state: "off", noTools: true });
   });
 
@@ -146,8 +140,6 @@ describe("connectedAppsForSetup", () => {
       expect(connectedAppsForSetup({ ...facts, mounted: false, configured: false, enabled: false, host }))
         .toEqual({ state: "not-configured", host });
     }
-    // allowed and set up yet not mounted: the service went away mid-dispatch,
-    // which must not tell the person to flip a switch that is already on
     expect(connectedAppsForSetup({ ...facts, mounted: false, host: "desktop" })).toEqual({ state: "not-configured", host: "desktop" });
   });
 
@@ -183,7 +175,6 @@ describe("setupSystemPrompt connected apps", () => {
     expect(prompt({ state: "not-configured", host: "desktop" })).toContain(
       "restarting OpenMausBot usually brings them back, or they can add their own Composio project key in Settings → API keys, under Self-host connected apps.",
     );
-    // a Cloud's connected apps come with the plan: nothing for the person to set up
     const cloud = prompt({ state: "not-configured", host: "cloud" });
     expect(cloud).toContain("Connected apps come with their MausBot Cloud plan but are not answering right now");
     expect(cloud).not.toContain("Composio");

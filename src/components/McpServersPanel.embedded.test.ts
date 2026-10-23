@@ -2,8 +2,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The server list is McpServersPanel's first piece of state; seed it as a
-// finished load would leave it (effects do not run under server rendering).
+// The server list is McpServersPanel's first piece of state, seeded as a finished load would leave it (effects do not
+// run under server rendering).
 const fixture = vi.hoisted(() => ({ servers: null as unknown, index: 0, counting: false, seeded: {} as Record<number, unknown> }));
 vi.mock("react", async (original) => {
   const react = await original<typeof import("react")>();
@@ -58,8 +58,17 @@ describe("Your MCP servers inside the Apps pop-up", () => {
     expect(html).toMatch(/aria-label="Turn docs on" type="button" role="switch" aria-checked="false"/);
     expect(html).toContain('aria-label="Edit notes"');
     expect(html.match(/> Test</g)).toHaveLength(2);
-    // a section of the pop-up's own scroll, not a second scroller
     expect(html).not.toContain("overflow-y-auto");
+  });
+
+  it("says which computer a server of another computer's runs on, and offers no sign-in to it here", () => {
+    const oauth = { clientId: "c", scopes: [], clientSecretConfigured: false, redirectUri: "http://127.0.0.1:1/cb" };
+    fixture.servers = [{ name: "notes", type: "http", url: "http://127.0.0.1:9/mcp", headerKeys: [], enabled: true, oauth, runsOn: { environmentId: "env-1", label: "Milind's MacBook" } }];
+    const html = render(true).replaceAll("&#x27;", "'");
+    expect(html).toContain("Runs on Milind's MacBook, so it isn't started here.");
+    expect(html).not.toContain("Sign in");
+    fixture.servers = [{ name: "docs", type: "http", url: "https://mcp.example.com/mcp", headerKeys: [], enabled: true, oauth }];
+    expect(render(true)).toContain("Sign in");
   });
 
   it("keeps its own scroll and wording when shown on its own", () => {

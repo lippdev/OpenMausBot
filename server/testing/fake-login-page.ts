@@ -1,11 +1,10 @@
-// A stand-in for the bot's running browser in fill_login tests: one page in
-// happy-dom, answering the engine commands server/login-fill.ts sends
-// (`get url`, `eval`; `stream status|enable` for a relay found through the
-// engine, browser-relay.ts) and taking typed text the way the engine's
-// input relay does (`keyboard insertText` into the focused
-// field, with the input events a React form listens for). It records every
-// engine command, so a test can prove no secret ever went through one.
+// A stand-in for the bot's browser in fill_login tests: one happy-dom page answering the engine commands
+// login-fill sends and taking typed text, keys and clicks like the input relay. It records every engine command, so a
+// test can prove no secret went through one.
 import { Window } from "happy-dom";
+
+/** What the site does with a sent form: show another page (a sign-in that worked, or a next step), or stay and say why. */
+export type SiteAnswer = { navigate: { url: string; html: string } } | { error: string } | null;
 
 export class FakeLoginPage {
   window: Window;
@@ -13,9 +12,20 @@ export class FakeLoginPage {
   readonly engineCalls: string[][] = [];
   /** Every text typed through the input relay. */
   readonly typed: string[] = [];
-  /** What the page's own scripts saw: field name → last value an input
-   * event carried (a React form's state). */
+  /** Every key pressed and element clicked through the relay. */
+  readonly pressed: string[] = [];
+  readonly clicked: string[] = [];
+  /** What the page's scripts saw: field name → the last value an input event carried. */
   readonly state: Record<string, string> = {};
+  /** Each form the page sent, as field name → value. */
+  readonly sent: Array<Record<string, string>> = [];
+  /** The site's answer to a sent form; with none, the form goes nowhere. */
+  answer: ((fields: Record<string, string>) => SiteAnswer) | null = null;
+  /** Frames get the size a browser would lay them out at; happy-dom lays out nothing. */
+  frameSize: { width: number; height: number } | null = null;
+  /** The page's own script for a key pressed through the relay. */
+  onKey: ((key: string) => void) | null = null;
+  private submitting: unknown = null;
   streamEnabled = false;
   readonly streamPort = 19_977;
 
@@ -25,7 +35,18 @@ export class FakeLoginPage {
 
   private open(url: string, html: string): Window {
     const window = new Window({ url, settings: { disableJavaScriptEvaluation: false } });
+    const frameSize = () => this.frameSize;
+    const box = window.HTMLIFrameElement.prototype.getBoundingClientRect;
+    window.HTMLIFrameElement.prototype.getBoundingClientRect = function (this: never) {
+      const size = frameSize();
+      return size ? { x: 0, y: 0, top: 0, left: 0, right: size.width, bottom: size.height, ...size, toJSON: () => size } as never : box.call(this);
+    };
     window.document.body.innerHTML = html;
+    // After the page's own handlers: a form nobody's script kept goes to the site, never to happy-dom's own loader.
+    window.addEventListener("submit", (event) => {
+      if (!event.defaultPrevented) this.submitting = event.target;
+      event.preventDefault();
+    });
     window.document.addEventListener("input", (event) => {
       const target = event.target as unknown as { name?: string; id?: string; value?: string };
       this.state[target.name || target.id || "?"] = target.value ?? "";
@@ -33,8 +54,8 @@ export class FakeLoginPage {
     return window;
   }
 
-  /** The bot's page moves on: a new document at a new address. */
   navigate(url: string, html: string): void {
+    this.window.dispatchEvent(new this.window.Event("beforeunload"));
     void this.window.happyDOM.close();
     this.window = this.open(url, html);
   }
@@ -53,8 +74,7 @@ export class FakeLoginPage {
     throw new Error(`unexpected engine command: ${args[0]}`);
   }
 
-  /** `keyboard insertText` over the relay: the text goes into the focused
-   * field at its caret, as typing would, with beforeinput and input events. */
+  /** `keyboard insertText` over the relay: into the focused field at its caret, with beforeinput and input events. */
   async insertText(text: string): Promise<void> {
     this.typed.push(text);
     const field = this.window.document.activeElement as unknown as { value: string; dispatchEvent(event: unknown): boolean } | null;
@@ -65,12 +85,44 @@ export class FakeLoginPage {
     field.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
   }
 
+  /** A key at the focused element. Enter in a form's field sends the form when a browser would: it has a submit button,
+   * or that field is its only one. */
+  async press(key: string): Promise<void> {
+    this.pressed.push(key);
+    this.onKey?.(key);
+    const field = this.window.document.activeElement as unknown as { form?: unknown } | null;
+    const form = field?.form as unknown as { requestSubmit(): void; querySelectorAll(selector: string): ArrayLike<{ type?: string }> } | null | undefined;
+    if (key !== "Enter" || !form) return;
+    const buttons = Array.from(form.querySelectorAll("button, input[type=submit]")).filter((el) => el.type === "submit");
+    if (buttons.length || form.querySelectorAll("input:not([type=hidden])").length === 1) form.requestSubmit();
+    this.deliver();
+  }
+
+  /** A real click: the page's handlers run, and a submit button then sends its form unless they kept it. */
+  async click(selector: string): Promise<void> {
+    this.clicked.push(selector);
+    const el = this.window.document.querySelector(selector) as unknown as { dispatchEvent(event: unknown): boolean } | null;
+    if (!el) throw new Error(`Element not found: ${selector}`);
+    el.dispatchEvent(new this.window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    this.deliver();
+  }
+
+  private deliver(): void {
+    const element = this.submitting as { querySelectorAll(selector: string): ArrayLike<{ name?: string; value?: string }> } | null;
+    this.submitting = null;
+    if (!element) return;
+    const fields = Object.fromEntries(Array.from(element.querySelectorAll("input")).filter((el) => el.name).map((el) => [el.name!, el.value ?? ""]));
+    this.sent.push(fields);
+    const answer = this.answer?.(fields) ?? null;
+    if (answer && "navigate" in answer) this.navigate(answer.navigate.url, answer.navigate.html);
+    else if (answer && "error" in answer) this.window.document.body.insertAdjacentHTML("afterbegin", `<p role="alert">${answer.error}</p>`);
+  }
+
   close(): void {
     void this.window.happyDOM.close();
   }
 }
 
-/** A plain sign-in form: email, password, a button. */
 export const LOGIN_FORM = `
   <form action="/session" method="post">
     <label>Email <input id="email" name="email" type="email" autocomplete="username"></label>

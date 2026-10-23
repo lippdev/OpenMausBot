@@ -36,7 +36,6 @@ test("a remote server's page gets no copyText and can never reach the clipboard 
   assert.equal(remote.bridge.copyText, undefined);
   assert.equal("ipcRenderer" in remote.bridge, false);
   assert.deepEqual(remote.invoked, []);
-  // The allow-list itself must not name it either.
   const safe = preloadSource.match(/const REMOTE_SAFE = new Set\(\[([^\]]*)\]\)/);
   assert.ok(safe, "REMOTE_SAFE is still declared as a literal set");
   assert.equal(safe[1].includes("copyText"), false);
@@ -49,8 +48,7 @@ test("the local page's copyText sends only the text, on the one explicit channel
   assert.deepEqual(local.invoked, [["clipboard:write-text", "hello"]]);
 });
 
-// Runs the production registration line from main.mjs against the real
-// localOnly wrapper and the real writeClipboardText, with a fake ipcMain.
+// The production registration line from main.mjs, with the real localOnly and writeClipboardText and a fake ipcMain.
 function productionHandler() {
   const lines = mainSource.split("\n").filter((line) => line.includes('"clipboard:write-text"'));
   assert.equal(lines.length, 1, "exactly one registration of the channel in main.mjs");
@@ -77,7 +75,7 @@ test("an untrusted sender is rejected before writeClipboardText runs", async () 
     from(`${REMOTE}/`),
     from("http://127.0.0.1:48994/"),
     from("about:blank"),
-    { senderFrame: { url: "" }, sender: { mainFrame: {}, getURL: () => `${LOCAL}/` } }, // empty child frame
+    { senderFrame: { url: "" }, sender: { mainFrame: {}, getURL: () => `${LOCAL}/` } },
     {},
   ]) {
     assert.throws(() => handler(event, "hello"), /only available while using the local server/);

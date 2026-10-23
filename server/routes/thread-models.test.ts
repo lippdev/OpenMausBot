@@ -1,6 +1,3 @@
-// "Switch them too" through the route table, over a real store: it clears
-// exactly the threads that run on a model of their own different from the
-// bot's, leaves a running thread alone, and refuses another bot's threads.
 import { rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";

@@ -1,8 +1,3 @@
-// The headless verbs of the published `openmausbot` command: drive a running
-// workspace (this computer's, or one at a URL with a token) from scripts,
-// CI and other agents. `runHeadless` is the command line (prints, returns the
-// exit code); `runHeadlessCommand` is the same verbs as a library, returning
-// the result itself, which scripts/control-omb.ts uses. docs/headless-cli.md.
 import { HEADLESS_USAGE } from "../cli-usage.ts";
 import { EXIT, HeadlessError, MUTATING_VERBS, parseCommand } from "./args.ts";
 import { explain, loadMcp, openClient, type ClientDeps, type HeadlessClient } from "./client.ts";
@@ -84,16 +79,13 @@ export const VERB_HELP: Record<string, string> = {
   mcp: "openmausbot mcp\n  Serve the OpenMausBot MCP tools on stdin and stdout, for an agent (docs/mcp-server.md).",
 };
 
-
 export interface HeadlessOptions {
   env?: NodeJS.ProcessEnv;
   io?: HeadlessIo;
-  /** Tests and control-omb stand in for the MCP tools and the JSON client. */
   callTool?: ClientDeps["callTool"];
   request?: ClientDeps["request"];
   /** control-omb: never change something on a server it merely found. */
   requireExplicitForMutations?: boolean;
-  /** How long wait and run wait without --timeout (control-omb: 30 s). */
   defaultWaitMs?: number;
   signal?: AbortSignal;
 }
@@ -134,19 +126,15 @@ async function execute(argv: readonly string[], options: HeadlessOptions, io: He
   }
 }
 
-/** The verbs as a library: the result, or a thrown HeadlessError. */
 export async function runHeadlessCommand(argv: readonly string[], options: HeadlessOptions = {}): Promise<unknown> {
   const quiet: HeadlessIo = { out: () => undefined, err: () => undefined, readStdin: async () => "" };
   const { outcome } = await execute(argv, options, options.io ?? quiet);
   return outcome.result;
 }
 
-/** The verbs that answer Ctrl-C themselves: they stop waiting (the work goes
- * on) and say how to pick it up again. Every other verb, mcp included, ends
- * on Ctrl-C as any command does. */
+/** These stop waiting on Ctrl-C (the work goes on) and say how to pick it up again; every other verb just ends. */
 const STOPS_WAITING_ON_CTRL_C: ReadonlySet<string> = new Set(["run", "wait", "events"]);
 
-/** The verbs on the command line: prints the result (or the error) and returns the exit code. */
 export async function runHeadless(argv: readonly string[], options: HeadlessOptions = {}): Promise<number> {
   const io = options.io ?? processIo();
   const controller = new AbortController();

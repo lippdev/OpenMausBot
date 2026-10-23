@@ -20,13 +20,6 @@ function StatusIcon({ status }: { status: RunStep["status"] }) {
 const ICON_BUTTON =
   "flex size-7 shrink-0 items-center justify-center rounded-lg text-ink-secondary outline-none hover:bg-raised-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/60";
 
-/** A bot's run in the current ask as a checklist — every command it ran,
- * the control-CLI ones tagged verified — with one action: put the run into
- * the composer as a skill request, for the person to annotate and send;
- * the bot then writes the skill with skill_manage. The card renders whatever steps it
- * is given; whether a run is worth a card (`showRun`) is the caller's call.
- * Collapse is the card's own (a long run starts folded); dismissal is the
- * caller's, since it outlives the card. */
 export function VerifyCard({
   steps,
   canSave,
@@ -35,13 +28,9 @@ export function VerifyCard({
   onSave,
 }: {
   steps: RunStep[];
-  /** The run can be saved now: skill authoring is on, the engine has the
-   * agents tools, something passed, nothing is still running or busy. */
   canSave: boolean;
-  /** A skill from this run already applied, or waits for the person. */
   skill: RunSkill;
   onDismiss: () => void;
-  /** Fills the thread's composer with the run; nothing is sent. */
   onSave: () => void;
 }) {
   const defaultCollapsed = steps.length > 6;

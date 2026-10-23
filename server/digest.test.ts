@@ -1,8 +1,3 @@
-// The work digest (Phase 0, item 0.1): one durable, bounded record of what a
-// turn DID — tools, files, memory edits, the gist of the reply — built from
-// rows the harness already has for every engine, and rendered both as a
-// transcript row (indexed by FTS) and as one bracketed line for context
-// rebuilds.
 import { describe, expect, it } from "vitest";
 
 import { buildTurnDigest, digestPromptLine, renderDigest, type TurnDigest } from "./digest.ts";
@@ -52,12 +47,8 @@ describe("buildTurnDigest", () => {
     ]);
   });
 
-  // Codex titles a commandExecution chip with the whole command line and ACP
-  // prefers rawInput.command over the tool's name, so the chip title is a
-  // command, not a tool identity. Keying the digest on it leaked the command
-  // (paths, ids) into a row that is FTS-indexed and replayed into rebuilt
-  // context, and made counts meaningless: every distinct command was its own
-  // bucket, so a turn that ran one tool twelve times never said so.
+  // Codex titles a commandExecution chip with the whole command line and ACP prefers rawInput.command, so a chip title is a
+  // command, not a tool identity: keyed on it, the digest leaked the command into an FTS-indexed, replayed row.
   it("buckets command-titled chips under one shell tool instead of the command line", () => {
     const d = buildTurnDigest({
       ...base,
@@ -74,9 +65,7 @@ describe("buildTurnDigest", () => {
     ]);
   });
 
-  // The reported line: a cp of a user's home path and two swift -e scripts
-  // were each printed as a tool name. The phones split the tools part after
-  // "×N" / "(N failed)", so nothing may follow the count.
+  // The phones split the tools part after "×N" / "(N failed)", so nothing may follow the count.
   it("renders command-titled chips as a bare shell count with no command text", () => {
     const d = buildTurnDigest({
       ...base,
@@ -133,6 +122,13 @@ describe("buildTurnDigest", () => {
     expect(d.reply).toBe("Raised the staging retry limit to 5.");
     const long = buildTurnDigest({ ...base, reply: "x".repeat(500), activities: [], memory: [] });
     expect(long.reply).toHaveLength(200);
+  });
+
+  it("masks a credential the reply repeats, as the stored reply is masked", () => {
+    const secret = `${"whsec" + "_"}${"a1B2c3D4".repeat(5)}`;
+    const d = buildTurnDigest({ ...base, activities: [], memory: [], reply: `Connected the watcher to http://127.0.0.1:8800/hooks/wh_abc/${secret}. Done.` });
+    expect(d.reply).toMatch(/^Connected the watcher to http:\/\/127\.0\.0\.1:8800\/hooks\/wh_abc\/«redacted \d+ chars»\.$/u);
+    expect(JSON.stringify(d) + renderDigest(d)).not.toContain(secret);
   });
 
   it("caps the file lists at 20 entries and records the overflow", () => {

@@ -1,6 +1,4 @@
 // @vitest-environment happy-dom
-// A ListView with a `name` is one choice: its rows are a radio group, and the
-// chosen row's value travels with confirm like any other field.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +17,8 @@ function parsed(input: unknown): WidgetRoot {
   return result.value;
 }
 
-const dinner = () => parsed(WIDGET_SAMPLES.dinnerChoice);
+const dinner = () => parsed({ ...(WIDGET_SAMPLES.dinnerChoice as Record<string, unknown>), allowOther: false });
+const openDinner = () => parsed(WIDGET_SAMPLES.dinnerChoice);
 const row = (root: WidgetRoot, more: Partial<WidgetPayload> = {}): Message => ({ id: "w1", role: "bot", kind: "widget", at: 1, text: "fallback", widget: { v: 1, root, ...more } });
 const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const fetchMock = vi.fn<(path: string, init?: RequestInit) => Promise<Response>>();
@@ -41,6 +40,10 @@ const key = (element: HTMLElement, name: string) => act(() => {
   element.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true }));
 });
 const sent = (call = 0) => JSON.parse(String(fetchMock.mock.calls[call]![1]?.body)).widgetAction;
+const type = (input: HTMLInputElement, value: string) => act(() => {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+});
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -70,7 +73,6 @@ describe("a list the person picks one row from", () => {
     ]);
     expect(checked()).toEqual(["false", "false", "false"]);
     expect(radios().map((radio) => radio.tabIndex)).toEqual([0, -1, -1]);
-    // the empty ring leads each row; nothing here is a plain list row or a button
     for (const radio of radios()) expect(radio.firstElementChild!.className).toContain("shadow-[inset_0_0_0_1.5px_var(--color-ink-tertiary)]");
     expect(find('[role="listitem"]')).toBeNull();
     expect(host.querySelectorAll('[role="radiogroup"] button')).toHaveLength(0);
@@ -78,7 +80,6 @@ describe("a list the person picks one row from", () => {
 
   it("chooses the row that is clicked, marks it, and sends its value with confirm", async () => {
     mount(row(dinner()));
-    // a click on the words in the row is a click on the row
     await press(radios()[1]!.querySelector<HTMLElement>("div div")!);
     expect(checked()).toEqual(["false", "true", "false"]);
     expect(radios()[1]!.className).toContain("bg-inset");
@@ -89,7 +90,6 @@ describe("a list the person picks one row from", () => {
     await press(button("Pick this"));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(sent()).toEqual({ messageId: "w1", ref: "confirm", rev: 0, values: { dish: "veggie-bowl" } });
-    // folded on the answer; Details shows the choice, and its rows no longer take a press
     act(() => button(t("question.details")).click());
     expect(checked()).toEqual(["false", "true", "false"]);
     await press(radios()[0]!);
@@ -106,7 +106,6 @@ describe("a list the person picks one row from", () => {
     expect(group.getAttribute("aria-invalid")).toBe("true");
     expect(group.getAttribute("aria-describedby")).toBe(alert.id);
     expect(document.activeElement).toBe(radios()[0]);
-    // choosing clears it, and the press goes
     await press(radios()[2]!);
     expect(find('[role="alert"]')).toBeNull();
     expect(group.getAttribute("aria-invalid")).toBeNull();
@@ -131,7 +130,6 @@ describe("a list the person picks one row from", () => {
     key(radios()[1]!, "ArrowRight");
     expect(checked()).toEqual(["false", "false", "true"]);
     expect(document.activeElement).toBe(radios()[2]);
-    // past the last row is the first again, and back
     key(radios()[2]!, "ArrowDown");
     expect(checked()).toEqual(["true", "false", "false"]);
     key(radios()[0]!, "ArrowUp");
@@ -143,7 +141,6 @@ describe("a list the person picks one row from", () => {
     key(radios()[0]!, "End");
     expect(checked()).toEqual(["false", "false", "true"]);
     expect(radios().map((radio) => radio.tabIndex)).toEqual([-1, -1, 0]);
-    // Enter on a row chooses that row, and never presses confirm
     key(radios()[1]!, "Enter");
     expect(checked()).toEqual(["false", "true", "false"]);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -178,20 +175,17 @@ describe("a list the person picks one row from", () => {
   });
 
   it("starts on its default, and opens whole when the chosen row is past the limit", async () => {
-    const list = (more: Record<string, unknown>) => parsed({ ...(WIDGET_SAMPLES.dinnerChoice as Record<string, unknown>), limit: 2, ...more });
-    // nothing chosen: two rows and the fold
+    const list = (more: Record<string, unknown>) => parsed({ ...(WIDGET_SAMPLES.dinnerChoice as Record<string, unknown>), allowOther: false, limit: 2, ...more });
     mount(row(list({})));
     expect(radios()).toHaveLength(2);
     act(() => button(t("widget.showAll", { count: 3 })).click());
     expect(radios()).toHaveLength(3);
 
-    // a default inside the fold keeps it folded, with the default chosen
     mount(row(list({ defaultValue: "veggie-bowl" }), { rev: 1 }));
     expect(checked()).toEqual(["false", "true"]);
     await press(button("Pick this"));
     expect(sent().values).toEqual({ dish: "veggie-bowl" });
 
-    // a chosen row past the limit is never hidden
     mount(row(list({ defaultValue: "pizza" }), { rev: 2 }));
     expect(checked()).toEqual(["false", "false", "true"]);
     expect(host.textContent).not.toContain("Show all");
@@ -210,5 +204,76 @@ describe("a list the person picks one row from", () => {
     await press(rows[1]!);
     expect(sent()).toEqual({ messageId: "w1", ref: widgetActions(list)[1]!.ref, rev: 0, values: {} });
     expect(rows[1]!.getAttribute("aria-checked")).toBeNull();
+  });
+});
+
+describe("a list the person may answer in their own words", () => {
+  const other = () => find<HTMLInputElement>('input[data-widget-other="dish"]');
+
+  it("offers Other after the rows as one more choice, with no field until it is chosen", () => {
+    mount(row(openDinner()));
+    expect(radios()).toHaveLength(4);
+    expect(radios()[3]!.textContent).toBe(t("question.other"));
+    expect(checked()).toEqual(["false", "false", "false", "false"]);
+    expect(other()).toBeNull();
+  });
+
+  it("opens a field for their words when Other is clicked, and sends the words apart from the options", async () => {
+    mount(row(openDinner()));
+    await press(radios()[3]!);
+    expect(checked()).toEqual(["false", "false", "false", "true"]);
+    expect(document.activeElement).toBe(other());
+    expect(other()!.placeholder).toBe(t("question.otherPlaceholder"));
+    type(other()!, "Leftover dal");
+    await press(button("Pick this"));
+    expect(sent()).toEqual({ messageId: "w1", ref: "confirm", rev: 0, values: { dish: "" }, other: { dish: "Leftover dal" } });
+  });
+
+  it("drops their words when a row is chosen after all", async () => {
+    mount(row(openDinner()));
+    await press(radios()[3]!);
+    type(other()!, "Leftover dal");
+    await press(radios()[0]!);
+    expect(other()).toBeNull();
+    await press(button("Pick this"));
+    expect(sent()).toEqual({ messageId: "w1", ref: "confirm", rev: 0, values: { dish: "butter-chicken" } });
+  });
+
+  it("will not send Other with nothing typed when the list is required, and puts the focus in the field", async () => {
+    mount(row(openDinner()));
+    await press(radios()[3]!);
+    type(other()!, "   ");
+    act(() => other()!.blur());
+    await press(button("Pick this"));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(find('[role="alert"]')!.textContent).toBe(t("widget.required", { label: "Dinner tonight" }));
+    expect(document.activeElement).toBe(other());
+  });
+
+  it("reaches Other with the arrow keys and keeps the focus on the choices", () => {
+    mount(row(openDinner()));
+    act(() => radios()[2]!.focus());
+    key(radios()[2]!, "ArrowDown");
+    expect(checked()).toEqual(["false", "false", "false", "true"]);
+    expect(document.activeElement).toBe(radios()[3]);
+    expect(radios().map((radio) => radio.tabIndex)).toEqual([-1, -1, -1, 0]);
+    key(radios()[3]!, "ArrowDown");
+    expect(checked()).toEqual(["true", "false", "false", "false"]);
+    key(radios()[0]!, "End");
+    expect(checked()).toEqual(["false", "false", "false", "true"]);
+  });
+
+  it("shows their words, chosen and read-only, when a settled press is opened", () => {
+    mount(row(openDinner(), { settled: { ref: "confirm", label: "Pick this", tone: "confirm", at: 2, values: { dish: "" }, other: { dish: "Leftover dal" } } }));
+    act(() => button(t("question.details")).click());
+    expect(checked()).toEqual(["false", "false", "false", "true"]);
+    expect(other()!.value).toBe("Leftover dal");
+    expect(other()!.disabled).toBe(true);
+  });
+
+  it("offers no Other when the bot said allowOther: false", () => {
+    mount(row(dinner()));
+    expect(radios()).toHaveLength(3);
+    expect(host.textContent).not.toContain(t("question.other"));
   });
 });

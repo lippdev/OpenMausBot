@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { releaseHighlights } from "./release-highlights";
 
-// The shape of this repository's releases (v0.1.102), as Markdown and as the
-// HTML the GitHub update feed carries.
+// The shape of this repository's releases, as Markdown and as the HTML the GitHub update feed carries.
 const markdown = `## New
 
 - **Several Google accounts for Antigravity.** Add more than one Google account inside the Antigravity card. (#2502)

@@ -22,9 +22,6 @@ export const COMPANION_INSTALLATION_ID_FIELD = "companionInstallationId";
 export const COMPANION_INSTALLATION_CREDENTIAL_FIELD = "companionInstallationCredential";
 export const COMPANION_INSTALLATION_EXPIRY_FIELD = "companionInstallationCredentialExpiresAt";
 export const COMPANION_ACCOUNT_CLEANUP_PENDING_FIELD = "companionAccountCleanupPending";
-/** On demand: an address given back whose removal the control plane is still
- * finishing. It creates no address for this installation until that is done,
- * so the next request finishes the removal first. */
 export const COMPANION_ENDPOINT_RELEASE_PENDING_FIELD = "companionEndpointReleasePending";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -35,19 +32,11 @@ const DEFAULT_AUTO_RETRY_BASE_MS = 10 * 60_000;
 const DEFAULT_AUTO_RETRY_MAX_MS = 6 * 60 * 60_000;
 const DEFAULT_ENDPOINT_CHECK_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_FIRST_ENDPOINT_CHECK_MS = 2 * 60_000;
-// An address nothing needs is given back an hour, plus up to three more at
-// random, after that is first seen. The hour covers installing the phone app
-// after the QR appears; the spread keeps a release wave inside the shared
-// Cloudflare API budget.
+// The hour covers installing the phone app after the QR shows; the random spread keeps release waves inside Cloudflare's API budget.
 const DEFAULT_RELEASE_GRACE_MS = 60 * 60_000;
 const DEFAULT_RELEASE_JITTER_MS = 3 * 60 * 60_000;
-/** How long a person's own request (sign-in, Retry, starting HTTPS pairing)
- * counts as a need: automatic retries go on, and nothing is given back. */
 const REQUEST_WINDOW_MS = 60 * 60_000;
 
-/** Failures that clear up on their own: provider capacity, a transient
- * service or network problem, or a server-side rate limit. Anything that
- * needs the user (expired sign-in, computer limit) is never retried. */
 const AUTO_RETRY_CODES = new Set([
   "endpoint_capacity",
   "endpoint_rate_limited",
@@ -60,19 +49,11 @@ const AUTO_RETRY_CODES = new Set([
   "credential_rotation_rate_limited",
 ]);
 
-/** Server endpoint states that mean this computer's saved connector token no
- * longer has a working route behind it (or that its last reconcile failed),
- * so the next reconcile must run instead of trusting the saved address. */
 const ENDPOINT_NEEDS_RECONCILE = new Set(["deleting", "deleted", "error"]);
 
-/** Connector states in which the watchdog asks the control plane whether the
- * saved endpoint still exists. "ready" is included on purpose: the connector
- * verifies its public route once, so after a long sleep it can still say
- * "ready" for a tunnel the server reclaimed meanwhile. "unavailable" (no
- * connector binary) and "stopped" are left alone. */
+/** "ready" too: the connector verifies its route once, so after a long sleep it can report ready for a reclaimed tunnel. */
 const WATCHDOG_CHECK_STATES = new Set(["starting", "ready", "retrying", "error"]);
 
-/** Connector states that say it cannot reach its tunnel right now. */
 const CONNECTOR_FAILING_STATES = new Set(["retrying", "error"]);
 
 const defaultSetTimer = (callback, milliseconds) => {
@@ -84,10 +65,7 @@ const defaultSetTimer = (callback, milliseconds) => {
 const ownString = (document, field) =>
   typeof document?.[field] === "string" ? document[field] : "";
 
-/** Packaged builds have a safe hosted default. Development must opt into an
- * exact HTTPS origin (or HTTP loopback Worker) so a contributor never sends
- * an OTP or bearer to an accidental host. An explicitly invalid override
- * disables the feature instead of silently falling back to production. */
+/** Development must name an exact origin so an OTP or bearer never reaches an accidental host; an invalid override disables the feature. */
 export function resolveCompanionControlPlaneURL({
   isPackaged,
   environment = process.env,
@@ -102,14 +80,7 @@ export function companionAccountCleanupPending(credentials) {
   return credentials?.[COMPANION_ACCOUNT_CLEANUP_PENDING_FIELD] === true;
 }
 
-/** Whether this computer needs its managed HTTPS address, from the running
- * companion's own state: true while a device is paired or a pairing window is
- * open, false only when the companion answered with a cleanly read device
- * list and neither holds, and null when that cannot be told (Remote access
- * off, the companion starting or not answering, its device file unreadable).
- * Only false ever gives an address back. Any open window counts, not only one
- * showing the HTTPS route: the route is withdrawn while its connector
- * reconnects, and the person may be about to scan it. */
+/** true, false, or null when that cannot be told; only false ever gives an address back. */
 export function managedEndpointNeed(state) {
   if (!state || typeof state !== "object" || state.enabled !== true || state.error) return null;
   if (state.devicesUnreadable === true || !Array.isArray(state.devices)) return null;
@@ -149,9 +120,7 @@ function withoutCompanionAccount(credentials) {
   ]) {
     delete next[field];
   }
-  // The UUID identifies this installation, not an account. Keeping it across
-  // sign-outs lets a same-account recovery adopt the existing server record
-  // rather than manufacturing a new computer every time.
+  // The installation UUID survives sign-out so a same-account recovery adopts the existing server record.
   return next;
 }
 
@@ -226,7 +195,6 @@ const FRIENDLY_MESSAGES = Object.freeze({
   request_failed: "The secure connection request could not be completed. Local pairing still works; try again.",
 });
 
-/** "45 seconds", "3 minutes", or "a few minutes" when the server gave no hint. */
 function retryWait(retryAfterMs) {
   const seconds = Math.ceil((retryAfterMs ?? 0) / 1_000);
   if (!(seconds > 0)) return "a few minutes";
@@ -267,10 +235,7 @@ function publicState({ available, status, email, endpoint, message }) {
   return Object.freeze(state);
 }
 
-/** Authenticated hosted-Companion orchestration, with all Electron, storage,
- * and network mechanisms injected. Nothing returned by this service can
- * contain an account bearer, installation credential, connector token, or a
- * Cloudflare resource identifier. */
+/** Nothing this service returns may contain an account bearer, installation credential, connector token or Cloudflare resource id. */
 export function createCompanionAccountService({
   client,
   readCredentials,
@@ -283,10 +248,6 @@ export function createCompanionAccountService({
   companionIsOn = () => false,
   now = Date.now,
   healthCacheMs = DEFAULT_HEALTH_CACHE_MS,
-  // Background recovery is opt-in: the desktop app enables it, one-shot CLI
-  // commands do not. When on, retryable setup failures are retried with
-  // backoff, and a saved address whose server endpoint was removed (idle
-  // reclaim) is re-provisioned without a new sign-in.
   autoRecover = false,
   setTimer = defaultSetTimer,
   clearTimer = clearTimeout,
@@ -295,20 +256,11 @@ export function createCompanionAccountService({
   autoRetryMaxMs = DEFAULT_AUTO_RETRY_MAX_MS,
   endpointCheckIntervalMs = DEFAULT_ENDPOINT_CHECK_INTERVAL_MS,
   firstEndpointCheckMs = DEFAULT_FIRST_ENDPOINT_CHECK_MS,
-  // On demand (the desktop app): an address is created only when a person
-  // asks (sign-in, Retry, prepare() when HTTPS pairing starts), kept while
-  // `managedEndpointNeeded` says something needs it, and given back once it
-  // has said nothing does for the grace period; the next request gets the
-  // same address back. Off, an address is kept for as long as the app runs
-  // (`openmausbot serve --tunnel`).
   onDemand = false,
   managedEndpointNeeded = async () => null,
   releaseGraceMs = DEFAULT_RELEASE_GRACE_MS,
   releaseJitterMs = DEFAULT_RELEASE_JITTER_MS,
-  // One line per failed setup step, for server.log and the bug-report bundle.
-  // The phase message is replaced by every retry, so without this a support
-  // reference shown once is gone. Only the code, HTTP status, request id and
-  // retry delay are written: never an email, token, credential or address.
+  // Only the code, HTTP status, request id and retry delay: never an email, token, credential or address.
   log = () => {},
 } = {}) {
   const configured = Boolean(client);
@@ -345,11 +297,8 @@ export function createCompanionAccountService({
     autoRetryAttempt = 0;
   };
 
-  // Assigned below; scheduled retries go through the same serialized path
-  // as the Retry button.
   let retryFromTimer = () => Promise.resolve();
 
-  /** Exponential backoff with jitter, never sooner than the server asked. */
   const scheduleAutoRetry = (error) => {
     if (!autoRecover || disposed || !configured) return;
     if (!(error instanceof ControlPlaneError) || !AUTO_RETRY_CODES.has(error.code)) return;
@@ -437,7 +386,6 @@ export function createCompanionAccountService({
     if (!account) return publicState({ available, status: "signed-out" });
     const access = persistedAccess;
     if (!access) {
-      // On demand, having no address is normal until a person pairs.
       if (onDemand) return publicState({ available, status: "ready", email: account.email });
       return publicState({
         available,
@@ -500,8 +448,7 @@ export function createCompanionAccountService({
     phase = null;
   };
 
-  /** Returns true only when the installation was revoked (which schedules
-   * endpoint cleanup) and it is safe to forget its local retry credentials. */
+  /** True only once revocation has scheduled endpoint cleanup, so the local retry credentials may be forgotten. */
   const cleanupCurrentAccount = async ({ markPending = true } = {}) => {
     const document = credentials();
     const account = storedAccount(document);
@@ -512,33 +459,23 @@ export function createCompanionAccountService({
     if (markPending && !companionAccountCleanupPending(document)) await markCleanupPending();
     await stopManagedEndpoint();
 
-    // Deleting first gives immediate feedback. Revocation remains mandatory:
-    // it invalidates the installation credential and gives the server a
-    // durable cleanup path even if the direct delete failed halfway through.
+    // Delete first for immediate feedback; revocation below stays mandatory.
     if (account.installationCredential) {
       try {
         await client.deleteEndpoint(account.installationCredential);
       } catch {
-        // Revocation below is the authoritative cleanup schedule.
       }
     }
     if (!account.accountToken) {
       throw new ControlPlaneError("signed_out", 401);
     }
 
-    // A request can create an installation (and even its endpoint) while its
-    // response is lost, leaving no local ID or connector material. The stable
-    // computer UUID is therefore the cleanup authority: list the account's
-    // active installations and revoke every matching record before forgetting
-    // the bearer. Revocation marks the owner row and durably schedules the
-    // server-side endpoint sweep.
+    // A lost response can leave a server installation with no local ID, so revoke every record matching this computer's UUID before forgetting the bearer.
     const clientInstanceId = ownString(document, COMPANION_CLIENT_INSTANCE_FIELD);
     if (!UUID.test(clientInstanceId)) {
       throw new ControlPlaneError("invalid_client_identity");
     }
 
-    // The known ID is a fast path. Its result is not trusted on its own: the
-    // authoritative list below also catches a response-lost duplicate.
     if (account.installationId) {
       await client.revokeInstallation(account.accountToken, account.installationId).catch(() => {});
     }
@@ -559,9 +496,6 @@ export function createCompanionAccountService({
     try {
       await client.signOut(account.accountToken);
     } catch {
-      // The installation and connector have already been revoked. A stale
-      // Better Auth session expires server-side and must not block local
-      // sign-out or retain its bearer on disk.
     }
     await clearAfterCleanup();
     return true;
@@ -601,24 +535,16 @@ export function createCompanionAccountService({
       platform: identity.platform,
       appVersion: identity.appVersion,
     });
-    // Retain the verified installation before provisioning the hosted route.
-    // Otherwise a service failure makes each Retry recover by rotating the
-    // credential, eventually rate-limiting an otherwise valid installation.
+    // Persist the verified installation before provisioning, or each Retry rotates the credential until rate-limited.
     try {
       await updateCredentials((document) => withInstallationCredentials(document, installation));
     } catch (error) {
-      // Do not leave a newly discovered installation consuming account quota
-      // when its recovery credential cannot be saved. Keep an established
-      // installation only when its saved credential is still usable.
       if (previous?.installationId !== installation.installation.id ||
           previous?.installationCredential !== installation.credential) {
         await client.revokeInstallation(accountToken, installation.installation.id).catch(() => {});
       }
       throw error;
     }
-    // The release decides which managed domains this installation may be
-    // given an address under, so report it with every request, not only at
-    // registration.
     const endpoint = await client.ensureEndpoint(installation.credential, {
       appVersion: identity.appVersion,
     });
@@ -632,8 +558,7 @@ export function createCompanionAccountService({
         }),
       );
     } catch (error) {
-      // Persistence failed after remote allocation. Best effort cleanup avoids
-      // an invisible tunnel; no secret is ever written to a log or exception.
+      // Best-effort cleanup avoids an invisible tunnel; no secret ever reaches a log or exception.
       await client.deleteEndpoint(installation.credential).catch(() => {});
       await client.revokeInstallation(accountToken, installation.installation.id).catch(() => {});
       throw error;
@@ -660,7 +585,6 @@ export function createCompanionAccountService({
     try {
       log(line);
     } catch {
-      // Logging never changes the outcome of a setup step.
     }
   };
 
@@ -745,9 +669,7 @@ export function createCompanionAccountService({
       );
       authenticatedPersisted = true;
       if (refreshingPendingCleanup) {
-        // The user supplied a fresh bearer to finish an interrupted sign-out.
-        // Keep that intent and retry revocation; do not silently turn the
-        // sign-out action into a new endpoint provisioning operation.
+        // Finish the interrupted sign-out; never turn it into a new endpoint provisioning.
         await cleanupCurrentAccount({ markPending: false });
         return settledState();
       }
@@ -799,11 +721,7 @@ export function createCompanionAccountService({
     return retryWork();
   });
 
-  /** Re-provision only on a definitive server answer that the saved address
-   * has no working endpoint behind it. A network or service failure keeps
-   * the saved address and its connector exactly as they are. Returns the
-   * reconcile result, or null when nothing needed doing. On demand, an
-   * address nothing needs is given back there instead (`onGone`). */
+  /** Re-provisions only on a definitive "no endpoint" answer; a network or service failure keeps everything as is. */
   const reconcileIfEndpointGone = async ({ onGone = retryWork } = {}) => {
     const document = credentials();
     const account = storedAccount(document);
@@ -822,10 +740,6 @@ export function createCompanionAccountService({
     try {
       endpoint = await client.getEndpoint(account.installationCredential);
     } catch (error) {
-      // A rejected installation credential (it expires after 90 days) is a
-      // definitive answer too: the saved address can no longer be repaired
-      // with it. Retry recovers through the account session, or shows the
-      // "sign-in expired" state so the person is asked to sign in.
       if (error instanceof ControlPlaneError && error.status === 401) return onGone();
       return null;
     }
@@ -835,17 +749,10 @@ export function createCompanionAccountService({
     return onGone();
   };
 
-  // Skip only a check that ran recently (restore's launch check, say). A
-  // full-interval comparison would also skip the regular tick whenever the
-  // previous check landed a few milliseconds after its own tick.
   const endpointCheckDue = () =>
     lastEndpointCheck === null || now() - lastEndpointCheck >= endpointCheckIntervalMs / 2;
 
-  /** Whether to ask now if the saved address still has its tunnel: only
-   * while Remote access is on, since a check-in otherwise marks an unused
-   * tunnel as recently seen and keeps it from being reclaimed. Past launch,
-   * also not behind a scheduled retry, and only for a connector that could
-   * be stuck on a removed tunnel ("unavailable" and "stopped" are left). */
+  /** Only while Remote access is on: a check-in marks an unused tunnel as recently seen, which blocks its reclaim. */
   const recoveryDue = ({ atLaunch = false } = {}) => {
     if (!autoRecover || !companionIsOn()) return false;
     if (atLaunch) return true;
@@ -854,14 +761,10 @@ export function createCompanionAccountService({
     return WATCHDOG_CHECK_STATES.has(connection.status) && endpointCheckDue();
   };
 
-  // ── on demand ────────────────────────────────────────────────────────
-  /** A person's own request counts as a need for an hour. */
   const requestedRecently = () => requestedAt !== null && now() - requestedAt < REQUEST_WINDOW_MS;
 
-  /** The saved address, even one this release cannot start yet. */
   const savedAddress = (document) => normalizeManagedCompanionEndpoint(document[MANAGED_COMPANION_ENDPOINT_FIELD]);
 
-  /** true, false, or null when that cannot be told. Only false gives back. */
   const currentNeed = async () => {
     if (requestedRecently()) return true;
     try {
@@ -886,12 +789,7 @@ export function createCompanionAccountService({
     });
   };
 
-  /** Give the address back. The need is checked once more first; then, in
-   * sign-out's order, the connector stops and the address is withdrawn
-   * before the DELETE, so nothing can pair to an address being removed. A
-   * failed DELETE brings the connector back, and the next check tries again.
-   * The control plane keeps the hostname, so the next request gets it back
-   * (after finishing a removal it left pending: finishPendingRelease). */
+  /** The connector stops and the address is withdrawn before the DELETE, so nothing can pair to an address being removed. */
   const releaseAddress = async () => {
     const need = await currentNeed();
     if (need !== false) {
@@ -912,10 +810,6 @@ export function createCompanionAccountService({
     try {
       await client.deleteEndpoint(account.installationCredential);
     } catch (error) {
-      // Cleanup pending: the control plane finishes it on its own, and is
-      // remembered so the next request can finish it first. A rejected
-      // credential cannot remove anything, and the idle reclaim removes a
-      // tunnel that stays offline.
       removalPending = error instanceof ControlPlaneError && error.code === "endpoint_cleanup_pending";
       const handedOver = removalPending || (error instanceof ControlPlaneError && error.status === 401);
       if (!handedOver) {
@@ -937,18 +831,10 @@ export function createCompanionAccountService({
     return settledState();
   };
 
-  /** At launch and on every watchdog tick: keep and repair a saved address
-   * while something needs it, or while that cannot be told; give it back
-   * once nothing has needed it for the grace period. Never creates one. At
-   * launch the companion is often still starting, so "can't tell" there is
-   * left to the first check, two minutes later. */
   const reviewAddress = async ({ atLaunch = false } = {}) => {
     const document = credentials();
     if (!storedAccount(document) || companionAccountCleanupPending(document)) return null;
     if (!managedCompanionTunnelAccess(document)) {
-      // An address an older release saved cannot start until the control
-      // plane reconciles it for this one (the origin version gate). A device
-      // that uses it gets that now, behind the same hostname.
       if (!savedAddress(document) || autoRetryTimer !== null) return null;
       return (await currentNeed()) === true ? retryWork() : null;
     }
@@ -960,8 +846,6 @@ export function createCompanionAccountService({
     }
     const releaseAt = releaseScheduledAt();
     if (releaseAt !== null && now() >= releaseAt) return releaseAddress();
-    // A tunnel that cannot connect and is gone or broken is not repaired
-    // for nobody: it is given back now.
     const connection = managedConnectionState?.() ?? {};
     if (
       companionIsOn() &&
@@ -971,7 +855,6 @@ export function createCompanionAccountService({
       const released = await reconcileIfEndpointGone({ onGone: releaseAddress });
       if (released) return released;
     }
-    // Written once, and again only if a clock jump put it out of range.
     if (releaseAt === null || releaseAt - now() > releaseGraceMs + releaseJitterMs) {
       const delay = releaseGraceMs + Math.round(random() * releaseJitterMs);
       await updateCredentials((current) => managedCompanionTunnelAccess(current)
@@ -982,10 +865,6 @@ export function createCompanionAccountService({
     return null;
   };
 
-  /** An automatic retry runs only while it still serves someone: a person
-   * who asked within the hour, or a saved address that something needs (or
-   * may need) being repaired. Otherwise retrying stops, and its error goes
-   * with it: no one is waiting for an address. */
   const retryIfWanted = async () => {
     if (requestedRecently()) return retryWork();
     if (savedAddress(credentials()) && (await currentNeed()) !== false) {
@@ -999,10 +878,6 @@ export function createCompanionAccountService({
 
   retryFromTimer = () => serialize(onDemand ? retryIfWanted : retryWork);
 
-  /** A person is starting pairing that offers the HTTPS address: create it
-   * when there is none, start a stopped connector, and repair a saved
-   * address its connector cannot reach. With Remote access off there is
-   * nothing to pair through, so nothing happens. */
   const prepare = () => serialize(async () => {
     const document = credentials();
     if (
@@ -1026,18 +901,10 @@ export function createCompanionAccountService({
     return settledState();
   });
 
-  /** While the companion is on, ask the control plane (cheaply, no provider
-   * calls) every interval whether the endpoint still exists. This is how a
-   * computer whose idle tunnel was reclaimed recovers on its own: after
-   * Remote access is turned back on, and also when the app kept running
-   * through a long sleep and its connector still reports the old "ready".
-   * On demand, each tick reviews the address instead, whether or not Remote
-   * access is on: with it off, the need is simply unknown and nothing runs. */
   const watchdogTick = () => {
     watchdogTimer = null;
     if (disposed) return;
     watchdogTimer = setTimer(watchdogTick, endpointCheckIntervalMs);
-    // A sign-in only the person can renew; asking again changes nothing.
     if (phase?.status === "signed-out") return;
     if (onDemand) {
       void serialize(() => reviewAddress()).catch(() => {});
@@ -1060,14 +927,8 @@ export function createCompanionAccountService({
     const email = storedAccount(credentials())?.email;
     phase = { status: "connecting", email };
     try {
-      // Local access must stop even when the hosted control plane is down.
-      // cleanupCurrentAccount first persists durable cleanup intent and stops
-      // the connector, then attempts remote deletion/revocation with the
-      // retained credentials. A failed remote step is retryable; a health
-      // preflight here would leave paired-phone access live after Sign out.
+      // No health preflight: local access must stop on Sign out even when the control plane is down.
       await cleanupCurrentAccount();
-      // Successful owner-scoped reconciliation is stronger evidence than a
-      // separate health probe and keeps the signed-out setup card available.
       healthy = true;
       lastHealthCheck = now();
       return settledState();
@@ -1084,7 +945,6 @@ export function createCompanionAccountService({
     if (companionAccountCleanupPending(credentials())) return retryWork();
     await ensureClientIdentity();
     if (onDemand) {
-      // Launch never creates an address; it keeps, repairs or gives one back.
       const reviewed = await reviewAddress({ atLaunch: true });
       if (reviewed) return reviewed;
       phase = null;
@@ -1092,8 +952,6 @@ export function createCompanionAccountService({
     }
     const account = storedAccount(credentials());
     if (account && !managedCompanionTunnelAccess(credentials())) return retryWork();
-    // Only when Remote access is on this launch: checking in otherwise would
-    // mark an unused tunnel as recently seen and keep it from being reclaimed.
     if (autoRecover && account && companionIsOn()) {
       const reconciled = await reconcileIfEndpointGone();
       if (reconciled) return reconciled;

@@ -1,5 +1,4 @@
-// The Team map reads live work through the actual route under the disposable
-// launcher. The only provider is its fake CLI; the teammate waits on a gate.
+// The only provider is the launcher's fake CLI; the teammate waits on a gate.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";

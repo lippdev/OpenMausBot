@@ -17,8 +17,7 @@ vi.mock("node:worker_threads", async importOriginal => {
   } };
 });
 
-// Real encrypted backups of 800+ files: about 3 s on Linux and macOS but about
-// 25 s on the Windows runners, so a 30 s limit there timed out under load.
+// Real encrypted backups of 800+ files: about 3 s on Linux and macOS, about 25 s on the Windows runners.
 const TIMEOUT_MS = 120_000;
 
 it("keeps the request loop running during the snapshot copy, not just encryption", async () => {
@@ -45,10 +44,7 @@ it("keeps the request loop running during the snapshot copy, not just encryption
   }
 }, TIMEOUT_MS);
 
-// A copy's status poll (GET /api/cloud-move counts chats in the live message
-// database) opens its own connection while the restore's backup snapshots that
-// database, and the busy moment of that connection opening or closing used to
-// fail the snapshot outright ("database is locked", or Node's "not an error").
+// A copy's status poll opens its own connection to the live message database while the backup snapshots it.
 it("waits for another connection's moment on the message database instead of failing the snapshot", async () => {
   const directory = mkdtempSync(join(tmpdir(), "omb-backup-worker-busy-"));
   const database = join(directory, "messages.db");
@@ -58,8 +54,7 @@ it("waits for another connection's moment on the message database instead of fai
   const insert = store.prepare("INSERT INTO messages VALUES (?, ?, '{}')");
   for (let i = 0; i < 40; i++) insert.run(`thread-${i % 3}`, `message-${i}`);
   store.close();
-  // The other connection holds the database the way that busy moment does:
-  // in WAL mode, only exclusive locking mode keeps another reader out.
+  // In WAL mode only exclusive locking mode keeps another reader out, as that busy moment does.
   const holder = new DatabaseSync(database);
   holder.exec("PRAGMA locking_mode = EXCLUSIVE");
   holder.exec("BEGIN EXCLUSIVE");

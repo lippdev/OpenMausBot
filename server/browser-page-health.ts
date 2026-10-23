@@ -1,18 +1,6 @@
-// What a bot's page reported: console errors, uncaught errors and failed
-// requests, read from the engine's own buffers over the loopback relay
-// (browser-relay.ts) around each browser call, for every bot. The engine
-// already collects them; the core MCP profile has no tool to read them, so
-// before this a bot never learned that its click's POST came back 500.
-//
-// Best effort, never proof of absence: CDP events wait in a 4,096-event
-// buffer that is dropped on overflow, browser-generated console lines (CSP,
-// CORS, "Failed to load resource") and network-level failures never reach the
-// engine's lists, and `errors --clear` is ignored. So a missing line means
-// "nothing new was seen", never "the page had no errors".
-//
-// Page text is untrusted. Whatever reaches a model is one line per sample,
-// stripped of control, bidirectional and zero-width characters, capped, and
-// JSON-quoted, inside a sentence that says it is page output.
+// Best effort, never proof of absence: CDP events wait in a 4,096-event buffer dropped on overflow, browser-generated
+// console lines (CSP, CORS, "Failed to load resource") and network-level failures never reach agent-browser's lists, and
+// `errors --clear` is ignored. Page text is untrusted: one stripped, capped, JSON-quoted line per sample.
 import { scrubHeldSecrets } from "../shared/redact.ts";
 import { siteOf } from "../shared/site.ts";
 import type { RelayAnswer } from "./browser-relay.ts";
@@ -24,9 +12,7 @@ export interface FailedRequest {
   path: string;
   /** Null: no answer yet, or failed below HTTP. */
   status: number | null;
-  /** The engine's resource type: Document, Fetch, XHR, Script, Image... */
   type: string;
-  /** Same site as the page (shared/site.ts). */
   firstParty: boolean;
   pending?: true;
   ageMs?: number;
@@ -37,11 +23,9 @@ export interface HealthDelta {
   requests: FailedRequest[];
   errors: PageError[];
   console: ConsoleLine[];
-  /** How many more of each were seen than are kept here. */
   more?: { requests?: number; errors?: number; console?: number };
 }
 
-/** One relayed read within the caller's budget; null when it failed. */
 export type RelayRead = (command: Record<string, unknown>) => Promise<RelayAnswer | null>;
 
 const KEPT = 20;
@@ -58,18 +42,11 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-// Control characters, bidirectional marks, overrides and isolates,
-// zero-width and other invisible format characters, the BOM, variation
-// selectors and Unicode tag characters (which spell text a model reads and a
-// person never sees): none belongs in one line of page output.
+// Control, bidi, zero-width and variation characters, the BOM and Unicode tags (text a model reads and a person never sees).
 // eslint-disable-next-line no-control-regex -- removing them is the point
 const UNSAFE = /[\ufe00-\ufe0f\u{e0100}-\u{e01ef}\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/gu;
 
-/** One line of page text a model may read: the first line only, held
- * secrets masked while the text is still as the page wrote it (cutting it or
- * collapsing its spaces first could leave part of a password the scrubber no
- * longer knows), unsafe characters removed, whitespace collapsed, capped at
- * `max` characters. */
+/** Held secrets are masked before cutting or collapsing, which could leave part of a password the scrubber no longer knows. */
 export function sanitizePageText(text: string, max: number): string {
   const line = scrubHeldSecrets(String(text).split(/\r\n|\r|\n|\u2028|\u2029/u)[0] ?? "").replace(UNSAFE, "").replace(/\s+/gu, " ").trim();
   return line.length > max ? `${line.slice(0, Math.max(0, max - 1))}…` : line;
@@ -77,13 +54,11 @@ export function sanitizePageText(text: string, max: number): string {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
-/** A request path with its identifiers collapsed to `#`: numbers of three or
- * more digits, UUIDs, long hex, token-like base64url and anything holding an
- * email address. Paths name people and records; a report needs the route. */
+/** Identifiers collapsed to `#`: paths name people and records, and a report needs only the route. */
 export function collapsePath(pathname: string): string {
   const segments = pathname.split("/").map((segment) => {
     let decoded = segment;
-    try { decoded = decodeURIComponent(segment); } catch { /* keep it encoded */ }
+    try { decoded = decodeURIComponent(segment); } catch {}
     if (!segment) return segment;
     if (/^\d{3,}$/u.test(segment) || UUID.test(segment) || /^[0-9a-f]{16,}$/iu.test(segment) || decoded.includes("@")) return "#";
     if (segment.length >= 20 && /^[\w-]+$/u.test(segment) && /\d/u.test(segment) && /[A-Za-z]/u.test(segment) && !/^[a-z0-9]+(?:-[a-z0-9]+)+$/u.test(segment)) return "#";
@@ -93,8 +68,7 @@ export function collapsePath(pathname: string): string {
   return path.length > SAMPLE_CHARS ? `${path.slice(0, SAMPLE_CHARS - 1)}…` : path;
 }
 
-/** One failed or pending request as kept and shown: never its headers, body
- * (the engine keeps POST bodies, passwords included) or query. */
+/** Never headers, body (the engine keeps POST bodies, passwords included) or query. */
 export function reduceRequest(raw: unknown, pageSite: string | null, now = Date.now()): FailedRequest | null {
   const entry = record(raw);
   if (!entry || typeof entry.url !== "string") return null;
@@ -113,8 +87,7 @@ export function reduceRequest(raw: unknown, pageSite: string | null, now = Date.
   return reduced;
 }
 
-/** Where an uncaught error was thrown, from its stack's top frame (the
- * engine's error entries carry no URL of their own). */
+/** From the stack's top frame: the engine's error entries carry no URL. */
 function reduceError(raw: unknown, pageSite: string | null): PageError | null {
   const entry = record(raw);
   if (!entry || typeof entry.text !== "string") return null;
@@ -128,15 +101,10 @@ function reduceError(raw: unknown, pageSite: string | null): PageError | null {
   } catch { return { text, firstParty: null }; }
 }
 
-/** Where a list that only grows at the end, and drops its oldest at a cap,
- * was last read: how long it was, and its last keys. */
 export interface Cursor { ready: boolean; count: number; tail: string[] }
 const freshCursor = (): Cursor => ({ ready: false, count: 0, tail: [] });
 
-/** The entries of `list` added since `cursor`. The first read of a session
- * only sets the cursor: what the engine held before is not this call's.
- * A shorter list was cleared or restarted, so all of it is new; a list that
- * rotated at its cap is found again by its remembered last keys. */
+/** The first read only sets the cursor; a shorter list was cleared, and a list rotated at its cap is found again by its last keys. */
 export function newEntries<T>(list: readonly T[], keyOf: (entry: T) => string, cursor: Cursor): { fresh: T[]; cursor: Cursor } {
   const keys = list.map(keyOf);
   const next: Cursor = { ready: true, count: list.length, tail: keys.slice(-3) };
@@ -167,13 +135,11 @@ interface SessionHealth {
   errors: Cursor;
   seen: Set<string>;
   seenOrder: string[];
-  /** The page now: origin and path, its host and its site. */
   visit: string | null;
   host: string | null;
   site: string | null;
-  /** Signatures already shown to the bot on this visit. */
   shown: Set<string>;
-  /** The thread that last used this browser: another thread's leftovers are not its news. */
+  /** Another thread's leftovers in a shared browser are not this thread's news. */
   thread: string | null;
   /** A person took the browser: the next read moves past what they caused, reporting none of it. */
   discard: boolean;
@@ -191,9 +157,6 @@ export class PageHealthReader {
     return state;
   }
 
-  /** The page the session is on now. A new visit — another path, or the
-   * same address loaded again (`loadedAt`, the document's time origin) —
-   * may show its news again. */
   setPage(session: string, href: string | null, loadedAt: number | null = null): void {
     if (!href) return;
     let url: URL;
@@ -206,17 +169,11 @@ export class PageHealthReader {
     state.site = web ? siteOf(url.hostname) : null;
   }
 
-  /** The page's host as last seen, for naming a request on another host. */
   pageHost(session: string): string | null { return this.sessions.get(session)?.host ?? null; }
 
-  /** The page's site as last seen: what counts as its own requests. */
   pageSite(session: string): string | null { return this.sessions.get(session)?.site ?? null; }
 
-  /** What the page reported since this session was last read. The first
-   * read of a session only notes where its lists stand, its failed requests
-   * included, unless `fresh`: a browser whose daemon was not running before
-   * this call holds only its news. Null when a read failed: unknown, never
-   * "nothing". */
+  /** Null when a read failed: unknown, never "nothing". */
   async read(session: string, read: RelayRead, thread: string | null, fresh = false): Promise<HealthDelta | null> {
     const state = this.state(session);
     if (fresh) {
@@ -244,8 +201,6 @@ export class PageHealthReader {
       if (state.seenOrder.length > SEEN_REQUESTS) state.seen.delete(state.seenOrder.shift()!);
       freshRequests.push(raw);
     }
-    // Another thread's leftovers in a shared browser are not this one's news,
-    // nor what a person caused while they held it.
     const sameThread = state.thread === null || state.thread === thread;
     state.thread = thread;
     const held = state.discard;
@@ -266,20 +221,13 @@ export class PageHealthReader {
     return delta;
   }
 
-  /** Empty the engine's console and request lists before an action, so what
-   * the next read finds is the action's, the request list stops growing
-   * without bound, and the engine stops holding request bodies. Errors
-   * cannot be cleared (the engine ignores it); their cursor carries on. */
+  /** Also stops the engine holding request bodies. Errors cannot be cleared (the engine ignores it). */
   async clear(session: string, read: RelayRead): Promise<void> {
     const state = this.state(session);
     if ((await read({ action: "console", clear: true }))?.success) state.console = { ready: state.console.ready, count: 0, tail: [] };
     await read({ action: "requests", clear: true });
   }
 
-  /** What of a delta a bot is shown: its own site's failed documents, API
-   * calls and scripts, uncaught errors not thrown by a third-party script,
-   * and console errors, each once per page visit. The rest stays in the
-   * evidence only. */
   visible(session: string, delta: HealthDelta): HealthDelta {
     const state = this.state(session);
     const once = (signature: string) => {
@@ -295,36 +243,24 @@ export class PageHealthReader {
     };
   }
 
-  /** A person took the browser: what its page reports while they hold it is
-   * theirs, never a bot's news or evidence. The next read that answers moves
-   * the cursors past it and reports nothing. */
   discardNext(session: string): void { this.state(session).discard = true; }
 
-  /** The browser closed, restarted or relaunched: its lists start over. */
   forget(session: string): void { this.sessions.delete(session); }
 }
 
 function plural(count: number, word: string): string { return `${count} ${word}${count === 1 ? "" : "s"}`; }
 
-/** One request as a bot reads it: method, quoted path (with the host when it
- * is not the page's own) and status. */
 function requestSample(request: FailedRequest, pageHost: string | null): string {
   const where = request.host === pageHost ? request.path : `${request.host}${request.path}`;
   const path = where.length > SAMPLE_CHARS ? `${where.slice(0, SAMPLE_CHARS - 1)}…` : where;
   return `${request.method} ${JSON.stringify(path)}${request.status === null ? "" : ` → ${request.status}`}`;
 }
 
-/** Which requests still waiting at the settle cap a recording bot hears
- * about: its own site's page loads and changes (not GET calls, which long
- * polls and beacons keep open). */
+/** Not GET calls, which long polls and beacons keep open. */
 export function unansweredWorthSaying(pending: readonly FailedRequest[]): FailedRequest[] {
   return pending.filter((request) => request.firstParty && (request.method !== "GET" || request.type.toLowerCase() === "document"));
 }
 
-/** The one line a bot reads about its page, or null when there is nothing
- * new to say: at most three samples a kind, each one line of at most 120
- * characters and JSON-quoted, the whole line within 500. `late`: what
- * happened between its previous browser call and this one. */
 export function healthLine(visible: HealthDelta, waiting: readonly FailedRequest[], when: "after" | "late", capSeconds: number, pageHost: string | null = null): string | null {
   if (isEmptyDelta(visible) && !waiting.length) return null;
   const opening = when === "after"
@@ -336,7 +272,6 @@ export function healthLine(visible: HealthDelta, waiting: readonly FailedRequest
     const shown: string[] = [];
     let size = head.length + 2 + close.length;
     for (const sample of samples.slice(0, SAMPLES)) {
-      // Room is kept for the counts of the kinds that follow.
       if (used + size + sample.length + 2 > LINE_CHARS - 60) break;
       shown.push(sample);
       size += sample.length + 2;

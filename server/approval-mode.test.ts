@@ -19,7 +19,6 @@ describe("approval modes", () => {
     for (const driver of ["codex", "claudeAgent", "grokAgent", "antigravityAgent", "piAgent", "customAcp"]) {
       expect(modelSwitchNeedsAsk("ask", "codex", driver)).toBe(false);
       expect(modelSwitchNeedsAsk("auto", "codex", driver)).toBe(false);
-      // the person's Full access stays with the bot, on every engine
       expect(modelSwitchNeedsAsk("full", "codex", driver)).toBe(false);
       expect(modelSwitchNeedsAsk("custom", "codex", driver)).toBe(driver !== "codex");
     }
@@ -36,7 +35,6 @@ describe("approval modes", () => {
       expect(supportsApprovalMode(driver, "custom")).toBe(driver === "codex");
       // Qwen's `--approval-mode auto` is an LLM classifier; Gemini has no reviewer
       expect(hasNativeAutoReview(driver)).toBe(["codex", "claudeAgent", "cursorAgent", "grokAgent", "qwenAgent"].includes(driver));
-      // auto-accept edits exists only where the engine has such a mode
       expect(supportsApprovalMode(driver, "edits")).toBe(["claudeAgent", "grokAgent", "antigravityAgent", "qwenAgent", "geminiAgent"].includes(driver));
     }
     expect(supportsApprovalMode(undefined, "full")).toBe(true);
@@ -61,11 +59,8 @@ describe("approval modes", () => {
     expect(hasNativeAutoReview(driver)).toBe(false);
   });
 
-  // The chat-completions family has no provider reviewer, so Auto still
-  // behaves like Ask — but Full is implemented in the harness itself
-  // (createOpenAIChatRuntime answers its own gate), so it IS offered. Without
-  // it these engines had no level that ever stops asking, and a Chief's
-  // delegated Full access could not reach them either.
+  // The chat-completions family has no provider reviewer, so Auto behaves like Ask, but Full is implemented in the harness
+  // (createOpenAIChatRuntime answers its own gate), so it is offered.
   it.each(["grok", "openai-compat", "minimax", "groq", "meta"])("offers harness-implemented Full on %s, but never native Auto", (driver) => {
     expect(supportsApprovalMode(driver, "ask")).toBe(true);
     expect(supportsApprovalMode(driver, "auto")).toBe(true);
@@ -91,7 +86,6 @@ describe("approval modes", () => {
     expect(approvalModeFor({})).toBe("full");
     // Every bot made over HTTP stores the legacy bit off beside no level.
     expect(approvalModeFor({ autoApprove: false })).toBe("full");
-    // A level a person picked stays, Ask included.
     expect(approvalModeFor({ approvalMode: "ask", autoApprove: false })).toBe("ask");
   });
 
@@ -100,7 +94,6 @@ describe("approval modes", () => {
     try {
       expect(approvalModeFor({})).toBe("ask");
       expect(approvalModeFor({ autoApprove: false })).toBe("ask");
-      // Full the operator's policy granted is stored, so it holds.
       expect(approvalModeFor({ approvalMode: "full" })).toBe("full");
     } finally {
       setDefaultApprovalMode(DEFAULT_APPROVAL_MODE);

@@ -81,8 +81,6 @@ it("keeps live room questions fenced but allows task changes after their turn se
       ["PATCH", `/api/groups/${room.id}`, { memberIds: [bot.id] }],
       ["DELETE", `/api/groups/${room.id}/tasks/${spareThreadId}`],
     ];
-    // The task with the live question is fenced, and so is the room's setup;
-    // another task stays free to start, rename and leave (one queue per task).
     const fenced: Array<[string, string, unknown?]> = [
       ["PATCH", `/api/groups/${room.id}/tasks/${room.threadId}`, { title: "Renamed live task" }],
       ["DELETE", `/api/groups/${room.id}/tasks/${room.threadId}`],

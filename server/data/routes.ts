@@ -1,10 +1,4 @@
-// The Data tab's routes, all under /api/bots/:botId/data (DATA_ROUTES in
-// shared/data-surface.ts): the sheet, paging a table or a card, the
-// person's own SQL (the same showCard the bot's tool runs, on the panel's
-// connection), cancel, card edits, the column explorer's stats and
-// histograms, export, and a server-rendered image of a chart card. In the
-// route table (server/routes/README.md): already authenticated, admin scope
-// by default (request-auth.ts). Every error is `{ error: DataError }`.
+// Every error is `{ error: DataError }`.
 import type { ServerResponse } from "node:http";
 import { z } from "zod";
 
@@ -21,7 +15,6 @@ export interface DataRouteDeps {
   compileChart: ChartCompiler;
   validateVegaLite: VegaLiteValidator;
   renderer: ChartRenderer;
-  /** Folders an export may land in for this bot, most preferred first. */
   exportRoots(bot: { id: string; cwd?: string }): string[];
 }
 
@@ -67,7 +60,6 @@ const exportBody = z.object({
   format: z.enum(["csv", "parquet", "xlsx", "png", "svg"]),
 }).strict();
 
-/** The HTTP status a DataError code maps to. */
 export function dataErrorStatus(code: DataErrorCode): number {
   switch (code) {
     case "invalid_input": return 400;
@@ -82,7 +74,7 @@ export function createDataRoutes(deps: DataRouteDeps): RouteHandler {
   const replyError = (ctx: RouteContext, error: DataError) => ctx.json(ctx.res, dataErrorStatus(error.code), { error });
   const invalid = (message: string): DataError => ({ code: "invalid_input", message });
 
-  /** The parsed body, or a 400 already sent (returns undefined). */
+  /** Undefined means a 400 was already sent. */
   async function body<T>(ctx: RouteContext, schema: z.ZodType<T>): Promise<T | undefined> {
     let raw: unknown;
     try {
@@ -110,7 +102,6 @@ export function createDataRoutes(deps: DataRouteDeps): RouteHandler {
     if (unavailable !== null) return replyError(ctx, { code: "engine_unavailable", message: unavailable });
     const rest = match[2] ?? "";
     const [head, second, third] = rest.split("/");
-    // The person's own actions abort with the request, like a closed tab.
     const abort = new AbortController();
     res.once("close", () => { if (!res.writableEnded) abort.abort(); });
     const database = await deps.engine.forBot(bot.id);
@@ -121,7 +112,6 @@ export function createDataRoutes(deps: DataRouteDeps): RouteHandler {
     };
     try {
       if (rest === "" && method === "GET") {
-        // The catalog comes from DuckDB each time; a read never writes the sheet.
         return ctx.json(res, 200, { sheet: sheet.sheet(), tables: await database.listTables() });
       }
       if (rest === "page" && method === "POST") {

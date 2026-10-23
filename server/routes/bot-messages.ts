@@ -1,52 +1,44 @@
-// A bot's conversation routes, moved out of server/index.ts's inline routes
-// into the route table (server/routes/README.md): a person's message to a
-// bot (plain and guarded), the steer queue, compaction, editing a message
-// into a new branch, switching the visible branch, answering a card by bot
-// or by thread, and Stop. The table runs after the auth gate; scope rules
-// stay keyed by path in server/request-auth.ts.
 import type { ServerResponse } from "node:http";
 import { z } from "zod";
 
 import { approvalModeFor } from "../../shared/approval-mode.ts";
-import { isPersistentQuestionCard, QUESTION_DISMISS_MESSAGE } from "../../shared/ask-question.ts";
+import { isPersistentQuestionCard } from "../../shared/ask-question.ts";
+import { normalizeReaction, reactionAnswer } from "../../shared/reactions.ts";
+import type { WidgetAction } from "../../shared/widget.ts";
 import type { ResolvedSender, SteerQueueReason } from "../../shared/wire.ts";
 import { admit } from "../admission.ts";
+import { dismissQuestionCard } from "../card-dismissal.ts";
+import { AppMessageRate, appContextBlock, prepareAppMessage } from "../chat-apps.ts";
 import { prepareWidgetPress, reopenCancelledPress } from "../chat-widgets.ts";
 import type { ModelSelection, RequestOutcome, SteerOutcome } from "../contracts.ts";
 import { parseDataContext, type DataContext } from "../data-context.ts";
+import { preparePointed } from "../pointed.ts";
 import type { Handoffs } from "../delta-context.ts";
 import type { ProviderRegistry } from "../harness/registry.ts";
 import { spokenLineFields } from "../live-call-record.ts";
-import { resolvePeerComms, type ApprovalBus } from "../peer-approval.ts";
 import type { PhoneSecretSubmissionRegistry } from "../phone-secret.ts";
 import type { ReplyTarget } from "../replies.ts";
 import type { RequestAuth } from "../request-auth.ts";
 import type { RoutineManager } from "../routines.ts";
 import { acceptedSendMatch, parseSendId } from "../send-idempotency.ts";
-import { cancelSteeredMessage, holdSteeredQueue, restoreHeldSteeredQueue, settleHeldSteeredQueue } from "../steer-queue.ts";
+import { cancelSteeredMessage, holdSteeredQueue, queuedSteeredMessage, restoreHeldSteeredQueue, settleHeldSteeredQueue } from "../steer-queue.ts";
 import type { BotRecord, GroupRecord, Message, Store } from "../store.ts";
 import { extractSteerImages } from "../turn-images.ts";
 import type { UsageTrigger } from "../usage-ledger.ts";
 import { pinnedClientThreadGuard } from "./pinned-client-thread.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 
-/** A running engine, as the registry hands it out. */
 type RunningInstance = ReturnType<ProviderRegistry["get"]>;
 
-/** What acceptDirectSend (server/index.ts) answers with: the message that
- * started or was steered into a turn, or the queue slot the words wait in.
- * Written out here so the module needs nothing from index.ts. */
 type DirectSendReceipt =
   | { ok: true; threadId: string; message: Message; steered?: true }
   | { ok: true; queued: true; queueId: string; threadId: string; reason?: SteerQueueReason };
 
-/** A skill card's answer as resolveSkillRequest (server/index.ts) returns it. */
 type SkillResolution =
   | { claimed: false }
   | { claimed: true; status: number; error: string }
   | { claimed: true; outcome: "allowed-once" | "rejected"; alreadySettled?: true };
 
-/** A card answered on a bot's behalf: who it was for, where, and how. */
 type CardAnswer = { botId: string; botName?: string; threadId: string; requestId: string; behavior: string };
 
 type Behavior = "allow" | "deny" | "answer";
@@ -56,22 +48,19 @@ export interface BotMessageRouteDeps {
     | "activeLeaf" | "appendMessage" | "bot" | "botByThread" | "bots" | "groupByThread" | "messagesFor"
     | "patchMessage" | "patchTask" | "projectBotForTask" | "setActiveLeaf" | "setTaskAskedAt" | "taskByThread" | "tasks">;
   registry: Pick<ProviderRegistry, "get">;
-  /** Assigned at boot, after the routes are built (server/host/README.md, rule 5). */
   routines(): RoutineManager | null;
   handoffs: Pick<Handoffs, "current" | "steered" | "stoppedByPerson">;
-  approvalBus: ApprovalBus;
   phoneSecretSubmissions: Pick<PhoneSecretSubmissionRegistry, "hasThread">;
-  /** index.ts's Maps, read here only. */
   directTurnDispatchClaims: { get(threadId: string): { threadId: string } | undefined };
   groupSpeakers: ReadonlyMap<string, { botId: string }>;
   desktopManaged: boolean;
   cloudHome: boolean;
-  /** The refusal acceptDirectSend throws; the route turns it into its answer. */
   DirectSendRefused: abstract new (...args: never[]) => { readonly status: number; readonly body: Record<string, unknown> };
   acceptDirectSend(
     input: {
       botId: string; threadId: string; text: string; sendId?: string; replyTo?: Message; sender?: ResolvedSender;
       trigger: UsageTrigger; dataContext?: DataContext; personPresent: boolean;
+      app?: { context?: string; fromApp?: Message["fromApp"]; pointed?: Message["pointed"] };
     },
     guardedStart?: (currentAtStart: BotRecord) => Promise<DirectSendReceipt>,
   ): Promise<DirectSendReceipt>;
@@ -84,7 +73,6 @@ export interface BotMessageRouteDeps {
   messageSender(auth: RequestAuth): ResolvedSender | undefined;
   cloudGuestSendRefusal(auth: RequestAuth, threadId: string): string | null;
   cloudThreadRefusal(auth: RequestAuth, threadId: string): string | null;
-  cloudOwnerSession(auth: RequestAuth): boolean;
   cardAnswerRefusal(auth: RequestAuth, threadId: string, requestId: string, behavior: string): string | null;
   commandRememberRefusal(auth: RequestAuth, threadId: string, requestId: string, behavior: string): string | null;
   requestBehavior(value: unknown): Behavior | null;
@@ -104,7 +92,7 @@ export interface BotMessageRouteDeps {
   answeringCardAs(auth: RequestAuth, threadId: string, requestId: string, work: () => Promise<unknown>): Promise<void>;
   resolveAndSendTrust(res: ServerResponse, threadId: string, requestId: string, behavior: Behavior): boolean;
   resolveAndSendTeamSetup(res: ServerResponse, args: { botId: string; threadId: string; requestId: string; behavior: string }, ownerReview: boolean): Promise<boolean>;
-  resolveAndSendRoutine(res: ServerResponse, args: CardAnswer, ownersAnswer?: boolean): boolean;
+  resolveAndSendRoutine(res: ServerResponse, args: CardAnswer): boolean;
   resolveAndSendProfile(res: ServerResponse, args: CardAnswer): boolean;
   resolveAndSendModel(res: ServerResponse, args: CardAnswer): boolean;
   resolveSkillRequest(args: CardAnswer & { behavior: Behavior; reviewedSha256?: string }): SkillResolution;
@@ -119,18 +107,27 @@ export interface BotMessageRouteDeps {
   revokeInternalCapabilitiesForThread(threadId: string): void;
   cancelGroupTurnOperations(groupId: string, threadId: string): void;
   closeOpenApprovals(threadId: string): void;
+  /** The outcome of a card the harness raised itself (a peer approval, a quota-switch offer); undefined for any other card. */
+  harnessCardOutcome(threadId: string, requestId: string, behavior: Behavior, message: unknown): Promise<string | undefined>;
+  /** What a press on one of the bot's own server-built cards is about, from the server's records; null leaves the press the person's plain answer. */
+  pressRecords(bot: BotRecord, action: WidgetAction): string | null;
+  /** A press the server answers itself, with no turn: handled, refused (not the owner or an admin), or null for an ordinary press. */
+  serverPress(bot: BotRecord, threadId: string, messageId: string, action: WidgetAction, auth: RequestAuth): "handled" | "refused" | null;
+  /** Shows a 👍 or 👎 relayed from another app on the message it answered, as that person's reaction. */
+  relayedReaction(threadId: string, messageId: string, person: { email?: string; name?: string }, emoji: string): void;
+  /** The conversation an answer to this card belongs to: a run's own, for the copy its automation posted in a chat. */
+  answeredIn(threadId: string, requestId: string): string;
 }
 
-/** The guarded send contract external interfaces (the Slack worker) opt into.
- * `onBehalfOf` is additive and advertised by /api/health
- * (capabilities.guardedOnBehalfOf): it names the person a relay acts for, so
- * the turn is booked to them rather than to this machine. Only this
- * admin-scoped route reads it; every other send is booked to its own
- * session. */
+/** External interfaces (the Slack worker) opt in. `onBehalfOf`, advertised by /api/health as
+ * capabilities.guardedOnBehalfOf, books the turn to that person; only this admin-scoped route reads it. `reaction`
+ * replaces `text` when the person reacted in that app: a 👍 or 👎 (Slack's name for it, or the emoji any platform
+ * sends) on the message in `replyToId`, made by `onBehalfOf`. */
 const guardedSendSchema = z.object({
   threadId: z.string().regex(/^[\w-]+$/),
   sendId: z.string().regex(/^[A-Za-z0-9_-]{16,80}$/),
-  text: z.string().min(1),
+  text: z.string().min(1).optional(),
+  reaction: z.string().max(64).optional(),
   expectedActiveLeafId: z.string().regex(/^[\w-]+$/).nullable(),
   expectedApprovalMode: z.enum(["ask", "full"]).optional(),
   replyToId: z.string().optional(),
@@ -138,28 +135,25 @@ const guardedSendSchema = z.object({
     email: z.string().trim().toLowerCase().max(254).pipe(z.email()).optional(),
     name: z.string().trim().min(1).max(120).optional(),
   }).strict().refine((who) => Boolean(who.email || who.name)).optional(),
-}).strict();
+}).strict().refine((send) => (send.text === undefined) !== (send.reaction === undefined));
 
 export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler {
   const {
-    store, registry, handoffs, approvalBus, phoneSecretSubmissions, directTurnDispatchClaims, groupSpeakers,
+    store, registry, handoffs, phoneSecretSubmissions, directTurnDispatchClaims, groupSpeakers,
     desktopManaged: DESKTOP_MANAGED, cloudHome: CLOUD_HOME, DirectSendRefused,
     acceptDirectSend, directSendRefusal, startTurn, usageTriggerFor, messageSender, cloudGuestSendRefusal, cloudThreadRefusal,
-    cloudOwnerSession, cardAnswerRefusal, commandRememberRefusal, requestBehavior, requestedTaskBot, botForThread, threadBusy,
+    cardAnswerRefusal, commandRememberRefusal, requestBehavior, requestedTaskBot, botForThread, threadBusy,
     botAtThreadCapacity, parksBehindCoordination, activeGroupTurnForBot, runningTurnInstance, engineSteersImages, resolveReplyTarget,
     turnSelection, policyModelRefusal, clearUnattended, drainQueuedSends, answeringCardAs, resolveAndSendTrust, resolveAndSendTeamSetup,
     resolveAndSendRoutine, resolveAndSendProfile, resolveAndSendModel, resolveSkillRequest, sendSkillResolution, answerRequest,
     deliverLateQuestionAnswer, interruptDirectThread, cancelDirectTurnDispatch, revokeInternalCapabilitiesForThread,
-    cancelGroupTurnOperations, closeOpenApprovals,
+    cancelGroupTurnOperations, closeOpenApprovals, harnessCardOutcome, pressRecords, serverPress, relayedReaction, answeredIn,
   } = deps;
   const pinnedClientThread = pinnedClientThreadGuard(store);
-  /** Presses that fold their widget, while their message is on its way in:
-   * widget -> the sendId that holds it. The widget is only marked answered
-   * once the message is accepted, and a second tap in between must not send
-   * a second answer. */
+  /** widget -> sendId of a press on its way in: a second tap before acceptance must not send a second answer. */
   const pressesInFlight = new Map<string, string | undefined>();
+  const appMessageRate = new AppMessageRate();
   return async ({ req, res, path, method, auth, json, readBody }) => {
-    /** scratch for route matches, shared by every `path.match` below */
     let m: RegExpMatchArray | null = null;
     const requirePinnedClientThread = pinnedClientThread(auth, req);
     const routines = deps.routines();
@@ -170,75 +164,85 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       if (!body || typeof body !== "object" || Array.isArray(body)) {
         return json(res, 400, { error: "body must be a JSON object" });
       }
-      // A press on a widget (`widgetAction`) is a person's own tap in one of
-      // this workspace's clients: a relay has no widget to press. A client
-      // that writes the field as null on an ordinary send means no press.
       const pressed = body.widgetAction !== undefined && body.widgetAction !== null;
       if (guarded && pressed) return json(res, 400, { error: "guarded sends cannot answer a widget" });
-      // External interfaces must opt into a distinct route: an older server
-      // returns 404 rather than silently ignoring safety preconditions.
+      const fromAnApp = body.appMessage !== undefined && body.appMessage !== null;
+      if (guarded && fromAnApp) return json(res, 400, { error: "guarded sends cannot speak for an app" });
+      if (pressed && fromAnApp) return json(res, 400, { error: "send widgetAction or appMessage, not both" });
+      const pointing = body.pointed !== undefined && body.pointed !== null;
+      if (pointing && (guarded || pressed || fromAnApp)) return json(res, 400, { error: "only a typed message can carry what the person pointed at" });
+      // A distinct route, so an older server answers 404 instead of ignoring the safety preconditions.
       const guardedBody = guarded ? guardedSendSchema.safeParse(body) : null;
       if (guardedBody && !guardedBody.success) {
         const onBehalfOfInvalid = guardedBody.error.issues.some((issue) => issue.path[0] === "onBehalfOf");
         return json(res, 400, { error: onBehalfOfInvalid
           ? "onBehalfOf must name the person with an email address, a name, or both"
-          : "guarded sends require threadId, sendId, text and expectedActiveLeafId" });
+          : "guarded sends require threadId, sendId, text (or a reaction) and expectedActiveLeafId" });
       }
-      // A press sends no words of its own: the server writes them from the
-      // stored widget below, once the task and the sendId are known.
-      const typed = pressed ? "" : String(body.text ?? "").trim();
-      if (!pressed && !typed) return json(res, 400, { error: "text required" });
+      const relayed = guardedBody?.data?.reaction === undefined ? null : normalizeReaction(guardedBody.data.reaction);
+      if (guardedBody?.data?.reaction !== undefined && (!reactionAnswer(relayed) || !body.replyToId || !guardedBody.data.onBehalfOf)) {
+        return json(res, 400, { error: "a relayed reaction is a 👍 or 👎 on the message in replyToId, made by the person in onBehalfOf" });
+      }
+      const typed = pressed || fromAnApp ? "" : relayed ?? String(body.text ?? "").trim();
+      if (!pressed && !fromAnApp && !typed) return json(res, 400, { error: "text required" });
       const bot = store.bot(m[1]);
       if (!bot) return json(res, 404, { error: "no such bot" });
       requirePinnedClientThread(bot.id, body.threadId);
       if (body.threadId !== undefined && (typeof body.threadId !== "string" || !/^[\w-]+$/.test(body.threadId))) {
         return json(res, 400, { error: "threadId must be a task id" });
       }
-      // A retry carries its original task. That lets us return the canonical
-      // receipt after a task switch, while a genuinely new send still has to
-      // target the task that is active now.
       const threadId = body.threadId ?? bot.threadId;
       const notYours = cloudGuestSendRefusal(auth, threadId);
       if (notYours) return json(res, 403, { error: notYours });
-      // Who this message is from, for the ledger. It is captured here and
-      // travels with the message: into the turn it starts, or into the queue
-      // until it drains. A message steered into someone else's running turn
-      // books nothing — that turn stays with whoever started it. A guarded
-      // relay (the Slack worker, which already holds admin scope to reach
-      // this route) names the person it acts for.
       const onBehalfOf = guardedBody?.data?.onBehalfOf;
       const trigger: UsageTrigger = onBehalfOf
         ? { kind: "user", ...(onBehalfOf.email ? { email: onBehalfOf.email } : {}), ...(onBehalfOf.name ? { label: onBehalfOf.name } : {}) }
         : usageTriggerFor(auth);
-      // The spend cap and a task that is gone answer before a malformed
-      // sendId or reply target does. acceptDirectSend checks both again for
-      // callers that do not come through this route; nothing awaits between.
-      const refused = directSendRefusal(bot.id, threadId);
-      if (refused) return json(res, refused.status, refused.body);
+      // Security invariant: another bot's thread answers like a missing one, before anything reads a widget in it.
+      if (pressed && !store.taskByThread(bot.id, threadId)) return json(res, 409, { error: "the bot switched tasks before it could receive the message" });
       const sendId = parseSendId(body.sendId);
-      // The press becomes an ordinary message that replies to its widget:
-      // the label, then one line per field. Nothing is written yet.
       const press = pressed ? prepareWidgetPress(store, threadId, body.widgetAction, sendId) : null;
       if (press && !press.ok) return json(res, press.status, { error: press.error });
-      const text = press ? press.text : typed;
-      const target = resolveReplyTarget(threadId, press ? press.messageId : body.replyToId);
-      // Only here is a reply known to be a press: a copy of the widget row
-      // says so to whatever composes the prompt (server/replies.ts). A typed
-      // reply to the same row carries no such mark, whatever its words.
-      const replyTo: ReplyTarget | undefined = press && target ? { ...target, widgetPress: { label: press.label, action: press.action } } : target;
+      const answered = press ? serverPress(bot, threadId, press.messageId, press.action, auth) : null;
+      if (answered === "handled") return json(res, 202, { ok: true, threadId, handled: true });
+      if (answered === "refused") return json(res, 403, { error: "Only the owner or an admin can do that." });
+      // acceptDirectSend checks these again; nothing awaits between.
+      const refused = directSendRefusal(bot.id, threadId);
+      if (refused) return json(res, refused.status, refused.body);
+      const appSent = fromAnApp ? prepareAppMessage(store, threadId, body.appMessage) : null;
+      if (appSent && !appSent.ok) return json(res, appSent.status, { error: appSent.error });
+      const pointed = pointing ? preparePointed(store, threadId, body.pointed) : null;
+      if (pointed && !pointed.ok) return json(res, pointed.status, { error: pointed.error });
+      const text = press ? press.text : appSent ? appSent.text : typed;
+      const target = resolveReplyTarget(threadId, press ? press.messageId : appSent ? appSent.messageId : body.replyToId);
+      if (relayed && target?.role !== "bot") return json(res, 400, { error: "a relayed reaction answers a bot's message" });
+      // Only a real press or reaction, or an app's own words, marks the reply; a typed reply to the same row never does, whatever its words.
+      const records = press && target ? pressRecords(bot, press.action) : null;
+      const replyTo: ReplyTarget | undefined = press && target ? { ...target, widgetPress: { label: press.label, action: press.action, ...(records ? { records } : {}) } }
+        : appSent && target ? { ...target, appMessage: { title: appSent.title, origin: appSent.origin } }
+          : relayed && target ? { ...target, reactedWith: relayed } : target;
       const pressKey = press?.settles ? `${threadId}:${press.messageId}` : undefined;
       if (pressKey && pressesInFlight.has(pressKey) && !(sendId && pressesInFlight.get(pressKey) === sendId)) {
         return json(res, 409, { error: "That answer is already on its way." });
       }
-      // A Data context is put in front of the words the model gets, and a
-      // press is read by its first line (server/replies.ts): it carries none.
-      const dataContext = press ? undefined : parseDataContext(body.dataContext);
+      const dataContext = press || appSent ? undefined : parseDataContext(body.dataContext);
+      const retried = Boolean(sendId && (store.messagesFor(threadId).some((message) => message.sendId === sendId) || queuedSteeredMessage(bot.id, threadId, sendId)));
+      const slot = appSent ? appMessageRate.reserve(`${threadId}:${appSent.messageId}`, sendId) : null;
+      if (appSent && !slot) return json(res, 429, { error: "This app has sent too many messages. Wait a while, or type your message." });
+      // A relay is not the person at this screen: it never carries what their apps last showed.
+      const appContext = guarded || retried ? null : appContextBlock(store, threadId);
+      const context = `${appContext?.block ?? ""}${pointed?.block ?? ""}`;
+      const app = context || appSent || pointed
+        ? {
+            ...(context ? { context } : {}),
+            ...(appSent ? { fromApp: { messageId: appSent.messageId, title: appSent.title } } : {}),
+            ...(pointed ? { pointed: pointed.refs } : {}),
+          }
+        : undefined;
       const sender = messageSender(auth);
       const guardedStart = guarded
         ? async (currentAtStart: BotRecord): Promise<DirectSendReceipt> => {
-            // There is no await between these checks and startTurn's
-            // synchronous transcript append / runtime reservation. In
-            // particular, never steer or enqueue under stale permissions.
+            // No await between these checks and startTurn: never steer or enqueue under stale permissions.
             const expectedMode = body.expectedApprovalMode ?? "ask";
             if (approvalModeFor(currentAtStart) !== expectedMode ||
                 (expectedMode === "ask" && (currentAtStart.autoApprove === true || currentAtStart.alwaysAllow?.length))) {
@@ -257,8 +261,6 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
             if (guardedAdmission.action === "refuse") {
               throw Object.assign(new Error("wait for a free thread slot before retrying this message"), { status: 409, code: "guarded_busy" });
             }
-            // Stored as relayed: a worker's line for someone else, which a
-            // Live call on this thread must not read back as typed there.
             const message = await startTurn(bot.id, text, { threadId, replyTo, sendId, sender, trigger, relayed: true, dataContext });
             return { ok: true as const, threadId, message };
           }
@@ -266,23 +268,17 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       if (pressKey) pressesInFlight.set(pressKey, sendId);
       try {
         const receipt = await acceptDirectSend({
-          botId: bot.id, threadId, text, sendId, replyTo, sender, trigger, dataContext,
-          // A person steering a webhook turn is present, and auto mode may
-          // follow them again. But this route is also reachable from the
-          // bot's own shell on a headless server (loopback is the owner
-          // there), and "continue" typed by the turn itself must not be the
-          // thing that lifts the block written against it — so only a
-          // request that proves a person (a paired session, or the desktop's
-          // owner capability, which every mutation there has already shown)
-          // clears the mark.
+          botId: bot.id, threadId, text, sendId, replyTo, sender, trigger, dataContext, ...(app ? { app } : {}),
+          // The bot's own shell reaches this route on a headless server (loopback is the owner), so only a
+          // paired session or the desktop capability proves a person and lifts the webhook block.
           personPresent: auth.kind === "session" || DESKTOP_MANAGED,
         }, guardedStart);
-        // Only an accepted message (started, steered or queued) answers the
-        // widget. A retry of the press that already did changes nothing. A
-        // queued one is remembered by its slot: cancelling it reopens the widget.
         press?.settle("queueId" in receipt ? receipt.queueId : undefined);
+        appContext?.deliver();
+        if (relayed && target && onBehalfOf) relayedReaction(threadId, target.id, onBehalfOf, relayed);
         return json(res, 202, receipt);
       } catch (error) {
+        slot?.release();
         if (error instanceof DirectSendRefused) return json(res, error.status, error.body);
         throw error;
       } finally {
@@ -299,34 +295,22 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       if (!cancelSteeredMessage(bot.id, queueId, bot.threadId)) {
         return json(res, 404, { error: "no such queued message" });
       }
-      // The words never reached the bot. If they were the answer to a
-      // widget, it takes an answer again.
       reopenCancelledPress(store, bot.threadId, queueId);
       return json(res, 200, { ok: true });
     }
 
-    // Steer a queued message into the RUNNING turn (no interrupt). Engines
-    // without a live steer keep the queue; this never ends the current turn.
+    // Steers a queued message into the running turn without interrupting it; engines without live steer keep the queue.
     m = path.match(/^\/api\/bots\/([\w-]+)\/queue\/([\w-]+)\/steer$/);
     if (m && method === "POST") {
       const body = await readBody(req);
       requirePinnedClientThread(m[1], body?.threadId);
       const bot = requestedTaskBot(m[1], body?.threadId);
-      // Pressing Steer folds the queued words into the running turn. It does
-      // not re-book that turn to whoever pressed it, and the words keep the
-      // sender they were queued with.
-      // Lift the whole queue atomically: a settle racing this request can
-      // drain it as a follow-up, or this request can steer it into the live
-      // turn — never both for the same words.
+      // Hold the whole queue atomically: a racing settle drains it or this request steers it, never both.
       const held = holdSteeredQueue(bot.id, bot.threadId, m[2]);
       if (!held) return json(res, 404, { error: "no such queued message" });
       const currentAtStart = store.projectBotForTask(bot.id, bot.threadId);
       const instance = currentAtStart?.busy ? runningTurnInstance(currentAtStart, bot.threadId) : undefined;
       const engineCanSteer = Boolean(currentAtStart?.busy && instance?.adapter.capabilities.queueing && instance.adapter.steer);
-      // Attachments steer only into an engine that takes images mid-turn
-      // (steerImages), resolved from each prompt exactly as the drained
-      // follow-up would. Elsewhere attachment words wait for a real turn
-      // where central admission can hand the images to the engine.
       const steerInput = extractSteerImages(held.items.map((item) => item.prompt));
       const steerAdmission = admit("direct-busy", {
         carriesImages: !steerInput || steerInput.images.length > 0,
@@ -347,13 +331,9 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
           : instance.adapter.steer(bot.threadId, prompt))
           .catch((): SteerOutcome => "indeterminate");
       }
-      // The steer was awaited adapter work: re-read every ownership
-      // invariant before writing anything, exactly like the live-send path.
+      // The steer awaited adapter work: re-read every ownership invariant before writing anything.
       const current = store.projectBotForTask(bot.id, bot.threadId);
-      // "indeterminate" never restores: the words may already be folded into
-      // the turn that was live when they were sent, and replaying them into
-      // a fresh follow-up turn would run them twice. Record them whenever
-      // the destination still exists, busy or not.
+      // "indeterminate" never restores: the words may already be in the live turn, and a replay would run them twice.
       if (
         (steered === "steered" && current?.busy ||
           steered === "indeterminate" && current) &&
@@ -372,20 +352,17 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
           steered: true,
           sender: item.sender,
           ...spokenLineFields(item.via, item.callId),
+          ...(item.fromApp ? { fromApp: item.fromApp } : {}),
         }));
-        // Words a person queued are written here once steered in, as once a
-        // drained turn starts with them (startTurn); a bot's own never are.
         const asked = messages.filter((_, index) => !held.items[index]?.unattended && !held.items[index]?.peerAsk).at(-1);
         if (asked) store.setTaskAskedAt(bot.id, bot.threadId, asked.at);
-        // Offered to the next turn again unless the person stops this one.
         for (const message of messages) handoffs.steered(bot.threadId, steerTarget, instance?.instanceId, message.id);
         const queueIds = held.items.map((item) => item.messageId);
         settleHeldSteeredQueue(held);
         return json(res, 200, { ok: true, steered: true, threadId: bot.threadId, messages, queueIds });
       }
       if (steered === "indeterminate") {
-        // No destination is left: settle so a restart cannot replay words a
-        // dead turn may already have run.
+        // No destination left: settle, so a restart cannot replay words a dead turn may have run.
         settleHeldSteeredQueue(held);
         if (!store.taskByThread(bot.id, bot.threadId)) {
           throw Object.assign(new Error("the target task no longer exists"), { status: 409 });
@@ -393,14 +370,10 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
         throw Object.assign(new Error("no such bot"), { status: 404 });
       }
       restoreHeldSteeredQueue(held);
-      // The turn may have settled while the steer was refused; a queue that
-      // is now drainable must not strand behind a missed settle.
       if (current && !current.busy) drainQueuedSends();
       return json(res, 200, { ok: true, queued: true, threadId: bot.threadId });
     }
 
-    // Compaction shares normal turn admission and Stop, but never executes
-    // an agent turn or provisions a computer. It preserves the full history.
     m = path.match(/^\/api\/bots\/([\w-]+)\/compact$/);
     if (m && method === "POST") {
       const body = await readBody(req);
@@ -414,10 +387,6 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       return json(res, 202, { ok: true, threadId: bot.threadId });
     }
 
-    // edit a user message → fork the conversation there and rerun the turn.
-    // Rewinding a live thread is refused, exactly like switching versions
-    // below: interrupting mid-flight and branching under the dying turn is
-    // how a conversation ends up with two tails. Stop, then edit.
     m = path.match(/^\/api\/bots\/([\w-]+)\/messages\/([\w-]+)\/edit$/);
     if (m && method === "POST") {
       const messageId = m[2];
@@ -433,9 +402,7 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       if (!source || source.role !== "user" || source.kind !== "text") {
         return json(res, 404, { error: "only user messages can be edited" });
       }
-      // The client's id for this edit. A retry of an edit the server already
-      // forked answers with that fork instead of forking (and rerunning) again.
-      // Checked before the busy guard: that fork's own turn is what is busy.
+      // Before the busy guard: a retried edit's own fork is what is busy.
       const sendId = parseSendId(body.sendId);
       if (sendId) {
         const accepted = acceptedSendMatch(threadMessages, sendId, text, source.replyToId);
@@ -444,15 +411,11 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
         }
         if (accepted.kind === "match") return json(res, 202, { ok: true, message: accepted.message });
       }
-      // everything from here down is synchronous, so two racing edits can
-      // never both get past this check: startTurn flips busy before the
-      // next request is handled
+      // Synchronous from here: startTurn flips busy before the next request, so two racing edits cannot both pass.
       if (threadBusy(bot.id, bot.threadId)) return json(res, 409, { error: "the thread is working — stop it before editing" });
       if (phoneSecretSubmissions.hasThread(bot.threadId)) {
         return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
       }
-      // A thread's own model that can't run gives way to the bot's when the
-      // rerun starts (healThreadModel), so check the model it will run on.
       const rerunSelection = turnSelection(bot.id, bot.threadId) ?? bot.modelSelection;
       if (!registry.get(rerunSelection.instanceId)) {
         return json(res, 409, {
@@ -462,21 +425,14 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       const rerunInstance = registry.get(rerunSelection.instanceId)!;
       const rerunRefusal = policyModelRefusal(rerunInstance);
       if (rerunRefusal) return json(res, 409, { error: rerunRefusal });
-      // startTurn admits the rerun before branching. A shared-resource or
-      // concurrency-limit refusal must leave the original transcript intact.
-      const replyTo = source.replyToId ? resolveReplyTarget(bot.threadId, source.replyToId) : undefined;
-      // Regenerate resends the same words: the rerun gets the Data context
-      // the message was sent with, so the model sees what it saw. Changed
-      // words take the context the client sends now, if any.
+      const quoted = source.replyToId ? resolveReplyTarget(bot.threadId, source.replyToId) : undefined;
+      const replyTo: ReplyTarget | undefined = quoted && source.reaction && text === source.text ? { ...quoted, reactedWith: source.reaction } : quoted;
       const dataContext = parseDataContext(body.dataContext) ?? (text === source.text ? source.dataContext : undefined);
-      // On a Cloud home an edit is its author's line, so the owner's own edit
-      // keeps their conversation theirs for lending (server/cloud-lending.ts).
       const message = await startTurn(bot.id, text, { threadId: bot.threadId, editedMessageId: messageId, replyTo, sendId, trigger: usageTriggerFor(auth), dataContext,
         ...(CLOUD_HOME ? { sender: messageSender(auth) } : {}) });
       return json(res, 202, { ok: true, message });
     }
 
-    // switch which fork of the conversation is visible (no new turn)
     m = path.match(/^\/api\/bots\/([\w-]+)\/active-branch$/);
     if (m && method === "POST") {
       const body = await readBody(req);
@@ -490,7 +446,6 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       }
       const leaf = store.setActiveLeaf(bot.threadId, String(body.messageId ?? ""));
       if (!leaf) return json(res, 404, { error: "no such message" });
-      // provider sessions still hold the other branch — next turn replays
       store.patchTask(bot.id, bot.threadId, { rewound: true });
       return json(res, 200, { activeLeafId: leaf });
     }
@@ -498,11 +453,12 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
     if (m && method === "POST") {
       const body = await readBody(req);
       const selected = requestedTaskBot(m[1], body.threadId);
-      const bot = botForThread(selected.id, selected.threadId)!;
+      const bot = botForThread(selected.id, answeredIn(selected.threadId, String(body.requestId)))!;
       const behavior = requestBehavior(body.behavior);
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
-      const refusal = cardAnswerRefusal(auth, bot.threadId, String(body.requestId), behavior);
+      const refusal = cardAnswerRefusal(auth, selected.threadId, String(body.requestId), behavior) ??
+        (selected.threadId === bot.threadId ? null : cardAnswerRefusal(auth, bot.threadId, String(body.requestId), behavior));
       if (refusal) return json(res, 403, { error: refusal });
       if (body.rememberCommand === true) {
         const refusal = commandRememberRefusal(auth, bot.threadId, String(body.requestId), behavior);
@@ -519,7 +475,7 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
           threadId: bot.threadId,
           requestId: String(body.requestId),
           behavior,
-        }, auth.kind === "session" && cloudOwnerSession(auth))) return;
+        })) return;
         if (resolveAndSendProfile(res, {
           botId: bot.id,
           botName: bot.name,
@@ -542,23 +498,12 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
           behavior,
           reviewedSha256,
         }))) return;
-        // peer-approval intercept: harness-native cards carry a requestId
-        // that lives in peer-approval's pending map. Resolve them here so
-        // the provider adapter never sees a request it didn't raise.
-        if (store.messagesFor(bot.threadId).some((message) => message.card?.requestId === String(body.requestId)) &&
-          resolvePeerComms(approvalBus, String(body.requestId), behavior)) {
-          return json(res, 200, { ok: true, outcome: behavior === "allow" ? "allowed-once" : "rejected" });
-        }
         const requestId = String(body.requestId);
+        const own = await harnessCardOutcome(bot.threadId, requestId, behavior, body.message);
+        if (own) return json(res, 200, { ok: true, outcome: own });
         const pending = store.messagesFor(bot.threadId).find((message) => message.card?.requestId === requestId);
-        if (isPersistentQuestionCard(pending?.card) && (body.dismiss === true || body.message === QUESTION_DISMISS_MESSAGE)) {
-          if (!pending?.card) return json(res, 404, { error: "this question is no longer available" });
-          if (pending.card.answered !== "answer" || pending.card.dismissed) {
-            return json(res, 409, { error: "answer this question before dismissing it" });
-          }
-          store.patchMessage(bot.threadId, pending.id, { card: { ...pending.card, dismissed: true } });
-          return json(res, 200, { ok: true, dismissed: true });
-        }
+        const dismissed = dismissQuestionCard(store, bot.threadId, pending, body);
+        if (dismissed) return json(res, dismissed.status, dismissed.body);
         const outcome = await answerRequest(bot.threadId, bot.modelSelection.instanceId, requestId, behavior, body.message, { id: bot.id, name: bot.name }, body.always === true, body.rememberCommand === true);
         if (outcome === "unavailable" && isPersistentQuestionCard(pending?.card) && behavior === "answer") {
           if (!pending) return json(res, 404, { error: "this question is no longer available" });
@@ -574,18 +519,15 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
         return json(res, 200, { ok: true, outcome });
       });
     }
-    // Answer by THREAD, so a request raised inside a room can be answered
-    // too: a member's turn runs on the room's thread, and the bot that
-    // owns the pending request is the one currently speaking there.
     m = path.match(/^\/api\/threads\/([\w-]+)\/respond$/);
     if (m && method === "POST") {
-      const threadId = m[1];
       const body = await readBody(req);
       const behavior = requestBehavior(body.behavior);
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
       const requestId = String(body.requestId);
-      const refusal = cardAnswerRefusal(auth, threadId, requestId, behavior);
+      const threadId = answeredIn(m[1], requestId);
+      const refusal = cardAnswerRefusal(auth, m[1], requestId, behavior) ?? (threadId === m[1] ? null : cardAnswerRefusal(auth, threadId, requestId, behavior));
       if (refusal) return json(res, 403, { error: refusal });
       if (body.rememberCommand === true) {
         const refusal = commandRememberRefusal(auth, threadId, requestId, behavior);
@@ -613,9 +555,7 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
           (message) => message.card?.requestId === requestId && message.card.routineRequest,
         );
         if (routineCard?.card?.routineRequest) {
-          // Derive the owner from the conversation, not from the executable
-          // payload being authorized. Room cards carry their trusted sender;
-          // one-to-one tasks resolve through the store's thread ownership.
+          // Derive the owner from the conversation, never from the payload being authorized.
           const routineBotId = routineCard.from?.botId ?? store.botByThread(threadId)?.id;
           if (!routineBotId) return json(res, 400, { error: "this routine request has no valid owner" });
           const routineOwner = store.bot(routineBotId);
@@ -625,7 +565,7 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
             threadId,
             requestId,
             behavior,
-          }, auth.kind === "session" && cloudOwnerSession(auth))) return;
+          })) return;
         }
         const setupCard = store.messagesFor(threadId).find((message) => message.card?.requestId === requestId && message.card.teamSetupRequest);
         if (setupCard) {
@@ -664,34 +604,16 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
             behavior,
           })) return;
         }
-        // peer-approval intercept (see /api/bots/:id/respond above). A peer card
-        // belongs to the bus rather than to a speaker, so resolve it before we go
-        // looking for one — a room between turns has no speaker to find.
-        if (store.messagesFor(threadId).some((message) => message.card?.requestId === requestId) &&
-          resolvePeerComms(approvalBus, requestId, behavior)) {
-          return json(res, 200, { ok: true, outcome: behavior === "allow" ? "allowed-once" : "rejected" });
-        }
+        const own = await harnessCardOutcome(threadId, requestId, behavior, body.message);
+        if (own) return json(res, 200, { ok: true, outcome: own });
         const group = store.groupByThread(threadId);
-        // busyBotId is in-memory only, so an approval that outlives its turn — or
-        // the process — leaves a durable card with no speaker behind it. Fall back
-        // to the member that raised it, and answer even when that member is gone:
-        // answerRequest closes an unreachable card, and a pending approval owns
-        // the composer, so a dead end here locks the room for good.
         const pending = store.messagesFor(threadId).find((message) => message.card?.requestId === requestId);
-        if (isPersistentQuestionCard(pending?.card) && (body.dismiss === true || body.message === QUESTION_DISMISS_MESSAGE)) {
-          if (!pending?.card) return json(res, 404, { error: "this question is no longer available" });
-          if (pending.card.answered !== "answer" || pending.card.dismissed) {
-            return json(res, 409, { error: "answer this question before dismissing it" });
-          }
-          store.patchMessage(threadId, pending.id, { card: { ...pending.card, dismissed: true } });
-          return json(res, 200, { ok: true, dismissed: true });
-        }
+        const dismissed = dismissQuestionCard(store, threadId, pending, body);
+        if (dismissed) return json(res, dismissed.status, dismissed.body);
         const persistentQuestion = isPersistentQuestionCard(pending?.card);
         const owner = group
           ? persistentQuestion
             ? (pending?.from ? store.bot(pending.from.botId) : undefined)
-            // This thread's speaker: another thread's member may be the
-            // room's newest speaker while this card waits.
             : (groupSpeakers.get(threadId) ? store.bot(groupSpeakers.get(threadId)!.botId) : undefined) ??
               (pending?.from ? store.bot(pending.from.botId) : undefined)
           : store.botByThread(threadId);
@@ -731,8 +653,6 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
       if (expectedThreadId !== undefined && (typeof expectedThreadId !== "string" || !/^[\w-]+$/.test(expectedThreadId))) {
         return json(res, 400, { error: "threadId must be a task id" });
       }
-      // Explicit thread targets never fall through to another routine or
-      // channel just because it belongs to the same bot.
       if (typeof expectedThreadId === "string" && store.taskByThread(bot.id, expectedThreadId)) {
         const routine = routines!.activeBotRunForBot(bot.id);
         if (routine?.threadId === expectedThreadId) await routines!.cancelRun(routine.id);
@@ -756,8 +676,6 @@ export function createBotMessageRoutes(deps: BotMessageRouteDeps): RouteHandler 
         return json(res, 200, { ok: true });
       }
       const instance = registry.get((botForThread(bot.id, expectedThreadId ?? bot.threadId) ?? bot).modelSelection.instanceId);
-      // a bot busy in a ROOM is running on the room's thread — stopping it
-      // from its own chat must reach that turn, not just the 1:1 thread
       const busyGroup = activeGroupTurnForBot(bot.id);
       if (busyGroup) {
         if (expectedThreadId !== undefined && busyGroup.threadId !== expectedThreadId) {

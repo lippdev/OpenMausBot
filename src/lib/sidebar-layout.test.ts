@@ -5,6 +5,7 @@ import {
   BOTS_SECTION_ID,
   CHANNELS_SECTION_ID,
   PINNED_SECTION_ID,
+  keepFixedSectionSlots,
   mergeSectionOrder,
   moveSection,
   orderedSidebarSections,
@@ -17,6 +18,7 @@ import {
   sidebarGoalRunPreview,
   sidebarSectionCollapsed,
   sidebarSectionLabel,
+  simpleSidebarSections,
   userSectionId,
   userSectionName,
 } from "./sidebar-layout";
@@ -58,6 +60,21 @@ describe("sidebar virtual sections", () => {
     expect(parts.sectionedBots).toEqual([]);
     expect(parts.unsectionedBots.map((candidate) => candidate.id)).toEqual(["plain"]);
     expect(bot.section).toBe("Work");
+  });
+
+  it("lists every bucket in the order the bots arrive, never by name", () => {
+    // The server owns this order (PUT /api/bots/order); a reorder made on a phone must show up here unchanged.
+    const parts = partitionSidebarBots([
+      { id: "zed", name: "Zed", pinned: true },
+      { id: "yak", name: "Yak", section: "Work" },
+      { id: "xon", name: "Xon" },
+      { id: "amy", name: "Amy", pinned: true },
+      { id: "bob", name: "Bob", section: "Work" },
+      { id: "cat", name: "Cat" },
+    ]);
+    expect(parts.pinnedBots.map((bot) => bot.id)).toEqual(["zed", "amy"]);
+    expect(parts.sectionedBots.map((bot) => bot.id)).toEqual(["yak", "bob"]);
+    expect(parts.unsectionedBots.map((bot) => bot.id)).toEqual(["xon", "cat"]);
   });
 
   it("shows DMs in Bot Chats without rewriting their comms context", () => {
@@ -214,5 +231,32 @@ describe("sidebar section ordering", () => {
       work,
       PINNED_SECTION_ID,
     ]);
+  });
+});
+
+describe("Simple-mode section order", () => {
+  const work = userSectionId("Work");
+  const home = userSectionId("Home");
+
+  it("puts Pinned and the heading-less Bots list first by default and keeps a saved order for the rest", () => {
+    const natural = [PINNED_SECTION_ID, CHANNELS_SECTION_ID, BOT_CHATS_SECTION_ID, BOTS_SECTION_ID, work];
+    expect(simpleSidebarSections(natural)).toEqual([PINNED_SECTION_ID, BOTS_SECTION_ID, CHANNELS_SECTION_ID, BOT_CHATS_SECTION_ID, work]);
+    expect(simpleSidebarSections([CHANNELS_SECTION_ID, BOTS_SECTION_ID, work])).toEqual([BOTS_SECTION_ID, CHANNELS_SECTION_ID, work]);
+    const saved = orderedSidebarSections([CHANNELS_SECTION_ID, BOTS_SECTION_ID, work, home], [home, CHANNELS_SECTION_ID, BOTS_SECTION_ID, work]);
+    expect(simpleSidebarSections(saved)).toEqual([BOTS_SECTION_ID, home, CHANNELS_SECTION_ID, work]);
+  });
+
+  it("writes a Simple reorder back without moving Pinned or Bots in the saved order", () => {
+    const full = [PINNED_SECTION_ID, CHANNELS_SECTION_ID, BOTS_SECTION_ID, work, home];
+    const shown = simpleSidebarSections(full);
+    const moved = simpleSidebarSections(placeSection(shown, home, CHANNELS_SECTION_ID, "before"));
+    expect(moved).toEqual([PINNED_SECTION_ID, BOTS_SECTION_ID, home, CHANNELS_SECTION_ID, work]);
+    expect(keepFixedSectionSlots(full, moved)).toEqual([PINNED_SECTION_ID, home, BOTS_SECTION_ID, CHANNELS_SECTION_ID, work]);
+    expect(keepFixedSectionSlots(full, shown)).toEqual(full);
+  });
+
+  it("cannot move a section above the heading-less Bots list", () => {
+    const shown = [BOTS_SECTION_ID, CHANNELS_SECTION_ID, work];
+    expect(simpleSidebarSections(moveSection(shown, CHANNELS_SECTION_ID, -1))).toEqual(shown);
   });
 });

@@ -1,29 +1,11 @@
-// How full each bot's context is in a room, and when its next room turn
-// should start from a fresh provider session instead.
-//
-// A room turn never resumes a stored session: every turn re-sends the room's
-// bounded recent transcript (serializeRoomContext). What grows is a warm
-// provider process the driver keeps between one bot's consecutive turns in
-// the same room (Claude's idle session reuse), which re-reads that transcript
-// on top of everything it already holds. Starting the turn with the existing
-// `sessionReset` flag drops exactly that native backlog and nothing the room
-// relies on, so it is a room's compaction: the transcript stays whole, and
-// the fresh session gets the same bounded context every turn gets.
-//
-// Measurements live in memory on purpose. They describe a warm process, and
-// warm processes do not outlive this server either.
-
 import type { ModelCatalog } from "./contracts.ts";
 import { contextWindowFor } from "./context-budget.ts";
+import { sessionIdlePolicy } from "./drivers/session-idle.ts";
 
-/** Before a room turn, at or above this share of the window, start fresh. */
 export const DEFAULT_ROOM_COMPACT_AT = 0.9;
 
 export type RoomMemberContext = { tokens: number; window: number; compactRequested?: true };
 
-/** The configured threshold as a token count for this window, or null when
- * automatic compaction is off. `roomCompactAt` reads like `compactAt`: a
- * fraction below 1, or a token count. */
 export function roomCompactTokens(window: number, settings: { autoCompact?: boolean; roomCompactAt?: number } | undefined): number | null {
   if (settings?.autoCompact === false) return null;
   const at = settings?.roomCompactAt;
@@ -31,47 +13,95 @@ export function roomCompactTokens(window: number, settings: { autoCompact?: bool
   return value < 1 ? Math.floor(window * value) : Math.floor(value);
 }
 
-export class RoomContextTracker {
-  private threads = new Map<string, Map<string, RoomMemberContext>>();
+type Measured = RoomMemberContext & { instanceId?: string; at: number };
 
-  /** A settled room turn's last model call, as the driver reported it. */
+export type RoomContextClock = {
+  idleMs?: number;
+  heldUntil?: (threadId: string) => number | undefined;
+  now?: () => number;
+  expired?: (threadId: string) => void;
+};
+
+type RoomReset = { reason: "requested" | "threshold"; percent: number };
+
+export function roomResetNote(name: string, reset: RoomReset): string {
+  return reset.reason === "requested"
+    ? `compacted ${name}'s context (${reset.percent}% full): fresh session with the room's recent messages`
+    : `${name}'s context was ${reset.percent}% full: compacted to a fresh session with the room's recent messages`;
+}
+
+export class RoomContextTracker {
+  private threads = new Map<string, Map<string, Measured>>();
+  private dispatchedOn = new Map<string, Map<string, string>>();
+  private readonly clock: RoomContextClock;
+  private readonly idleMs: number;
+
+  constructor(clock: RoomContextClock = {}) {
+    this.clock = clock;
+    this.idleMs = clock.idleMs ?? Math.max(sessionIdlePolicy("CLAUDE").idleMs, sessionIdlePolicy("ACP").idleMs);
+  }
+
   record(threadId: string, botId: string, reading: { tokens?: number; window?: number } | undefined, model: string | undefined, catalog?: ModelCatalog): void {
     const tokens = reading?.tokens;
     if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return;
-    const members = this.threads.get(threadId) ?? new Map<string, RoomMemberContext>();
-    const previous = members.get(botId);
-    members.set(botId, {
+    const members = this.threads.get(threadId) ?? new Map<string, Measured>();
+    const previous = this.live(threadId, botId);
+    const instanceId = this.dispatchedOn.get(threadId)?.get(botId);
+    const measured: Measured = {
       tokens: Math.trunc(tokens),
       window: contextWindowFor(model, catalog, reading?.window),
-      // A request made while the turn ran still applies to the next one.
       ...(previous?.compactRequested ? { compactRequested: true as const } : {}),
-    });
+      ...(instanceId ? { instanceId } : {}),
+      at: this.now(),
+    };
+    members.set(botId, measured);
     this.threads.set(threadId, members);
+    this.watch(threadId, botId, measured);
   }
 
-  /** "Compact now": the bot's next turn in this room starts fresh. Returns
-   * false when there is nothing measured to compact. */
   request(threadId: string, botId: string): boolean {
-    const current = this.threads.get(threadId)?.get(botId);
+    const current = this.live(threadId, botId);
     if (!current) return false;
     current.compactRequested = true;
     return true;
   }
 
-  /** Every measured member of one room thread, for the wire. */
   forThread(threadId: string): Record<string, RoomMemberContext> | undefined {
     const members = this.threads.get(threadId);
-    if (!members?.size) return undefined;
-    return Object.fromEntries([...members].map(([botId, value]) => [botId, { ...value }]));
+    if (!members) return undefined;
+    for (const botId of members.keys()) this.live(threadId, botId);
+    if (!members.size) return undefined;
+    return Object.fromEntries([...members].map(([botId, { tokens, window, compactRequested }]) =>
+      [botId, { tokens, window, ...(compactRequested ? { compactRequested } : {}) }]));
   }
 
-  /** At dispatch: whether this turn starts a fresh session, and why. The
-   * reading is consumed either way it fires, so one reset follows one
-   * measurement; the turn records a new one when it settles. */
-  takeReset(threadId: string, botId: string, settings: { autoCompact?: boolean; roomCompactAt?: number } | undefined):
-    { reason: "requested" | "threshold"; percent: number } | null {
+  dispatch(threadId: string, botId: string, instanceId: string, settings: { autoCompact?: boolean; roomCompactAt?: number } | undefined):
+    { reset: RoomReset | null; displaced: boolean } {
+    const reset = this.takeReset(threadId, botId, settings);
+    return { reset, displaced: this.dispatched(threadId, botId, instanceId) };
+  }
+
+  /** Each engine keeps one warm process per thread, so this turn closes the other members' processes on its engine. */
+  dispatched(threadId: string, botId: string, instanceId: string): boolean {
+    const engines = this.dispatchedOn.get(threadId) ?? new Map<string, string>();
+    engines.set(botId, instanceId);
+    this.dispatchedOn.set(threadId, engines);
     const members = this.threads.get(threadId);
-    const current = members?.get(botId);
+    if (!members) return false;
+    let dropped = false;
+    for (const [other, reading] of members) {
+      // A reading from before its engine was known is assumed to share it.
+      if (other === botId || (reading.instanceId && reading.instanceId !== instanceId)) continue;
+      members.delete(other);
+      dropped = true;
+    }
+    if (!members.size) this.threads.delete(threadId);
+    return dropped;
+  }
+
+  takeReset(threadId: string, botId: string, settings: { autoCompact?: boolean; roomCompactAt?: number } | undefined): RoomReset | null {
+    const current = this.live(threadId, botId);
+    const members = this.threads.get(threadId);
     if (!members || !current) return null;
     const percent = Math.round((current.tokens / current.window) * 100);
     const limit = roomCompactTokens(current.window, settings);
@@ -84,5 +114,39 @@ export class RoomContextTracker {
 
   forget(threadId: string): void {
     this.threads.delete(threadId);
+    this.dispatchedOn.delete(threadId);
+  }
+
+  private now(): number {
+    return this.clock.now?.() ?? Date.now();
+  }
+
+  private warmUntil(threadId: string, reading: Measured): number {
+    return Math.max(reading.at + this.idleMs, this.clock.heldUntil?.(threadId) ?? 0);
+  }
+
+  private watch(threadId: string, botId: string, reading: Measured): void {
+    const expired = this.clock.expired;
+    if (!expired) return;
+    const check = () => {
+      if (this.threads.get(threadId)?.get(botId) !== reading) return;
+      if (this.live(threadId, botId)) return arm(this.warmUntil(threadId, reading) - this.now());
+      expired(threadId);
+    };
+    const arm = (ms: number) => {
+      const timer = setTimeout(check, Math.min(2_147_483_647, Math.max(0, ms)));
+      timer.unref?.();
+    };
+    arm(this.warmUntil(threadId, reading) - this.now());
+  }
+
+  private live(threadId: string, botId: string): Measured | undefined {
+    const members = this.threads.get(threadId);
+    const current = members?.get(botId);
+    if (!members || !current) return undefined;
+    if (this.now() < this.warmUntil(threadId, current)) return current;
+    members.delete(botId);
+    if (!members.size) this.threads.delete(threadId);
+    return undefined;
   }
 }

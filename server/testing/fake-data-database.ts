@@ -1,6 +1,4 @@
-// A BotDatabase for tests: answers the SQL the Data tools build without
-// DuckDB, records every call, and lets a test script the next answer or
-// failure. Test-only; never imported by the server.
+// A BotDatabase for tests: answers the Data tools' SQL without DuckDB, records every call, and scripts the next answer.
 import { writeFileSync } from "node:fs";
 
 import type { DataColumn, DataColumnStats, DataHistogram, DataPage } from "../../shared/data-surface.ts";

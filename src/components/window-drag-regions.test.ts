@@ -1,9 +1,3 @@
-// The top bar of every view is the window's drag handle wherever the app
-// draws its own title bar: macOS (hiddenInset traffic lights) and frameless
-// Windows. Linux keeps its native title bar, so nothing there drags. The
-// rendered headers are parsed into a DOM and checked region by region:
-// the header drags, and every control inside it is cut back out, either by
-// an inline no-drag or by the styles.css rule for drag regions.
 import { readFileSync } from "node:fs";
 import { createElement, type CSSProperties, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -13,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StoreProvider, type Bot, type Group } from "@/state/store";
 
 type Chrome = "mac-inset" | "win-caption" | "native";
-// The real provider picks the chrome from the preload's platform on render.
 const PLATFORM: Record<Chrome, string> = { "mac-inset": "darwin", "win-caption": "win32", native: "linux" };
 const fixture = { chrome: "native" as Chrome };
 
@@ -23,8 +16,6 @@ const { ChatView } = await import("./ChatView");
 const { GroupView } = await import("./GroupView");
 const { DesktopCapabilitiesProvider, WindowDragStrip, captionChrome } = await import("./DesktopCapabilities");
 
-// The selector of the styles.css rule that opts controls inside a drag
-// region (and portalled menus) back out.
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 const noDragRule = /\/\* Window drag regions\.[\s\S]*?\*\/\s*([^{]+)\{\s*-webkit-app-region: no-drag;/.exec(css);
 const noDragSelector = noDragRule![1].trim();
@@ -49,15 +40,11 @@ const dom = (element: ReactElement) => {
   window.document.body.innerHTML = markup;
   return window.document;
 };
-// The few element methods these checks use, met by happy-dom's elements.
 type DomNode = { getAttribute(name: string): string | null; parentElement: DomNode | null; matches(selector: string): boolean };
-// Read off the style attribute: happy-dom's CSSStyleDeclaration drops the
-// Electron-only property.
+// Read off the style attribute: happy-dom's CSSStyleDeclaration drops the Electron-only property.
 const styleValue = (element: DomNode | null, property: string) =>
   new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`).exec(element?.getAttribute("style") ?? "")?.[1].trim() ?? "";
 const region = (element: DomNode | null) => styleValue(element, "-webkit-app-region");
-// A control is clickable inside a drag region when it, or an ancestor below
-// the region, says no-drag inline, or the stylesheet rule covers it.
 const cutOut = (control: DomNode, header: DomNode) => {
   for (let node: DomNode | null = control; node && node !== header; node = node.parentElement) {
     if (region(node) === "no-drag") return true;
@@ -95,9 +82,6 @@ describe("caption chrome", () => {
     const document = new Window().document;
     document.body.innerHTML = `<div data-window-drag><button></button><input><a href="#"></a><span role="button"></span><span></span><div class="field"><select></select><svg></svg></div></div><div role="menu"></div><div class="fixed backdrop"><div role="dialog"></div></div><div class="fixed overlay"><p></p></div>`;
     const matches = [...document.querySelectorAll("button, input, a, span, .field, [role], .backdrop, .overlay")].map((element) => element.matches(noDragSelector));
-    // button, input, link, role=button, plain text, the select's wrapper (so
-    // its chevron), menu, a modal's backdrop, its dialog, a fixed layer that
-    // holds no dialog
     expect(matches).toEqual([true, true, true, true, false, true, true, true, true, false]);
   });
 });
@@ -115,7 +99,6 @@ describe.each([
     const controls = [...header.querySelectorAll(CONTROLS)];
     expect(controls.length).toBeGreaterThan(1);
     for (const control of controls) expect(cutOut(control, header), control.outerHTML.slice(0, 120)).toBe(true);
-    // The identity (name pill, rename pencil) is cut out as a whole.
     expect(region(header.querySelector("[data-chathead-identity], [data-roomhead-identity]"))).toBe("no-drag");
   });
 

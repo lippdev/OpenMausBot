@@ -1,5 +1,3 @@
-// Keep-warm pings against the scripted fake CLI: the fork replays the live
-// process's launch contract, never its session, and runs no tool.
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,7 +37,6 @@ describe("keep-warm ping shape", () => {
       "--output-format", "json", "--append-system-prompt-file", "/k/prompt.txt", "--mcp-config", "/k/mcp.json", "--settings", "/k/settings.json",
       "--resume", "live-session", "--fork-session", "--no-session-persistence",
     ]);
-    // a launch that began a new session (--session-id) is resumed by its id too
     expect(keepWarmArgs(["-p", "--session-id", "new-one"], { sessionId: "new-one", mcpConfigPath: null, settingsPath: null, systemPromptPath: null }))
       .toEqual(["-p", "--output-format", "json", "--resume", "new-one", "--fork-session", "--no-session-persistence"]);
   });
@@ -114,7 +111,6 @@ describe("ClaudeDriver keep-warm (fake CLI)", () => {
 
     const result = await instance.adapter.cacheKeepWarm!.ping("t-warm");
     expect(result).toEqual({ ok: true, input: 4, cacheRead: 150_000, cacheWrite: 40, output: 3, costUsd: 0.05, model: "claude-sonnet-5" });
-    // the ping is not a turn: no event reaches the bus
     expect(recorder.events.length).toBe(before);
 
     const dump = JSON.parse(readFileSync(join(scratch, "ping.json"), "utf8"));
@@ -125,7 +121,6 @@ describe("ClaudeDriver keep-warm (fake CLI)", () => {
     expect(argv).not.toContain("stream-json");
     expect(argv[argv.indexOf("--model") + 1]).toBe("claude-sonnet-5");
     expect(dump.systemPrompt).toBe("You are Editor.");
-    // the permission proxy is mounted (same tools) but answers nobody
     expect(dump.mcpConfig.mcpServers.ogb.args.at(-1)).toMatch(/no-broker\.sock$/);
     expect(dump.settings.hooks).toEqual({ PreToolUse: [expect.objectContaining({ matcher: "*" })] });
     expect(Object.keys(dump.env).filter((key) => key.startsWith("OMB_HOOK_"))).toEqual([]);

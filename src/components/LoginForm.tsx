@@ -6,11 +6,8 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import type { LoginFieldsInput } from "@/lib/logins";
 
-// The masked form a website login is saved with: on the sign-in card and in
-// Settings → Logins. The password and 2FA key fields are password fields,
-// the browser is asked not to fill or remember them, and what was typed is
-// dropped once it is saved. Nothing here ever shows a saved password: there
-// is none to show.
+// Security: the browser is asked not to fill or remember these fields, what was typed is dropped once saved, and a
+// saved password is never shown.
 
 const FIELD = "w-full min-w-0 rounded-lg border border-hairline/60 bg-inset px-3 py-1.5 text-[13px] text-ink outline-none placeholder:text-ink-tertiary focus:border-accent disabled:opacity-60";
 const LABEL = "flex flex-col gap-1 text-[12px] font-medium text-ink-secondary";
@@ -25,16 +22,12 @@ export function LoginForm({
   children,
   autoFocus = false,
 }: {
-  /** The login page's address, asked for when the form adds a login. */
   site?: { value: string; onChange: (value: string) => void };
-  /** Ask for the username (adding), or not (replacing a password). */
   username?: boolean;
-  /** Changing a saved login: an empty password or key keeps the saved one. */
   replacing?: boolean;
   submitLabel: string;
   onSubmit: (fields: LoginFieldsInput) => Promise<void>;
   onCancel?: () => void;
-  /** More fields between the secrets and the buttons (who may use it). */
   children?: ReactNode;
   autoFocus?: boolean;
 }) {
@@ -109,7 +102,6 @@ export function LoginForm({
   );
 }
 
-/** Who may use a login: every bot, or the ones ticked. */
 export function LoginBotPicker({ value, onChange, bots, disabled = false }: {
   value: LoginBots;
   onChange: (value: LoginBots) => void;

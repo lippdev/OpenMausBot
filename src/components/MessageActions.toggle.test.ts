@@ -1,8 +1,4 @@
 // @vitest-environment happy-dom
-// Reply and copy show only while the pointer is over the message or keyboard
-// focus is inside it, and on touch after a tap or long press on the message.
-// The more button opens a menu of the moved actions that closes on Escape,
-// a press outside or a pick.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -111,7 +107,6 @@ describe("message actions row", () => {
     await act(async () => more().click());
     expect(more().getAttribute("aria-expanded")).toBe("true");
     expect(items().map((item) => item.textContent)).toEqual(["Pin message", "Show raw markdown"]);
-    // the row stays out while its menu is open, even with the pointer gone
     await pointer("pointerleave", row(), "mouse");
     expect(shown()).toBe(true);
     await act(async () => items()[0]!.click());

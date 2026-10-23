@@ -1,7 +1,3 @@
-// export against a stand-in server that answers the routes it reads: what
-// lands in the folder, what is skipped and why, the byte limit counted on
-// what is actually written (a proxy may send a body with no length), a
-// linked folder's files, and secrets removed from the transcripts.
 import "../testing/scrub-ambient-omb-env.ts";
 
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -125,18 +121,15 @@ describe("export", () => {
       { file: "files/priya-visit-priya-th/priya-1.png", link: "priya-1.png", entry: undefined, bytes: 3 },
     ]);
     expect(readFileSync(join(out, "files/conversation-lead-thr/report.md"), "utf8")).toBe("# Launch report");
-    // the body with no length header was counted as it streamed, and nothing of it is left behind
     expect(result.skipped).toEqual([
       { threadId: LEAD, messageId: "m1", link: "big.bin", reason: "more than --max-bytes 2000" },
       { threadId: LEAD, messageId: "m1", link: "../../etc/passwd", reason: "that bot message does not link to this file" },
     ]);
     expect(readdirSync(join(out, "files/conversation-lead-thr"))).toEqual(["report.md", "shots"]);
-    // one capture kept; the one whose pixels are gone is not a failure
     expect(result.screens).toEqual([{ threadId: LEAD, messageId: "s1", file: "screens/conversation-lead-thr/001-s1.png", bytes: 4 }]);
     expect(result.bytes).toBe(32);
     expect(result.transcripts.map((transcript: { file: string }) => transcript.file)).toEqual([
       "transcripts/conversation-lead-thr.json", "transcripts/priya-visit-priya-th.json"]);
-    // secrets are gone from everything written
     for (const file of ["transcripts/conversation-lead-thr.json", "transcripts/conversation-lead-thr.md", "job.json", "manifest.json"]) {
       const text = readFileSync(join(out, file), "utf8");
       expect(text, file).not.toContain(KEY);
@@ -151,7 +144,6 @@ describe("export", () => {
     expect(refused).toMatchObject({ code: 2, result: { ok: false, error: `${out} already has files in it` } });
     const forced = await run(["export", "--thread", LEAD, "--out", out, "--force", "--json"]);
     expect(forced.code).toBe(0);
-    // the same names, not "report (2).md" beside the old copy
     expect(readdirSync(join(out, "files/conversation-lead-thr")).sort()).toEqual(["big.bin", "report.md", "shots"]);
     expect(existsSync(join(out, "files/conversation-lead-thr/report (2).md"))).toBe(false);
   });
@@ -159,7 +151,6 @@ describe("export", () => {
   it("leaves nothing of an earlier job beside the new one under --force, and nothing it did not write is touched", async () => {
     const out = join(dir, "replaced");
     const lead = messages[LEAD]!;
-    // the earlier job linked one more file and kept one more screen
     messages[LEAD] = [...lead, { id: "m2", role: "bot", kind: "text", text: "Earlier: [old](old.md)" }, { id: "s3", role: "bot", kind: "screen" }];
     try {
       expect((await run(["export", "--thread", LEAD, "--out", out, "--json"])).code).toBe(0);
@@ -174,7 +165,6 @@ describe("export", () => {
     expect(existsSync(join(out, "files/conversation-lead-thr/old.md"))).toBe(false);
     expect(readdirSync(join(out, "screens/conversation-lead-thr"))).toEqual(["001-s1.png"]);
     expect(readFileSync(join(out, "notes.txt"), "utf8")).toBe("mine");
-    // what the folder holds is what its manifest says
     const manifest = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"));
     expect(manifest.files.map((file: { file: string }) => file.file)).not.toContain("files/conversation-lead-thr/old.md");
     // a manifest naming something outside the folder never removes it
@@ -187,7 +177,6 @@ describe("export", () => {
   it("writes each transcript's .md from the same messages as its .json: the latest 2,000, secrets removed", async () => {
     const out = join(dir, "long");
     const lead = messages[LEAD]!;
-    // a long conversation: its first messages fall out, and the job's end stays
     messages[LEAD] = [{ id: "first", role: "user", kind: "text", text: "The very first message" },
       ...Array.from({ length: 2_050 }, (_, i) => ({ id: `n${i}`, role: i % 2 ? "bot" : "user", kind: "text", text: `message ${i}`, ...(i % 2 ? { from: { name: "Room Lead" } } : {}) })),
       { id: "last", role: "bot", kind: "text", text: `Launch report, sent with ${KEY}` }];

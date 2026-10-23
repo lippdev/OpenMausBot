@@ -1,7 +1,3 @@
-// Waiting for a cloud computer to be ready ends inside its budget, even when
-// the relay accepts a request and then never answers it. Before each poll had
-// a deadline, one stalled read held the turn's start until the 20-minute
-// watchdog.
 import { createHash } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";

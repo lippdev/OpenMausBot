@@ -80,3 +80,59 @@ Not covered here: the real Electron preload bridge and a real Admin enrolment
 (see [organization connection](organization-settings.md), not rerun for this
 change), and a real hosted tenant's browser. The hosted beat set was rendered
 from a temporary preview entry, not reached through a hosted sign-in.
+
+## A new Cloud's welcome
+
+```sh
+node --experimental-strip-types scripts/verify-cloud-welcome.ts
+```
+
+It launches the isolated fake-engine fixture and mounts the whole app
+(`scripts/testing/cloud-welcome-preview.tsx`) in a Vite preview whose
+session and config answer as a Cloud home's owner, with Claude signed out and
+the trial's Claude credit in the engine list. Open the printed `previewUrl`:
+
+- `?desktop=1` adds the reduced bridge a Cloud's page gets in the desktop app;
+  `?move=copy` or `?move=done` shows the one-time move on its way or landed
+  (6 bots, 142 chats, 4 routines).
+- `?step=engine`, `?step=files` or `?step=done` opens the welcome on that step;
+  `?skin=daylight` (or any skin) picks the skin.
+- `POST /__fixture/engines?mode=signed-in` (or `signed-out`, `credit`) changes
+  the engine list for the next load.
+
+What was checked this way (Oct 16 2026): every step and the done state in
+Midnight and Daylight at 1280×860, 1024×760 and 390×844, the bring and engine
+steps in the other seven skins, and
+the setup card in short beside Routines. Steps finished there are written to
+the fixture's onboarding record; the record can be cleared with
+`PUT /api/config` (`{"onboarding":{"hintsSeen":[]}}`). The real move and the
+desktop's preload bridge are not exercised here; they are covered by
+`server/one-home.e2e.test.ts` and
+`src/components/cloud-welcome/CloudWelcome.test.ts`.
+
+## Bring what you already use (Oct 16 2026)
+
+The step after the engines beat: skills and MCP servers another AI tool keeps on
+this computer, brought in with one button. Desktop app only, and skipped when
+nothing new is found within two seconds.
+
+```sh
+pnpm exec vitest run server/setup-import.test.ts server/imported-skills.test.ts server/toml-lite.test.ts server/routes/setup-import.test.ts server/setup-import.e2e.test.ts src/components/onboarding/beats/ImportBeat.test.ts src/lib/setup-import.test.ts src/lib/onboarding.test.ts
+```
+
+Every test builds its own temporary home; none reads the real `~/.claude`,
+`~/.codex` or other dotfiles. The detector test plants credential, session,
+history and transcript files holding a sentinel, records every path the step
+touches, and checks that none of them was listed or opened and that the
+sentinel reaches no answer, saved server or copied skill. The route test
+refuses a paired device, a service loopback and a hosted or Cloud server; the
+end-to-end test runs the real server from `launchVerificationServer` against a
+planted home, as the desktop app runs it (`OMB_TEST_DESKTOP_OWNER_TOKEN`), checks
+that a headless server (`openmausbot serve`) refuses the step, and checks that the starter bot and a bot made afterwards both
+get the skills in their turn's index, task folder links and `/name`, that a
+Claude turn with "Also use my Claude Code skills" on sees a Claude Code skill
+once, and that a bot can switch one off for itself. Screenshots of the step in
+Midnight and Daylight, at a narrow width, working, failed and with its result
+came from `onboarding-preview.html` with a fixture detection (`?beat=import`,
+`?import=notes`, `?import=fail`, `?w=390&h=760`). Not covered here: the
+packaged Electron window itself.

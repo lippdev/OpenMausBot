@@ -1,17 +1,30 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { DurationSequencer } from "./scripts/testing/duration-sequencer.ts";
+import { hostE2eOnly, portableE2eFiles } from "./scripts/testing/host-e2e.ts";
 import { hostTimeout } from "./server/testing/host-timeout.ts";
 
-// The About dialog shows the shipped version; package.json is the one place
-// it is already maintained, so it is inlined at build time rather than
-// round-tripped through the preload bridge (which is absent in dev).
+// The About dialog's version, inlined at build time: the preload bridge is
+// absent in dev.
 const { version } = JSON.parse(
   readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf8"),
 ) as { version: string };
+
+const root = fileURLToPath(new URL(".", import.meta.url));
+const include = [
+  "evals/**/*.test.ts",
+  "server/**/*.test.ts",
+  "electron/**/*.test.mjs",
+  "src/**/*.test.ts",
+  "shared/**/*.test.ts",
+  "companion/**/*.test.ts",
+  "enterprise/**/*.test.ts",
+  "scripts/**/*.test.mjs",
+  "scripts/**/*.test.ts",
+];
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -20,28 +33,19 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: [
-      "evals/**/*.test.ts",
-      "server/**/*.test.ts",
-      "electron/**/*.test.mjs",
-      "src/**/*.test.ts",
-      "shared/**/*.test.ts",
-      "companion/**/*.test.ts",
-      "enterprise/**/*.test.ts",
-      "scripts/**/*.test.mjs",
-      "scripts/**/*.test.ts",
-    ],
+    include,
+    // OMB_VITEST_E2E=host (CI's Windows and macOS shards) leaves the e2e files that run on Linux only.
+    exclude: [...configDefaults.exclude, ...(hostE2eOnly() ? portableE2eFiles(root, include) : [])],
     setupFiles: ["server/testing/setup.ts"],
     // the suite spawns fake provider CLIs and a real harness server;
     // parallel files introduce load-sensitive flakes for no win
     fileParallelism: false,
-    // --shard splits the files by recorded CI seconds, not count (docs/ci.md)
+    // --shard splits the files by recorded CI seconds, not count
     sequence: { sequencer: DurationSequencer },
     // Known flakes in scripts/testing/ci-retry-list.json get two retries in
-    // CI only, and each retry is reported (docs/ci.md, "Flaky tests").
+    // CI only, each reported.
     runner: "./scripts/testing/ci-retry-runner.ts",
-    // Doubled on Windows, whose runners are about 1.45x slower
-    // (server/testing/host-timeout.ts).
+    // Doubled on Windows, whose runners are about 1.45x slower.
     testTimeout: hostTimeout(20_000),
     hookTimeout: hostTimeout(30_000),
   },

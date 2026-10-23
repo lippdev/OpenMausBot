@@ -319,6 +319,69 @@ describe("widget actions", () => {
   });
 });
 
+describe("the person's own answer to a choice", () => {
+  const confirm = { label: "Choose", action: { type: "choose" } };
+  const rows = (...names: string[]) => names.map((value) => ({ type: "ListViewItem", children: [{ type: "Text", value }] }));
+
+  it("offers it on every Select, RadioGroup and list with a name unless the bot says allowOther: false", () => {
+    const root = parsed({ type: "Card", confirm, children: [
+      { type: "Select", name: "length", options: ["15", "30"] },
+      { type: "RadioGroup", name: "size", options: ["S", "M"], allowOther: false },
+      { type: "Input", name: "who", allowOther: true },
+      { type: "Checkbox", name: "ok", label: "OK", allowOther: true },
+    ] });
+    expect(root.children!.map((node) => node.allowOther)).toEqual([true, false, undefined, undefined]);
+    expect(parsed({ type: "ListView", name: "pick", confirm, children: rows("A", "B") }).allowOther).toBe(true);
+    expect(parsed({ type: "ListView", name: "pick", allowOther: false, confirm, children: rows("A", "B") }).allowOther).toBe(false);
+    expect("allowOther" in parsed({ type: "ListView", allowOther: true, children: rows("A") })).toBe(false);
+    // a stored tree read again keeps what it was posted with
+    expect(parsed(root)).toEqual(root);
+  });
+
+  it("sends their own words as the choice's line, apart from the options", () => {
+    const dinner = payload("dinnerChoice");
+    expect(resolveWidgetAction(dinner, "confirm", { dish: "" }, { dish: "  sushi \n rolls " })).toMatchObject({
+      ok: true, ref: "confirm", label: "Pick this", tone: "confirm", values: { dish: "" }, other: { dish: "sushi rolls" }, text: "Pick this\nDinner tonight: sushi rolls",
+    });
+    const routine = payload("routineForm");
+    expect(resolveWidgetAction(routine, "confirm", { report: "" }, { report: "Slack #ops" })).toMatchObject({
+      ok: true, other: { report: "Slack #ops" },
+      text: "Create routine\nRuns on: Weekdays\nStarts: 2026-10-14\nAt: 09:00\nReport to: Slack #ops\nStop if any check is red: yes",
+    });
+    const sink = payload("kitchenSink");
+    const submit = widgetActions(sink.root).find((entry) => entry.tone === "submit")!;
+    expect(resolveWidgetAction(sink, submit.ref, {}, { rating: "Slow, but it worked" })).toMatchObject({ ok: true, text: "Send feedback\nHow did the run go?: Slow, but it worked" });
+  });
+
+  it("counts their own words as an answer to a required choice, and blank words as none", () => {
+    const dinner = payload("dinnerChoice");
+    expect(resolveWidgetAction(dinner, "confirm", {}, { dish: "Leftovers" })).toMatchObject({ ok: true, values: { dish: "" }, other: { dish: "Leftovers" } });
+    expect(resolveWidgetAction(dinner, "confirm", {}, { dish: "   " })).toEqual({ ok: false, status: 400, error: "Dinner tonight is required." });
+    expect(resolveWidgetAction(dinner, "cancel", {}, { dish: "Leftovers" })).toEqual(expect.not.objectContaining({ other: expect.anything() }));
+  });
+
+  it("still takes only an offered option as the choice itself, and refuses words where they cannot go", () => {
+    const dinner = payload("dinnerChoice");
+    expect(resolveWidgetAction(dinner, "confirm", { dish: "sushi" })).toEqual({ ok: false, status: 400, error: "Dinner tonight must be one of the offered options." });
+    expect(resolveWidgetAction(dinner, "confirm", { dish: "pizza" }, { dish: "sushi" })).toEqual({ ok: false, status: 400, error: "Dinner tonight is one of the options or their own answer, not both." });
+    expect(resolveWidgetAction(dinner, "confirm", {}, { dish: "x".repeat(WIDGET_LIMITS.fieldValue + 1) })).toEqual({ ok: false, status: 400, error: `Dinner tonight must be at most ${WIDGET_LIMITS.fieldValue} characters.` });
+    expect(resolveWidgetAction(dinner, "confirm", {}, { dish: 3 })).toEqual({ ok: false, status: 400, error: "Dinner tonight must be text." });
+    expect(resolveWidgetAction(dinner, "confirm", {}, "sushi")).toEqual({ ok: false, status: 400, error: "other must be an object of field names." });
+    expect(resolveWidgetAction(dinner, "confirm", {}, { nope: "x" })).toEqual({ ok: false, status: 400, error: 'There is no field named "nope" here.' });
+    const closed = parsed({ type: "Card", confirm, children: [
+      { type: "RadioGroup", name: "size", options: ["S", "M"], allowOther: false },
+      { type: "Input", name: "who" },
+      { type: "Select", name: "plan", options: ["Pro"], disabled: true },
+    ] });
+    for (const name of ["size", "who", "plan"]) {
+      expect(resolveWidgetAction({ v: 1, root: closed }, "confirm", {}, { [name]: "Mine" })).toEqual({ ok: false, status: 400, error: `${name} takes only the offered options.` });
+    }
+    // a tree stored before this was offered has no allowOther, so it takes only its options
+    const { allowOther: _offered, ...stored } = dinner.root;
+    expect(resolveWidgetAction({ v: 1, root: stored as WidgetRoot }, "confirm", {}, { dish: "sushi" })).toEqual({ ok: false, status: 400, error: "Dinner tonight takes only the offered options." });
+  });
+});
+
 describe("times, days, labels and progress", () => {
   it("reads a time of day and keeps it inside its range", () => {
     const card = parsed({ type: "Card", children: [
@@ -386,8 +449,34 @@ describe("times, days, labels and progress", () => {
       { type: "Input", name: "start", label: "Start date" },
       { type: "Input", name: "what", label: "Remind me to" },
     ] });
-    expect(widgetAdvice(form)).toBe('"Which days" asks the person to type what a DayPicker lets them pick. Call update_widget with a DayPicker in its place. "Time" asks the person to type what a TimePicker lets them pick. Call update_widget with a TimePicker in its place. "Start date" asks the person to type what a DatePicker lets them pick. Call update_widget with a DatePicker in its place.');
+    expect(widgetAdvice(form)).toBe('"Time" asks the person to type what a TimePicker lets them pick. Call update_widget with a TimePicker in its place. "Which days" asks the person to type what a DayPicker lets them pick. Call update_widget with a DayPicker in its place. "Start date" asks the person to type what a DatePicker lets them pick. Call update_widget with a DatePicker in its place.');
     expect(widgetAdvice(sample("bookCall"))).toBeUndefined();
     expect(widgetAdvice(sample("routineForm"))).toBeUndefined();
+  });
+
+  it("reads a time of day as a time, and a frequency or 'each time' as neither", () => {
+    const card = (label: string) => parsed({ type: "Card", confirm: { label: "Save", action: { type: "save" } }, children: [{ type: "Input", name: "f", label }] });
+    expect(widgetAdvice(card("Time of day"))).toContain("a TimePicker");
+    expect(widgetAdvice(card("Day of the week"))).toContain("a DayPicker");
+    expect(widgetAdvice(card("What should happen each time it runs?"))).toBeUndefined();
+    expect(widgetAdvice(card("How many times a week?"))).toBeUndefined();
+    expect(widgetAdvice(card("Today's mood"))).toBeUndefined();
+  });
+
+  it("tells the bot when a form has nothing the person can press to send it", () => {
+    const silent = parsed({ type: "Card", children: [{ type: "DayPicker", name: "days", label: "Days" }, { type: "TimePicker", name: "at", label: "Time" }] });
+    expect(widgetAdvice(silent)).toBe("Nothing in this widget sends what the person fills in. Call update_widget with confirm: {label, action} (and cancel if they may decline) so they can send it.");
+    const cancelOnly = parsed({ type: "Card", cancel: { label: "Close", action: { type: "close" } }, children: [{ type: "Input", name: "note", label: "Note" }] });
+    expect(widgetAdvice(cancelOnly)).toContain("Nothing in this widget sends");
+    const form = parsed({ type: "Card", children: [{ type: "Form", onSubmitAction: { type: "send" }, children: [{ type: "Input", name: "note", label: "Note" }, { type: "Button", label: "Send", submit: true }] }] });
+    expect(widgetAdvice(form)).toBeUndefined();
+    expect(widgetAdvice(sample("buildStatus"))).toBeUndefined();
+    const outside = parsed({ type: "Card", children: [{ type: "Input", name: "who", label: "Who" }, { type: "Form", onSubmitAction: { type: "send" }, children: [{ type: "Input", name: "note", label: "Note" }, { type: "Button", label: "Send", submit: true }] }] });
+    expect(widgetAdvice(outside)).toBe('"Who" sits outside the Form whose button is the only way to send, so it is never sent. Call update_widget with it inside that Form, or with confirm on the Card.');
+    const twoForms = parsed({ type: "Card", children: [
+      { type: "Form", onSubmitAction: { type: "a" }, children: [{ type: "Input", name: "one", label: "One" }, { type: "Button", label: "Send one", submit: true }] },
+      { type: "Form", onSubmitAction: { type: "b" }, children: [{ type: "Input", name: "two", label: "Two" }, { type: "Button", label: "Send two", submit: true }] },
+    ] });
+    expect(widgetAdvice(twoForms)).toBeUndefined();
   });
 });

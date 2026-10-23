@@ -73,27 +73,38 @@ UI and harness, then removes its temporary data; the server log remains.
    (or from a second window) hands the browser back and resumes Pepper with
    “the person finished signing in”; **Cancel** resumes it with “declined”.
 9. Saved logins: on the same card choose **Save a login** and save a test
-   account (fake values) for the test page's host. Pepper resumes and calls
-   `fill_login`; the page's username and password boxes fill, the tool result
-   names only what was filled, and **Settings → Logins** lists the login
-   without its password. Open the same page under another host (a subdomain,
-   or plain http on a non-local address) and call `fill_login` again: it
-   refuses and types nothing. Ask Pepper to take a snapshot and to `eval` the
-   password box's value: both answers show `••••••`.
+   account (fake values) for the test page's site. Pepper resumes and calls
+   `fill_login`; the page's username and password boxes fill, the form is
+   submitted, the tool result names only what was filled and where the page
+   went, and **Settings → Logins** lists the login by site without its
+   password. Open the same page under a subdomain: `fill_login` fills it
+   too. Under another site, or plain http on a non-local address, it refuses
+   and types nothing. Call `fill_login` with `submit: false`, then ask Pepper
+   to `eval` the password box's value: the browser refuses eval on that page
+   for a minute, and the password is cleared from the box after it. A
+   snapshot shows `••••••`.
 10. 1Password (only with a test account and a test vault, never a real one):
    connect a service account limited to one vault holding a test Login item
-   for the test page's host. Its row appears read-only, marked From 1Password;
-   `fill_login` fills it like a saved login. Unit tests use a fake SDK and
-   reach no network.
+   for the test page's site. Its row appears read-only, marked From
+   1Password; `fill_login` fills it like a saved login. Pick another bot for
+   the vault under 1Password in Settings → Logins: Pepper no longer lists or
+   fills it. Unit tests use a fake SDK and reach no network.
+
+11. Page dialogs: give the test page a button that calls `confirm()`, take control and press it. The question shows over
+   the page within a second, with Dismiss and Accept, only in the view that holds the browser. Answering lets the click
+   finish, and typing goes on. Answer after more than 30 seconds: the click still finishes, with no restart. A page
+   that hangs (`while (true) {}`) is restarted for you after about 35 seconds. The panel reconnects, and sign-ins
+   are kept.
 
 Focused automated coverage:
 
 ```sh
 pnpm exec vitest run server/browser-engine.test.ts server/browser-runtime.test.ts \
-  server/harness-mcp-proxy.test.ts server/browser-live.test.ts \
+  server/harness-mcp-proxy.test.ts server/browser-live.test.ts server/browser-dialogs.test.ts \
   server/browser-live-routes.test.ts server/browser-codex-path.integration.test.ts \
-  src/lib/browser-input-queue.test.ts src/lib/browser-control.test.ts src/lib/browser-profiles.test.ts \
-  src/components/BrowserProfilesManager.test.ts src/components/BrowserViewport.test.ts \
+  src/lib/browser-stream-v1.test.ts src/lib/browser-stream-client.test.ts src/lib/browser-control.test.ts \
+  src/lib/browser-profiles.test.ts src/components/BrowserProfilesManager.test.ts \
+  src/components/browser/StreamSurface.test.ts server/routes/browser-viewers.test.ts \
   src/components/BrowserPanel.test.ts src/components/SignInRequestCard.test.ts \
   server/sign-in-request.e2e.test.ts server/login-fill.test.ts server/login-store.test.ts \
   server/totp.test.ts server/routes/logins.test.ts src/components/LoginsSettings.test.ts \

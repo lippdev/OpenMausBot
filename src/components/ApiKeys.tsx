@@ -1,6 +1,4 @@
-// Paste-a-key rows. Packaged Electron saves secrets in the OS-backed store;
-// browser development falls back to PUT /api/config. Secrets are write-only
-// either way — GET /api/config returns configured flags, never values.
+// Security: secrets are write-only; GET /api/config returns configured flags, never values.
 import { useEffect, useId, useRef, useState } from "react";
 import { Check, CircleHelp, ExternalLink, Loader2, TriangleAlert } from "lucide-react";
 import { api, useStore, type ConfigStatus } from "@/state/store";
@@ -8,25 +6,25 @@ import { cn } from "@/lib/cn";
 import { useMenuMotion } from "./MenuMotion";
 import { t } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
+import { SECTION_PROVIDER, type KeyResult, type KeyVia } from "@/lib/analytics-allowlist";
+import { keyRemoved, keySaved, keySaveFailure, keyTestResult, savedKeyResult } from "@/lib/product-events";
 
-export type ConfigSection = "composio" | "box" | "opencodeGo" | "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta";
-/** Sections whose key can be tried against the provider from the server. */
-export type TestableProvider = "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta";
+export type ConfigSection = "composio" | "box" | "opencodeGo" | "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta" | "treg" | "deepseek";
+export type TestableProvider = "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta" | "treg";
 
 const SECTIONS: Record<
   ConfigSection,
   {
-    /** `firstKey`: nothing was saved before this value. */
     body: (value: string, firstKey: boolean) => unknown;
-    /** A key is saved. */
     flag: (config: ConfigStatus) => boolean;
-    /** Works with no saved key: Cloud Pro includes it. */
     included?: (config: ConfigStatus) => boolean;
+    ownKey?: (config: ConfigStatus) => boolean;
   }
 > = {
   composio: {
     body: (v) => ({ composio: { apiKey: v } }),
     flag: (c) => c.composio.configured,
+    ownKey: (c) => c.composio.mode === "self-hosted",
   },
   box: {
     body: (v) => ({ box: { token: v } }),
@@ -34,8 +32,6 @@ const SECTIONS: Record<
     included: (c) => c.box.included === true,
   },
   opencodeGo: { body: (v) => ({ opencodeGo: { apiKey: v } }), flag: (c) => c.opencodeGo?.configured ?? false },
-  // A key first saved here runs only "Claude (API key)"; signed-in Claude
-  // bots stay on their plan unless the person turns that on below the row.
   anthropic: {
     body: (v, firstKey) => ({ anthropic: { key: v, ...(firstKey && v ? { everyClaudeBot: false } : {}) } }),
     flag: (c) => c.anthropic?.configured ?? false,
@@ -47,33 +43,48 @@ const SECTIONS: Record<
   cerebras: { body: (v) => ({ cerebras: { key: v } }), flag: (c) => c.cerebras?.configured ?? false },
   groq: { body: (v) => ({ groq: { key: v } }), flag: (c) => c.groq?.configured ?? false },
   meta: { body: (v) => ({ meta: { key: v } }), flag: (c) => c.meta?.configured ?? false },
+  deepseek: { body: (v) => ({ deepseek: { key: v } }), flag: (c) => c.deepseek?.configured ?? false },
   xai: { body: (v) => ({ xai: { key: v } }), flag: (c) => c.xai?.configured ?? false },
+  treg: { body: (v) => ({ treg: { key: v } }), flag: (c) => c.treg?.configured ?? false },
 };
 
-// Provider keys have no desktop-shell slot yet and go through the server's
-// own 0600 config, the same place they live on a hosted server.
-const ELECTRON_CREDENTIAL: Partial<Record<ConfigSection, "composioApiKey" | "boxToken" | "opencodeGoApiKey">> = {
+// Provider keys have no desktop-shell slot yet; they go to the server's own 0600 config. A secret the desktop's boot
+// migration moves into its encrypted store must save here, so Clear removes the stored copy too.
+const ELECTRON_CREDENTIAL: Partial<Record<ConfigSection, "composioApiKey" | "boxToken" | "opencodeGoApiKey" | "tregApiKey">> = {
   composio: "composioApiKey",
   box: "boxToken",
   opencodeGo: "opencodeGoApiKey",
+  treg: "tregApiKey",
 };
+
+/** The desktop shell's encrypted slot for a section, if it has one. */
+export function desktopCredentialSlot(section: ConfigSection) {
+  return ELECTRON_CREDENTIAL[section];
+}
+
+/** Saves one credential where this app keeps it ("" removes it): the desktop's encrypted store when the section has a
+ * slot there, else the server's own config, which on a Cloud home stays outside every bot's box. */
+export function saveCredential(section: ConfigSection, value: string, firstKey: boolean): Promise<ConfigStatus> {
+  const electronSlot = desktopCredentialSlot(section);
+  return window.ogb?.setCredential && electronSlot
+    ? window.ogb.setCredential(electronSlot, value)
+    : api("/api/config", { method: "PUT", body: JSON.stringify(SECTIONS[section].body(value, firstKey)) });
+}
 
 const CREDENTIALS: Record<
   ConfigSection,
   {
     labelKey: LocaleKey;
-    /** a literal placeholder that is not copy — an example key shape */
     placeholder?: string;
     placeholderKey?: LocaleKey;
     descriptionKey: LocaleKey;
     href: string;
     linkLabelKey: LocaleKey;
     optional: boolean;
-    /** Shown under the field, not tucked into the help popover: it changes
-     * what the key does to people's existing logins or bills. */
     warningKey?: LocaleKey;
-    /** A quieter line under the field. */
     noteKey?: LocaleKey;
+    /** The "get a key" link shows under the field, not only in the help popover. */
+    showLink?: boolean;
   }
 > = {
   composio: {
@@ -166,6 +177,14 @@ const CREDENTIALS: Record<
     linkLabelKey: "keys.meta.link",
     optional: true,
   },
+  deepseek: {
+    labelKey: "keys.deepseek.label",
+    placeholder: "sk-…",
+    descriptionKey: "keys.deepseek.desc",
+    href: "https://platform.deepseek.com/api_keys",
+    linkLabelKey: "keys.deepseek.link",
+    optional: true,
+  },
   xai: {
     labelKey: "keys.xai.label",
     placeholder: "xai-…",
@@ -173,6 +192,15 @@ const CREDENTIALS: Record<
     href: "https://console.x.ai",
     linkLabelKey: "keys.xai.link",
     optional: true,
+  },
+  treg: {
+    labelKey: "keys.treg.label",
+    placeholderKey: "keys.treg.placeholder",
+    descriptionKey: "keys.treg.desc",
+    href: "https://treg.to",
+    linkLabelKey: "keys.treg.link",
+    optional: true,
+    showLink: true,
   },
 };
 
@@ -255,9 +283,13 @@ function CredentialHelp({ section }: { section: ConfigSection }) {
   );
 }
 
-/** A paste saves at once, so a clipboard holding a sentence instead of the
- * key would otherwise be stored and then "rejected". No provider key or
- * token has spaces in it. */
+/** "treg is working ✓" with the team's balance, or the exact problem the server's check named. */
+export function tregVerdict(result: { ok?: unknown; balanceUsd?: unknown; message?: unknown }): string {
+  if (result.ok !== true) return typeof result.message === "string" && result.message ? result.message : t("keys.testUnexpected", { status: "?" });
+  const balance = typeof result.balanceUsd === "number" ? ` ${t("keys.treg.balance", { balance: `$${result.balanceUsd.toFixed(2)}` })}` : "";
+  return `${t("keys.treg.working")}${balance}`;
+}
+
 export function looksLikeKey(value: string): boolean {
   return value.length > 0 && !/\s/.test(value);
 }
@@ -266,13 +298,12 @@ export function ApiKeyRow({
   section,
   onSaved,
   testProvider,
+  via = "settings",
 }: {
   section: ConfigSection;
-  /** Called after a successful save with the section's new configured flag. */
   onSaved?: (configured: boolean) => void;
-  /** Check the key against the provider as soon as it saves, and offer a
-   * Test button to check the saved key again. */
   testProvider?: TestableProvider;
+  via?: KeyVia;
 }) {
   const { state, dispatch } = useStore();
   const [value, setValue] = useState("");
@@ -287,32 +318,39 @@ export function ApiKeyRow({
 
   const configured = state.config ? SECTIONS[section].flag(state.config) : false;
   const included = state.config ? SECTIONS[section].included?.(state.config) === true : false;
+  const ownKey = state.config ? (SECTIONS[section].ownKey ?? SECTIONS[section].flag)(state.config) : false;
   const clearing = !value.trim() && configured;
   const credential = credentialCopy(section);
 
-  const test = async () => {
-    if (!testProvider) return;
+  const test = async (): Promise<KeyResult> => {
+    if (!testProvider) return "unverified";
     setTesting(true);
     setVerdict(null);
     const generation = ++testGeneration.current;
     try {
       const result = await api("/api/keys/test", { method: "POST", body: JSON.stringify({ provider: testProvider }) });
-      if (generation !== testGeneration.current) return;
+      if (generation !== testGeneration.current) return keyTestResult(result);
+      if (result.check === "treg") {
+        setVerdict(tregVerdict(result));
+        return keyTestResult(result);
+      }
       const outcome = result.ok
-        ? result.check === "authentication" ? t("keys.testAuthenticated")
+        ? result.check === "authentication"
+          ? result.freeTier === true ? `${t("keys.testAuthenticated")}\n${t("keys.testFreeTier")}` : t("keys.testAuthenticated")
           : result.models?.length ? t("keys.testCatalog", { models: result.models.join(", ") }) : t("keys.testCatalogNoModels")
         : result.reason === "rejected" ? t("keys.testRejected")
           : result.reason === "unreachable" ? t("keys.testUnreachable")
             : t("keys.testUnexpected", { status: String(result.status ?? "?") });
       setVerdict(`${t("keys.testSaved")} ${outcome}`);
+      return keyTestResult(result);
     } catch (cause) {
       if (generation === testGeneration.current) setVerdict(cause instanceof Error ? cause.message : String(cause));
+      return keyTestResult(null);
     } finally {
       if (generation === testGeneration.current) setTesting(false);
     }
   };
 
-  /** Saves the draft, or removes the saved key when `remove` is set. */
   const save = (remove = false) => {
     const next = remove ? "" : value.trim();
     if (savingRef.current || (!remove && !next)) return;
@@ -325,26 +363,25 @@ export function ApiKeyRow({
     setError(null);
     testGeneration.current++;
     setVerdict(null);
-    const electronSlot = ELECTRON_CREDENTIAL[section];
-    const request = window.ogb?.setCredential && electronSlot
-      ? window.ogb.setCredential(electronSlot, next)
-      : api("/api/config", {
-          method: "PUT",
-          body: JSON.stringify(SECTIONS[section].body(next, !configured)),
-        });
-    request
+    saveCredential(section, next, !configured)
       .then((status: ConfigStatus) => {
         dispatch({ type: "configStatus", config: status });
         setValue("");
         const nowConfigured = SECTIONS[section].flag(status);
         onSaved?.(nowConfigured);
-        if (next && nowConfigured) void test();
+        const provider = SECTION_PROVIDER[section];
+        if (!next) {
+          if (ownKey) keyRemoved(provider, via);
+        } else if (testProvider && nowConfigured) void test().then((result) => keySaved(provider, via, result));
+        else keySaved(provider, via, savedKeyResult(provider));
       })
-      .catch((e) => setError(e.message))
+      .catch((e) => {
+        setError(e.message);
+        if (next) keySaved(SECTION_PROVIDER[section], via, keySaveFailure(e));
+      })
       .finally(() => { savingRef.current = false; setSaving(false); });
   };
 
-  // A paste is the whole key: save it once the field holds it.
   useEffect(() => {
     if (!saveAfterPaste.current) return;
     saveAfterPaste.current = false;
@@ -413,16 +450,19 @@ export function ApiKeyRow({
         </div>
       )}
       {credential.note && <p className="mt-1.5 text-[11.5px] leading-[1.4] text-ink-secondary">{credential.note}</p>}
+      {credential.showLink && (
+        <a href={credential.href} target="_blank" rel="noopener noreferrer" className="mt-1.5 inline-flex items-center gap-1 text-[11.5px] font-medium text-accent-text hover:underline">
+          {credential.linkLabel}
+          <ExternalLink size={11} aria-hidden="true" />
+        </a>
+      )}
       {error && <div className="mt-1 text-[12px] text-danger">{error}</div>}
-      {verdict && <div role="status" className="mt-1 text-[12px] text-ink-secondary">{verdict}</div>}
+      {verdict && <div role="status" className="mt-1 whitespace-pre-line text-[12px] text-ink-secondary">{verdict}</div>}
     </div>
   );
 }
 
-/** Keys for OpenCode's other providers (Venice, Groq, DeepSeek…), each under
- * the name OpenCode reads it from. Write-only like every key: the server sends
- * back names, never keys, and hands the keys to OpenCode alone. Saved in the
- * server's own config, on the desktop and on a Cloud alike. */
+/** Security: write-only; the server returns names, never keys, and hands the keys to OpenCode alone. */
 export function OpenCodeProviderKeys() {
   const { state, dispatch } = useStore();
   const names = state.config?.opencodeGo?.providerKeys ?? [];
@@ -522,8 +562,6 @@ export function OpenCodeProviderKeys() {
   );
 }
 
-/** Whether the Anthropic key also runs signed-in Claude bots. Off, only
- * "Claude (API key)" bills per token; on, every Claude bot does. */
 export function AnthropicEveryClaudeBot() {
   const { state, dispatch } = useStore();
   const [saving, setSaving] = useState(false);
@@ -640,9 +678,6 @@ export function VpsConnection() {
   );
 }
 
-/** The OpenAI-compatible engine's base URL: a setting next to its key, so
- * OpenRouter, Groq, Together or OpenAI itself are one field away. Saves when
- * the field is left or Enter is pressed, like the key above it. */
 export function OpenAiCompatUrl() {
   const { state, dispatch } = useStore();
   const saved = state.config?.openaiCompat?.url ?? "";

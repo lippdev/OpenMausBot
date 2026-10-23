@@ -1,14 +1,11 @@
-// The Live call routes, the way a request reaches them: through the table,
-// on a real HTTP server, with a stand-in for index.ts's inline routes behind
-// it. The controller and the config are stand-ins; their own tests cover them.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LiveCallState, LiveSettings } from "../../shared/wire.ts";
 import { json, readBody } from "../harness/http.ts";
-import { LiveCallBusyError, LiveCallNeedsProError, LiveCallSignedOutError } from "../live-call-controller.ts";
-import { LiveSessionError } from "../live-call.ts";
+import { LiveCallBusyError, LiveCallSignedOutError } from "../live-call-controller.ts";
+import { LIVE_NEEDS_KEY, LiveSessionError } from "../live-call.ts";
 import { requiredScope } from "../request-auth.ts";
 import { createLiveRoutes, type LiveRouteDeps } from "./live.ts";
 import { dispatchRoutes } from "./table.ts";
@@ -45,7 +42,6 @@ async function request(deps: LiveRouteDeps, method: string, path: string, body?:
   return { status: response.status, body: await response.json() };
 }
 
-/** What the companion adds to a paired phone's request (companion/src/proxy.ts). */
 const fromPhone = (device = "phone-1") => ({ "x-openmausbot-companion": "1", "x-openmausbot-companion-device": device });
 
 function deps(overrides: Partial<LiveRouteDeps> = {}): LiveRouteDeps & { saved: SettingsPatch[] } {
@@ -82,8 +78,6 @@ describe("live routes", () => {
     await request(d, "POST", "/api/live/session", { botId: "bot1", threadId: "t1", sdp: "v=0\r\n", client: "android" });
     expect(d.calls.start).toHaveBeenCalledWith(expect.objectContaining({ auth: { kind: "loopback", scopes: ["admin", "client"] }, threadId: "t1", client: "android" }));
   });
-  // A Cloud's page in a web browser says so, so a busy line can say where
-  // the other call is instead of "on this computer".
   it("starts a call from a web browser", async () => {
     const d = deps();
     expect((await request(d, "POST", "/api/live/session", { botId: "bot1", sdp: "v=0\r\n", client: "web" })).status).toBe(201);
@@ -111,22 +105,16 @@ describe("live routes", () => {
     expect(d.calls.start).not.toHaveBeenCalled();
   });
   it("says when a key is needed and when a call is already running", async () => {
-    const noKey = deps({ calls: { ...deps().calls, start: vi.fn(async () => { throw new LiveSessionError("Add an OpenAI API key to use Live calls.", 409); }) } });
-    expect(await request(noKey, "POST", "/api/live/session", { botId: "bot1", sdp: "v=0", client: "ios" })).toMatchObject({ status: 409, body: { needsKey: true } });
+    const noKey = deps({ calls: { ...deps().calls, start: vi.fn(async () => { throw new LiveSessionError(LIVE_NEEDS_KEY, 409); }) } });
+    for (const headers of [{}, fromPhone()]) {
+      expect(await request(noKey, "POST", "/api/live/session", { botId: "bot1", sdp: "v=0", client: "ios" }, headers))
+        .toEqual({ status: 409, body: { error: LIVE_NEEDS_KEY, needsKey: true } });
+    }
     const active = { callId: "c0", botId: "bot2", threadId: "t2", client: "android", voice: "marin", startedAt: 1, status: "live" } as const;
     const busy = deps({ calls: { ...deps().calls, start: vi.fn(async () => { throw new LiveCallBusyError(active); }) } });
     const refused = await request(busy, "POST", "/api/live/session", { botId: "bot1", sdp: "v=0", client: "ios" });
     expect(refused).toMatchObject({ status: 409, body: { activeCall: active } });
     expect(refused.body).not.toHaveProperty("needsKey");
-  });
-  // Checked before the key (the controller's order), so a person without Pro
-  // is never asked for one; the phones read the same body through the companion.
-  it("says when a phone's Live call needs a Pro plan, and nothing about a key", async () => {
-    for (const headers of [{}, fromPhone()]) {
-      const noPro = deps({ calls: { ...deps().calls, start: vi.fn(async () => { throw new LiveCallNeedsProError(); }) } });
-      const refused = await request(noPro, "POST", "/api/live/session", { botId: "bot1", sdp: "v=0", client: "android" }, headers);
-      expect(refused).toEqual({ status: 402, body: { error: "Live calls from your phone need a Pro plan.", needsPro: true } });
-    }
   });
   it("passes OpenAI's refusals through with their status and message", async () => {
     const refusal = deps({ calls: { ...deps().calls, start: vi.fn(async () => { throw new LiveSessionError("OpenAI rejected the API key. Check the key for Live calls.", 502); }) } });
@@ -145,9 +133,6 @@ describe("live routes", () => {
   it("saves non-secret settings and refuses the key", async () => {
     const d = deps();
     expect(await request(d, "PATCH", "/api/live/settings", { idleMinutes: 10, readTypedReplies: false })).toMatchObject({ status: 200, body: { live: { idleMinutes: 10, readTypedReplies: false } } });
-    // The key is saved with the rest of the settings (on a Cloud's page) or
-    // in the desktop's credential store, never here; the refusal does not
-    // send the person to "the computer that runs OpenMausBot".
     expect(await request(d, "PATCH", "/api/live/settings", { key: "sk-x" })).toEqual({ status: 400, body: { error: "Those Live settings are not valid." } });
     expect((await request(d, "PATCH", "/api/live/settings", { idleMinutes: 0 })).status).toBe(400);
     expect((await request(d, "PATCH", "/api/live/settings", { idleMinutes: 61 })).status).toBe(400);

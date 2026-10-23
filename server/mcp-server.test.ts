@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// scripts/mcp-server.ts snapshots process.env at import time — scrub ambient
-// OMB_* / OPENMAUSBOT_* values before it is evaluated (#1676).
+// scripts/mcp-server.ts snapshots process.env at import time: scrub ambient OMB_* / OPENMAUSBOT_* values first.
 import "./testing/scrub-ambient-omb-env.ts";
 
 import {
@@ -336,9 +335,6 @@ describe("MCP tool execution", () => {
   });
 
   it("rewinds a thread by editing an earlier message, and refuses while busy", async () => {
-    // The composer rewind. It forks the conversation and answers again,
-    // which is the only mapped way to make the harness REBUILD context
-    // rather than resume the provider's own session.
     const busyFetcher = vi.fn(async () => ({ bots: [{ id: "bot-1", busy: true }] }));
     await expect(handleToolCall("edit_bot_message", {
       bot_id: "bot-1", message_id: "m-9", text: "say that again",
@@ -372,7 +368,6 @@ describe("MCP tool execution", () => {
       }
       throw new Error(`unexpected path ${path}`);
     });
-    // the bot is busy on task-1, but task-2 is idle: the edit lands there
     await expect(handleToolCall("edit_bot_message", {
       bot_id: "bot-1", message_id: "m-9", text: "again", task_id: "task-2",
     }, fetcher)).resolves.toMatchObject({ success: true });
@@ -505,9 +500,7 @@ describe("MCP tool execution", () => {
       }
       throw new Error(`unexpected path ${path}`);
     });
-    // the bot speaks in a room thread that is not the room's open one
     await expect(handleToolCall("send_bot_message", { bot_id: "bot-1", text: "hi" }, fetcher)).rejects.toThrow("is working in channel 'channel-1'");
-    // a server that runs a room's threads side by side takes a message for any of them
     await expect(handleToolCall("send_channel_message", { channel_id: "channel-1", task_id: "task-2", text: "More" }, fetcher))
       .resolves.toMatchObject({ success: true, taskId: "task-2" });
     await expect(handleToolCall("interrupt_conversation", { target_type: "channel", target_id: "channel-1", task_id: "task-2" }, fetcher))
@@ -532,8 +525,6 @@ describe("MCP tool execution", () => {
 });
 
 describe("waiting on a conversation's job", () => {
-  /** A server for one conversation: its fleet, the job reads it answers in
-   * turn (the last repeats), and the transcript tail. */
   function server(options: { fleet: unknown; jobs: Array<Record<string, unknown>>; tail?: unknown[]; thread?: string; sent?: unknown[] }) {
     const thread = options.thread ?? "task-1";
     const reads: URLSearchParams[] = [];
@@ -575,19 +566,15 @@ describe("waiting on a conversation's job", () => {
       jobs: [{ state: "needs-input", version: "v1", needsInput: [{ botName: "Priya", question: "Which tier?" }] }] });
     expect(await handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1", timeout_seconds: 1 }, needs.fetcher))
       .toMatchObject({ status: "needs-user", state: "needs-input", messages: [{ text: "Approve?" }], job: { needsInput: [{ question: "Which tier?" }] } });
-    // an engine that died or went silent: the legacy words, as before
     for (const [activity, state] of [["dead", "failed"], ["no-signal", "stalled"]] as const) {
       const ended = server({ fleet: bot(), jobs: [{ state, version: "v1", conversation: { kind: "bot", busy: false, activity, queued: 0 } }] });
       expect(await handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1", timeout_seconds: 1 }, ended.fetcher))
         .toMatchObject({ status: state, state });
     }
-    // a lead whose work ended failed or stopped: settled in the legacy words (the conversation
-    // is done), failed in the job's own, which the command line's exit code follows
     const stopped = server({ fleet: bot(), tail: [{ id: "m1", at: 1, role: "bot", kind: "text", text: "Partial answer" }],
       jobs: [{ state: "failed", version: "v1", conversation: { kind: "bot", busy: false, activity: "idle", queued: 0 } }] });
     expect(await handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1", timeout_seconds: 1 }, stopped.fetcher))
       .toMatchObject({ status: "settled", state: "failed" });
-    // a dispatch that failed after the last message fails a job its record calls completed
     const undispatched = server({ fleet: bot(), tail: [{ id: "u1", at: 1, role: "user", kind: "text", text: "Go" },
       { id: "m2", at: 2, role: "bot", kind: "activity", tool: { name: "Error: could not start", ok: false, terminal: true } }],
     jobs: [{ state: "completed", version: "v1" }] });
@@ -629,7 +616,6 @@ describe("waiting on a conversation's job", () => {
     const failed = server({ fleet: bot(), tail: failure, jobs: [{ state: "completed", version: "v1" }] });
     expect(await handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1", timeout_seconds: 1 }, failed.fetcher))
       .toMatchObject({ status: "failed" });
-    // text after the diagnostic means the turn went on: settled, unless the receipt says terminal
     for (const [terminal, status] of [[undefined, "settled"], [true, "failed"]] as const) {
       const tail = [{ id: "u1", at: 1, role: "user", kind: "text", text: "Create the file" },
         { id: "m1", at: 2, role: "bot", kind: "text", text: "The operation was denied." },
@@ -638,6 +624,21 @@ describe("waiting on a conversation's job", () => {
       expect(await handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1", timeout_seconds: 1 }, answered.fetcher))
         .toMatchObject({ status });
     }
+  });
+
+  it("reads a failed turn that left a quota-switch offer as failed: nothing waits on the offer", async () => {
+    const failure = [
+      { id: "u1", at: 1, role: "user", kind: "text", text: "Summarise the quarter" },
+      { id: "e1", at: 2, role: "bot", kind: "activity", tool: { name: "error: This Claude account has reached its usage limit.", ok: false } },
+    ];
+    const wait = (card: Record<string, unknown>) => handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1", timeout_seconds: 1 },
+      server({ fleet: bot(), tail: [...failure, { id: "c1", at: 3, role: "bot", kind: "options", card }], jobs: [{ state: "completed", version: "v1" }] }).fetcher);
+    const question = { title: "Which quarter?", subtitle: "", options: ["Q3", "Q4"], requestId: "r1" };
+    expect(await wait(question)).toMatchObject({ status: "needs-user" });
+    expect(await wait({
+      ...question, title: "Claude is out of quota", options: ["Codex", "Not now"], fixedOptions: true,
+      quotaSwitch: { engines: [{ instanceId: "codex", name: "Codex" }], messageId: "u1" },
+    })).toMatchObject({ status: "failed" });
   });
 
   it("waits on a pinned task and projects the bot as it is at the end", async () => {
@@ -663,7 +664,6 @@ describe("waiting on a conversation's job", () => {
     });
     await expect(handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1" }, answering("not found")))
       .rejects.toThrow("cannot report a conversation's job");
-    // deleted while it was being waited on: not a reason to update the server
     await expect(handleToolCall("wait_for_conversation", { target_type: "bot", target_id: "bot-1" }, answering('{"error":"no such conversation"}')))
       .rejects.toThrow('OpenMausBot API error (404): {"error":"no such conversation"}');
   });

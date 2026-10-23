@@ -47,7 +47,6 @@ it("pins an explicitly chosen new-thread folder without moving existing sessions
     }
     expect(persisted().tasks).toHaveLength(beforeInvalid);
     expect(persisted().threadId).toBe(threadId);
-    // There is deliberately no new PATCH surface, even before a first turn.
     expect((await api("PATCH", `/api/bots/${bot.id}/tasks/${threadId}`, { cwd: later })).status).toBe(400);
     expect((await api("PATCH", `/api/bots/${bot.id}`, { cwd: later })).status).toBe(200);
 
@@ -70,8 +69,6 @@ it("pins an explicitly chosen new-thread folder without moving existing sessions
     const session = (await api("POST", "/api/auth/pair", { code: pairing.code, label: "Chat-only fixture" })).body;
     expect(typeof session.token).toBe("string");
     const beforeClient = persisted().tasks.length;
-    // Member and Cloud guest conversations have client scope. They retain
-    // ordinary task creation, but cannot supply a server filesystem path.
     expect((await api("POST", `/api/bots/${bot.id}/tasks`, { cwd: chosen }, session.token)).status).toBe(403);
     expect((await api("POST", `/api/bots/${bot.id}/tasks`, { cwd: "missing" }, session.token)).status).toBe(403);
     expect(persisted().tasks).toHaveLength(beforeClient);

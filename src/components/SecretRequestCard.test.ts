@@ -1,16 +1,28 @@
-// The superseded state is the credential card's equivalent of an expired
-// proposal: the request that created it is dead, so the card must stop
-// offering entry (form, dismiss, retry) and say what replaced it.
-import { createElement } from "react";
+import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "@/state/store";
 
 const dispatch = vi.fn();
+const fixture = vi.hoisted(() => ({ counting: false, values: [] as unknown[], index: 0, api: vi.fn(), track: vi.fn() }));
+vi.mock("react", async (original) => {
+  const react = await original<typeof import("react")>();
+  return {
+    ...react,
+    useState: (initial: unknown) => {
+      if (!fixture.counting) return react.useState(initial);
+      const index = fixture.index++;
+      if (!(index in fixture.values)) fixture.values[index] = initial;
+      return [fixture.values[index], (next: unknown) => { fixture.values[index] = next; }];
+    },
+  };
+});
 vi.mock("@/state/store", async (original) => ({
   ...await original<typeof import("@/state/store")>(),
+  api: fixture.api,
   useStore: () => ({ dispatch }),
 }));
+vi.mock("@/lib/analytics", () => ({ track: fixture.track }));
 
 import { SecretRequestCard } from "./SecretRequestCard";
 
@@ -85,5 +97,74 @@ describe("SecretRequestCard ask card", () => {
     expect(html).toContain("Try again");
     expect(html).toContain("The bot could not be resumed.");
     expect(html).not.toContain('type="password"');
+  });
+});
+
+describe("SecretRequestCard key analytics", () => {
+  const KEY = "boat_ZZtestSECRET0123456789abcdef";
+  type Props = { children?: ReactNode; type?: string; onChange?: (event: { target: { value: string } }) => void; onSubmit?: (event: { preventDefault(): void }) => void };
+  const nodes = (tree: ReactNode): Array<ReactElement<Props>> =>
+    Children.toArray(tree).flatMap((child) => isValidElement<Props>(child) ? [child, ...nodes(child.props.children)] : []);
+  const card = (target: string) => {
+    fixture.counting = true;
+    fixture.index = 0;
+    try {
+      return nodes(SecretRequestCard({ botId: "bot-1", threadId: "thread-1", message: secretCard({ target, label: "Key" }) }));
+    } finally {
+      fixture.counting = false;
+    }
+  };
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  async function submit(target: string, typed = KEY) {
+    card(target).find((node) => node.type === "input")!.props.onChange!({ target: { value: typed } });
+    card(target).find((node) => node.type === "form")!.props.onSubmit!({ preventDefault: () => {} });
+    await flush();
+  }
+
+  beforeEach(() => {
+    fixture.values = [];
+    fixture.api.mockReset();
+    fixture.track.mockReset();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reports a Boat key saved over the desktop bridge once, even when only the resume is retried", async () => {
+    const setCredential = vi.fn().mockResolvedValue({ box: { configured: true } });
+    vi.stubGlobal("window", { ogb: { setCredential } });
+    fixture.api.mockRejectedValueOnce(new Error("resume failed")).mockResolvedValueOnce({ ok: true });
+    await submit("boxToken");
+    card("boxToken").find((node) => node.type === "form")!.props.onSubmit!({ preventDefault: () => {} });
+    await flush();
+    expect(setCredential).toHaveBeenCalledExactlyOnceWith("boxToken", KEY);
+    expect(fixture.api).toHaveBeenCalledTimes(2);
+    expect(fixture.track.mock.calls).toEqual([["api_key_saved", { provider: "boat", via: "chat_request", result: "ok" }]]);
+    for (const fragment of [KEY, KEY.slice(0, 6), KEY.slice(-6), String(KEY.length)]) expect(JSON.stringify(fixture.track.mock.calls)).not.toContain(fragment);
+  });
+
+  it("reports a Boat key boat.dev refused as rejected", async () => {
+    vi.stubGlobal("window", { ogb: { setCredential: vi.fn().mockRejectedValue(new Error("Error invoking remote method 'credential:set': KeyRejected: That doesn't look like a Boat API key")) } });
+    await submit("boxToken");
+    expect(fixture.track.mock.calls).toEqual([["api_key_saved", { provider: "boat", via: "chat_request", result: "rejected" }]]);
+  });
+
+  // Even with the desktop bridge, the 1Password token goes to this server's Logins (which checks it with 1Password),
+  // never the bridge's settings-file store: on My Cloud no bridge exists, and the Cloud's Logins is where bots read it.
+  it("saves a 1Password token through Logins, never the settings bridge, then resumes the bot", async () => {
+    const setCredential = vi.fn();
+    vi.stubGlobal("window", { ogb: { setCredential } });
+    fixture.api.mockResolvedValueOnce({ onePassword: { connected: true } }).mockResolvedValueOnce({ ok: true });
+    await submit("onePasswordToken", "ops_ZZtestSECRET0123456789");
+    expect(setCredential).not.toHaveBeenCalled();
+    expect(fixture.api.mock.calls[0]).toEqual(["/api/logins/1password", { method: "POST", body: JSON.stringify({ token: "ops_ZZtestSECRET0123456789" }) }]);
+    expect(fixture.api.mock.calls[1]![0]).toBe("/api/bots/bot-1/secret-cards/secret-card/provided");
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(JSON.stringify(fixture.track.mock.calls)).not.toContain("ZZtestSECRET");
+  });
+
+  it("reports an xAI key saved from chat as unverified: nothing checks it before it is used", async () => {
+    fixture.api.mockResolvedValueOnce({ xai: { configured: true } }).mockResolvedValueOnce({ ok: true });
+    await submit("xaiApiKey", "xai-ZZtestSECRET0123456789");
+    expect(fixture.api.mock.calls[0]).toEqual(["/api/config", { method: "PUT", body: JSON.stringify({ xai: { key: "xai-ZZtestSECRET0123456789" } }) }]);
+    expect(fixture.track.mock.calls).toEqual([["api_key_saved", { provider: "xai", via: "chat_request", result: "unverified" }]]);
   });
 });

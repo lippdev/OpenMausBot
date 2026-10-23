@@ -1,7 +1,5 @@
-// A tiny OAuth 2.1 authorization server for tests: protected-resource and
-// authorization-server metadata, dynamic client registration, an /authorize
-// that approves at once (302 back to the redirect URI, like a person who
-// clicked Allow), a token endpoint that checks PKCE, and revocation.
+// A tiny OAuth 2.1 authorization server for tests: metadata, dynamic registration, an /authorize that
+// approves at once, a PKCE-checking token endpoint, and revocation.
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -30,14 +28,12 @@ export interface FakeOAuthOptions {
   listIssuerWithSlash?: boolean;
   /** /authorize returns its issuer as iss (RFC 9207) */
   returnIss?: boolean;
-  /** apps registered in advance: client id → its secret, or null for a
-   * public app. A confidential app must prove its secret at /token. */
+  /** apps registered in advance: client id → its secret, or null for a public app */
   preRegistered?: Record<string, string | null>;
   /** advertised token_endpoint_auth_methods_supported */
   tokenAuthMethods?: string[];
 }
 
-/** How the last /token or /revoke request identified its client. */
 export interface FakeClientAuth {
   method: "basic" | "post" | "none";
   clientId: string;
@@ -79,8 +75,7 @@ export async function startFakeOAuth(options: FakeOAuthOptions = {}): Promise<Fa
   const fake: Partial<FakeOAuth> = { lastAuthorize: null, clientAuths, options };
   const preRegistered = options.preRegistered ?? {};
 
-  /** The client a token request authenticates as, or null when its secret
-   * is missing or wrong (RFC 6749 §2.3: one method per request). */
+  /** The authenticated client, or null when its secret is missing or wrong (RFC 6749 §2.3: one method per request). */
   const authenticate = (req: IncomingMessage, form: URLSearchParams): string | null => {
     const header = req.headers.authorization;
     let auth: FakeClientAuth;

@@ -1,10 +1,3 @@
-// propose_model: a bot (or a Chief, for a section peer) proposes changing
-// one bot's default engine/model. Mirrors profile-requests.ts — same card
-// shape, same propose/confirm split, same fail-closed confirm — but the
-// change commits through Store.applyModelDefault, which stamps tasks
-// exactly like applyTeamSetup: saved per-thread selections are never
-// rewritten. Staleness is a snapshot of the one field being changed, not
-// the team-setup plan's whole-state revision hash.
 import type { ModelRequestCardData } from "../shared/model-request.ts";
 import type { ModelSelection } from "../shared/wire.ts";
 import { harnessCapabilityLines, type DriverCapabilities } from "./harness-capabilities.ts";
@@ -31,7 +24,6 @@ export interface OptionCardLike {
   modelRequest?: ModelRequestCardData;
 }
 
-/** Kept narrow so the domain can be tested without constructing the full app store. */
 export interface ModelRequestStore {
   bot(id: string): BotRecord | undefined | null;
   messagesFor(threadId: string): Array<{ id: string; card?: OptionCardLike }>;
@@ -45,24 +37,17 @@ export interface ModelRequestStore {
     },
   ): { id: string };
   patchMessage(threadId: string, messageId: string, patch: { card: OptionCardLike }): { id: string } | null;
-  /** The reviewed commit path: replaces the default and stamps tasks the
-   * same way applyTeamSetup does, so per-thread selections survive. */
   applyModelDefault(id: string, selection: ModelSelection): BotRecord | null;
 }
 
 export interface ModelRequestServiceOptions {
   store: ModelRequestStore;
   now?: () => number;
-  /** Whether a submitted change applies without a person, and why
-   * (server/direct-apply.ts). Server-owned, never request input. */
+  /** Server-owned, never request input. */
   autoApply?: DirectApplyCheck;
-  /** `opensCard` is false for a change that applies directly (no open card). */
   canPersist?: (botId: string, threadId: string, opensCard: boolean) => { ok: true } | { ok: false; status: number; error: string };
-  /** Chief targeting another bot: returns a refusal sentence or null. Checked at propose AND confirm. */
   validateTarget?: (proposerBotId: string, targetBotId: string) => string | null;
-  /** Full model validation (structure, catalog, approval compatibility): a refusal sentence or null. Re-run at confirm. */
   validateModel?: (selection: ModelSelection, current: BotRecord) => string | null;
-  /** Per-driver capability resolver backing the card's engine-switch warnings. */
   driverCapabilities?: (instanceId: string) => DriverCapabilities | undefined;
 }
 
@@ -100,9 +85,6 @@ function reasonText(value: unknown): string {
   return redactSecretsInText(trimmed);
 }
 
-/** Structural check only — the injected validateModel hook owns catalog and
- * approval-compatibility checks with the live registry, at propose and again
- * at confirm. */
 function parseSelection(input: unknown): ModelSelection {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new ModelRequestError("model_selection must be an object with instanceId and model");
@@ -135,18 +117,16 @@ export function modelCardCopy(args: {
   capabilityLines: string[];
 }): { title: string; summary: string; detail: string } {
   const title = args.crossBot
-    ? "Change @" + args.targetName + "'s default engine/model?"
-    : "Change " + args.targetName + "'s default engine/model?";
+    ? "Change @" + args.targetName + "'s default AI and model?"
+    : "Change " + args.targetName + "'s default AI and model?";
   const lines: string[] = args.crossBot
     ? ["Whose default model: @" + args.targetName, "Why: " + args.reason]
     : ["Why: " + args.reason];
-  lines.push("Default engine/model: " + JSON.stringify(args.before) + " → " + JSON.stringify(args.selection));
+  lines.push("Default AI and model: " + JSON.stringify(args.before) + " → " + JSON.stringify(args.selection));
   lines.push(...args.capabilityLines);
-  // The same consent line the team-setup card shows for a model change:
-  // the default moves, saved thread selections do not.
   lines.push("Default models apply to groups and new threads. Every existing thread keeps its current model and permissions.");
   lines.push("Nothing runs.");
-  return { title, summary: title + " · default engine/model", detail: lines.join("\n") };
+  return { title, summary: title + " · default AI and model", detail: lines.join("\n") };
 }
 
 export class ModelRequestService {
@@ -254,21 +234,14 @@ export class ModelRequestService {
     throw new ModelRequestError(result.state === "invalid" ? result.error : "The model change could not be applied", result.state === "invalid" ? result.status : 409);
   }
 
-  /** Marks a card whose change applied without a person. A failure here only
-   * loses the Undo. */
   private recordAutoApplied(threadId: string, messageId: string): void {
     try {
       const card = this.store.messagesFor(threadId).find((candidate) => candidate.id === messageId)?.card;
       if (card?.modelRequest) this.store.patchMessage(threadId, messageId, { card: { ...card, autoApplied: true } });
     } catch {
-      // The model change itself is durable; only its Undo is lost.
     }
   }
 
-  /** Puts the previous default model back after a change that applied
-   * without a person, through the same checks a switch gets (validateModel:
-   * a pending approval-level change, or permissions the old engine cannot
-   * keep, refuse it). Refuses, applying nothing, once the default moved. */
   undo(args: { botId: string; threadId: string; requestId: string }): UndoModelRequestResult {
     const message = this.store
       .messagesFor(args.threadId)
@@ -295,8 +268,6 @@ export class ModelRequestService {
     return { claimed: true, state: "undone", targetBotId: target.id };
   }
 
-  /** Claims a model card even after it was settled, so a duplicate click
-   * never re-applies an already-applied change. */
   resolve(args: {
     botId: string;
     threadId: string;
@@ -319,11 +290,7 @@ export class ModelRequestService {
       return { claimed: true, state: "invalid", error: "This model request belongs to another conversation", status: 403 };
     }
     if (card.answered) return { claimed: true, state: "already_settled", behavior: card.answered };
-    // Cross-bot cards re-check authority on every allow, before any settle
-    // path can run: a proposer who lost Chief rights must not confirm, even
-    // when the requested selection is already live. Card level, not inside
-    // the try, so the crash-recovery catch cannot recast a refusal as an
-    // applied change.
+    // Re-check authority before any settle path, outside the try, so the recovery catch cannot recast a refusal as applied.
     if (args.behavior === "allow" && payload.targetBotId !== payload.botId && this.validateTarget) {
       const refusal = this.validateTarget(payload.botId, payload.targetBotId);
       if (refusal) return { claimed: true, state: "invalid", error: refusal, status: 404 };
@@ -336,9 +303,6 @@ export class ModelRequestService {
         this.store.patchMessage(args.threadId, message.id, { card: { ...card, answered: "deny", held: undefined } });
         return { claimed: true, state: "denied" };
       }
-      // Idempotent close: if the exact requested selection is already the
-      // default (a crash after apply, or the same change arriving twice),
-      // settle the card without mutating anything again.
       if (sameSelection(payload.selection, target.modelSelection)) {
         const settled = this.store.patchMessage(args.threadId, message.id, {
           card: { ...card, answered: "allow", held: undefined, modelRequest: { ...payload, appliedAt: payload.appliedAt ?? this.now() } },
@@ -372,7 +336,7 @@ export class ModelRequestService {
         this.store.patchMessage(args.threadId, message.id, {
           card: { ...card, held: applied ? notice : redactSecretsInText(detail).slice(0, 500) },
         });
-      } catch { /* The idempotent close above still permits a safe retry. */ }
+      } catch {}
       if (applied) return {
         claimed: true, state: "applied", targetBotId: payload.targetBotId,
         settlementPending: true, message: notice,

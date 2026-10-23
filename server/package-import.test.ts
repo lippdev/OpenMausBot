@@ -9,8 +9,6 @@ const FIXTURES = join(import.meta.dirname, "..", "shared", "package-fixtures");
 const fixture = (name: string): any => JSON.parse(readFileSync(join(FIXTURES, name), "utf8"));
 let home: string;
 
-/** A real Store, RoutineManager, skill store, memory and section registry in
- * a throwaway home; MCP config and policy are in-memory stand-ins. */
 async function installation(options: { refuse?: (name: string) => string | undefined; servers?: Record<string, unknown> } = {}) {
   home = mkdtempSync(join(tmpdir(), "omb-package-import-"));
   vi.resetModules();
@@ -81,7 +79,6 @@ describe("importing a whole team", () => {
         requiredApps: [expect.objectContaining({ slug: "hubspot" })] },
     });
     expect(lead.avatarUrl).toMatch(/^\/api\/attachments\/[\w-]+\.png$/);
-    // Approval is never taken from the file.
     expect(lead).not.toHaveProperty("approvalMode");
     expect(lead).not.toHaveProperty("autoApprove");
     expect(lead.installedPackage?.installId).toMatch(/^[0-9a-f-]{36}$/);
@@ -101,7 +98,6 @@ describe("importing a whole team", () => {
       expect.objectContaining({ name: "research-brief", enabled: false }),
     ]);
     expect(result.offeredSkills).toEqual(["objection-handling"]);
-    // The slot never binds to the credentialed server already called "crm".
     expect(result.connections).toEqual([{ key: "crm", name: "crm-2", label: "CRM" }]);
     expect(app.mcp.servers["crm-2"]).toEqual({ type: "http", url: "https://mcp.example.com/crm", headers: { Authorization: "" }, enabled: false });
     expect(app.mcp.servers.crm).toMatchObject({ headers: { Authorization: "Bearer mine" } });
@@ -113,6 +109,18 @@ describe("importing a whole team", () => {
     expect(result.brief).toBe(true);
     expect(result.skipped).toEqual([{ part: "presets[support]", reason: "presets_not_supported_yet" }]);
     expect(app.events.filter((kind) => kind === "bot")).toHaveLength(3);
+  });
+
+  it("brings a new install's chrome MausBot back in chrome from its own export", async () => {
+    const app = await installation();
+    app.store.seedIfEmpty();
+    const { createBotPackageExport } = await import("./package-export.ts");
+    const exported = createBotPackageExport({ name: "Mine", groups: [], routines: [], bots: app.store.bots });
+    const document: PackageDocument = app.parsePackageDocument(JSON.parse(JSON.stringify(exported)));
+    expect(document.package.agents.map((agent) => [agent.name, agent.appearance?.color])).toEqual([["MausBot", "chrome"]]);
+    const result = app.importer.importPackageDocument(document, { trust: "file", mode: "add" }, app.deps);
+    if (result.alreadyAdded) throw new Error("unexpected");
+    expect(result.bots.map((bot) => app.store.bot(bot.id)?.color)).toEqual(["chrome"]);
   });
 
   it("keeps a routine's run on startup, still arriving paused", async () => {

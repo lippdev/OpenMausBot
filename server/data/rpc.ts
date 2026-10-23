@@ -1,19 +1,12 @@
-// One JSON-RPC request from harness-mcp-proxy data, answered with its MCP
-// `result`: tools/list is the catalog plus the dialect instructions;
-// tools/call checks the arguments against the advertised schema, then runs
-// the tool on the bot's connection. The turn's capability must still be live
-// before and after anything touches the database, like the computer's rpc.
+// The turn's capability must still be live before and after anything touches the database.
 import { DATA_INSTRUCTIONS } from "./instructions.ts";
 import type { DataCard } from "../../shared/data-surface.ts";
 import { DATA_TOOLS, dataErrorResult, dataToolCallProblem, runDataTool, type DataContext, type DataToolResult } from "./tools.ts";
 
-/** Where harness-mcp-proxy data posts: `/api/internal/${kind}/mcp`. */
 export const DATA_INTERNAL_MCP_PATH = "/api/internal/data/mcp";
 
 export interface DataRpcDeps extends Omit<DataContext, "connection" | "by"> {
-  /** Throws when the turn's capability is no longer live. */
   assertActive(): void;
-  /** Persist a navigation receipt in this call's originating conversation. */
   onShow?(card: DataCard): void;
 }
 
@@ -39,7 +32,7 @@ export async function dataRpc(
   assertActive();
   if (!result.isError && shown) {
     const current = deps.sheet.card(shown.id);
-    // Cleanup may yield while another edit replaces this result; never receipt that edit as ours.
+    // Cleanup may yield while another edit replaces this result: never receipt that edit as ours.
     if (current?.status === "ready" && current.result === shown.result) deps.onShow?.(shown);
   }
   return result;

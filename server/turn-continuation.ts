@@ -2,18 +2,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/**
- * Automatic continuity: when a turn ends without a final answer and the work
- * is resumable (a budget cap), persist a structured handoff. The driver with
- * the full transcript in hand writes it and raises `cap.exhausted`; the
- * harness hands the path to the job runtime, which runs the same turn again
- * in place (docs/runtime-contract.md §10 PR 4: `continue`), opening with the
- * continuation note and this file, for a person's root and a teammate's
- * assignment alike. No `Continue:` thread, no second owner of the work.
- */
-
-/** Resolve the handoff directory the same way the server resolves its data
- * dir (server/cli.ts): OMB_DATA_DIR wins, else ~/.openmausbot. */
 export function handoffDir(): string {
   return join(process.env.OMB_DATA_DIR || join(homedir(), ".openmausbot"), "handoffs");
 }
@@ -33,8 +21,6 @@ export interface HandoffInput {
   }>;
 }
 
-/** Persist a structured markdown handoff for a turn that ended without a
- * final answer. Returns the file path, or null when the write fails. */
 export function writeTurnHandoff(input: HandoffInput): string | null {
   try {
     const dir = handoffDir();
@@ -67,7 +53,7 @@ export function writeTurnHandoff(input: HandoffInput): string | null {
         }
       } else if (m.role === "tool") {
         let verdict = "?";
-        try { verdict = JSON.parse(String(m.content)).ok ? "ok" : "FAILED"; } catch { /* keep "?" */ }
+        try { verdict = JSON.parse(String(m.content)).ok ? "ok" : "FAILED"; } catch {}
         L.push(`   result ${verdict}: ${String(m.content ?? "").replace(/\s+/g, " ").slice(0, 220)}`);
       }
     }
@@ -91,20 +77,10 @@ export function writeTurnHandoff(input: HandoffInput): string | null {
   }
 }
 
-/** The harness's own budget stops, in its own words: the chat driver's
- * "Stopped after 64 steps without a final answer…" and the older model-call
- * cap. Matched from the start of the failure, so a provider's error text can
- * never read as one: "upstream HTTP 429: Rate limit reached" is not a spent
- * budget. */
+/** Matched from the start of the failure, so a provider's error text ("HTTP 429: Rate limit reached") never reads as a spent budget. */
 const CAP_STOP = /^(?:stopped after \d+ [a-z ]+ without a final answer|model-call limit reached)/i;
 
-/** Classify a terminal turn as resumable. Returns the reason for the
- * continuation (`cap` = budget exhausted), or null when the turn must not be
- * auto-continued. Only a cap is continued. A provider error (a rate limit, a
- * quota, a rejected key, a model that cannot take the request) fails the same
- * way in a new thread: continuing would go straight back to the provider that
- * just refused. A tool error includes a person's or the approval policy's
- * denial, and a new unattended thread would retry what was refused. */
+/** Only a spent budget continues: a provider error would fail the same way again, and a denied tool would be retried unattended. */
 export function classifyContinuable(_stopReason: string | null | undefined, failure: string | undefined): "cap" | null {
   return failure && CAP_STOP.test(failure) ? "cap" : null;
 }

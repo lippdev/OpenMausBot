@@ -1,9 +1,7 @@
-// The native log must keep the shape of a session-setup message and lose the
-// credential values. These tests use the exact shapes the drivers actually
-// write — the ACP `env: [{name,value}]` wire form and the claude mcpServers
-// object form — so a change to either shape breaks the test, not the secret.
+// The exact shapes the drivers write (ACP `env: [{name,value}]` and claude's mcpServers object), so a shape change breaks the test, not the secret.
 import { describe, expect, it } from "vitest";
 
+import { holdsCredential } from "../shared/redact.ts";
 import { redactSecrets } from "./redact.ts";
 
 const flat = (value: unknown) => JSON.stringify(value);
@@ -51,14 +49,12 @@ describe("redactSecrets", () => {
 
     expect(out).not.toContain("s3cret-comms-token-value");
     expect(out).not.toContain("box_live_abcdefghijklmnop");
-    // shape survives: still the same method, servers, names and non-secret env
     expect(out).toContain("session/new");
     expect(out).toContain("OMB_COMMS_TOKEN");
     expect(out).toContain("OGB_BOX_TOKEN");
     expect(out).toContain("bot-123");
     expect(out).toContain("boat-9");
     expect(out).toContain("/app/agents-proxy.js");
-    // and it says how long the value was, which is what you debug with
     expect(out).toContain("«redacted 24 chars»");
   });
 
@@ -79,14 +75,10 @@ describe("redactSecrets", () => {
     expect(out).not.toContain("box_live_zzz");
     expect(out).toContain("app.composio.dev");
     expect(out).toContain("ELECTRON_RUN_AS_NODE");
-    expect(out).toContain('"1"'); // a non-secret value is untouched
+    expect(out).toContain('"1"');
   });
 
   it("still content-redacts an ACP env entry whose name is not secret-shaped", () => {
-    // A credential can land under an ordinary-looking variable name (a
-    // custom env var, a feature flag someone repurposed) — the ACP
-    // {name,value} shortcut must not skip the content pass just because
-    // the NAME alone doesn't scream "secret".
     const alpha = "abcdefghijklmnopqrstuvwxyz0123456789";
     const leaked = `sk-ant-api03-${alpha}`;
     const sessionNew = {
@@ -125,7 +117,6 @@ describe("redactSecrets", () => {
     expect(out.keyboard).toBe("cmd+k");
     expect(out.monkey).toBe("business");
     expect(out.hotkey).toBe("ctrl");
-    // `keys` standing alone IS treated as a credential holder
     expect(out.keys).toContain("redacted");
   });
 
@@ -141,13 +132,9 @@ describe("redactSecrets", () => {
 
 import { redactSecretsInText } from "./redact.ts";
 
-// Content-shaped secrets: what a bot's own reply, a tool title, or a
-// permission card can carry. High precision on purpose — a false positive
-// here rewrites real code in the transcript.
 describe("redactSecretsInText", () => {
   it("masks known key prefixes wherever they appear", () => {
-    // fixtures are assembled at runtime so no token-shaped literal sits in
-    // the source — GitHub's push protection (rightly) flags those
+    // Assembled at runtime, so no token-shaped literal sits in the source for GitHub's push protection to flag.
     const alpha = "abcdefghijklmnopqrstuvwxyz0123456789";
     const cases: Array<[string, RegExp]> = [
       [`set ANTHROPIC_API_KEY=sk-ant-api03-${alpha}`, /sk-ant/],
@@ -162,6 +149,11 @@ describe("redactSecretsInText", () => {
       [`groq ${"gsk_"}${alpha}ABCD`, /gsk_/],
       [`meta ${"LLM|"}607358788850350|${alpha}`, /LLM\|6073/],
       [`huggingface ${"hf_"}${alpha}`, /hf_/],
+      [`stripe ${"sk_" + "live_"}${alpha}`, /sk_live_[a-z]/],
+      [`stripe test ${"sk_" + "test_"}${alpha}`, /sk_test_[a-z]/],
+      [`stripe restricted ${"rk_" + "live_"}${alpha}`, /rk_live_[a-z]/],
+      [`webhook secret ${"whsec" + "_"}${alpha}`, /whsec_[a-z]/],
+      [`automation address http://127.0.0.1:8800/hooks/wh_abc/${"whsec" + "_"}${alpha}-_x`, /whsec_[a-z]/],
     ];
     for (const [input, leak] of cases) {
       const out = redactSecretsInText(input);
@@ -232,7 +224,6 @@ describe("redactSecretsInText", () => {
   it("masks the value of a secret-naming flag, in both spellings", () => {
     expect(redactSecretsInText("gh auth login --token abc123")).toBe("gh auth login --token «redacted 6 chars»");
     expect(redactSecretsInText("tool --password=hunter2 --api-key 'k1' --secret s")).toBe("tool --password=«redacted 7 chars» --api-key '«redacted 2 chars»' --secret «redacted 1 chars»");
-    // a flag followed by another flag has no value to mask
     expect(redactSecretsInText("tool --token --verbose")).toBe("tool --token --verbose");
   });
 
@@ -255,7 +246,7 @@ describe("redactSecretsInText", () => {
       "const token = await getToken(); // fetches later",
       "password: (leave blank to keep the current one)",
       "Bearer tokens are sent in the Authorization header",
-      "sk-8", // too short to be a key
+      "sk-8",
     ]) {
       expect(redactSecretsInText(s), s).toBe(s);
     }
@@ -275,5 +266,18 @@ describe("redactSecretsInText", () => {
     const once = redactSecrets(input);
 
     expect(redactSecrets(once)).toEqual(once);
+  });
+});
+
+describe("holdsCredential", () => {
+  it("knows a provider key or a private key block, never a name, a placeholder or code that reads one", () => {
+    for (const text of [
+      '{"apiKey": "sk-ant-api03-0123456789abcdefABCD"}', "GITHUB_TOKEN=ghp_0123456789abcdefghij0123", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n",
+      "aws_access_key_id = AKIAABCDEFGHIJKLMNOP", `stripe.secret = "${"sk_" + "live_"}0123456789abcdefABCD"`,
+    ]) expect(holdsCredential(text), text).toBe(true);
+    for (const text of [
+      "token = os.environ['GITHUB_TOKEN']", "API_KEY=your-key-here", "Authorization: Bearer YOUR_TOKEN_HERE", "Keep credentials out of the repo.",
+      "-----BEGIN PUBLIC KEY-----",
+    ]) expect(holdsCredential(text), text).toBe(false);
   });
 });

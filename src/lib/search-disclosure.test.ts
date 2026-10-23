@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// A tiny hook runtime: state slots that survive "renders", effects that run
-// when their dependencies change. Enough to drive one sidebar row.
+// A tiny hook runtime: state slots that survive renders, and effects that run when their dependencies change.
 const runtime = vi.hoisted(() => ({
   slots: [] as unknown[],
   deps: [] as Array<unknown[] | undefined>,
@@ -27,8 +26,7 @@ vi.mock("react", () => ({
 
 const { forgetSearchDisclosuresForTests, searchMatchesThreads, useSearchDisclosure } = await import("./search-disclosure");
 
-/** One row: render with a query, return [open, set]. Renders twice so an
- * effect's state change is visible, as React would show it. */
+/** Renders twice so an effect's state change is visible, as React would show it. */
 const row = (key: string, initial = false) => (query: string, matches: boolean) => {
   let result!: ReturnType<typeof useSearchDisclosure>;
   for (let pass = 0; pass < 2; pass++) {
@@ -49,7 +47,7 @@ describe("sidebar search disclosure (MOCA-293)", () => {
   it("opens only rows with a matching thread, and clearing puts every row back", () => {
     const writer = row("bot:writer");
     const [, open] = writer("", false);
-    open(true); // the person opened Writer before searching
+    open(true);
     expect(writer("", false)[0]).toBe(true);
     expect(writer("post", true)[0]).toBe(true);
     expect(writer("", false)[0]).toBe(true);
@@ -58,7 +56,6 @@ describe("sidebar search disclosure (MOCA-293)", () => {
     runtime.deps = [];
     const chief = row("bot:chief");
     expect(chief("", false)[0]).toBe(false);
-    // listed by its role, with no matching thread: stays closed
     expect(chief("post", false)[0]).toBe(false);
     expect(chief("", false)[0]).toBe(false);
 
@@ -67,14 +64,12 @@ describe("sidebar search disclosure (MOCA-293)", () => {
     const brand = row("bot:brand");
     expect(brand("", false)[0]).toBe(false);
     expect(brand("post", true)[0]).toBe(true);
-    // clearing used to leave it open with every thread showing
     expect(brand("", false)[0]).toBe(false);
   });
 
   it("keeps a row's own state across the remount a search causes", () => {
     const first = row("bot:cosmo");
     first("", false)[1](true);
-    // Cosmo does not match, leaves the list, and comes back as a new row
     runtime.slots = [];
     runtime.deps = [];
     expect(row("bot:cosmo")("", false)[0]).toBe(true);

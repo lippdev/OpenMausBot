@@ -1,33 +1,18 @@
-// The OpenRouter models Settings offers for the decision model: OpenRouter's
-// decisions models, the ones whose output modality is `decisions`.
-//
-// A short curated list, always available, and when OpenRouter's public
-// /models?output_modalities=decisions answers (no key needed) the rest of
-// that catalog. Offline or on any odd answer the curated list stands alone.
-// Saving a model does not check it against this list: an id OpenRouter
-// added since still works, and so does a chat model saved by hand
-// (`decider.openrouterApi: "chat"`), which this list never offers.
 import { OPENROUTER_MODEL_ID, OPENROUTER_MODEL_ID_MAX } from "./config.ts";
 import { OPENROUTER_DEFAULT_MODEL, openrouterEndpoint } from "./openrouter.ts";
 
 export interface OpenRouterModel {
   id: string;
   name: string;
-  /** `recommended` is the curated list, `more` what else OpenRouter offers. */
   group: "recommended" | "more";
-  /** Always the Decisions API: the list holds no chat models. */
   api: "decisions";
 }
 
 export interface OpenRouterModelList {
-  /** `builtin`: OpenRouter did not answer, so only the curated list. */
   source: "openrouter" | "builtin";
   models: OpenRouterModel[];
 }
 
-/** The decisions models the picker leads with, in order, by use on
- * openrouter.ai/rankings/decisions. The default comes first. A model shows
- * only while the catalog still lists it, under the catalog's name. */
 export const OPENROUTER_DECIDER_MODELS: ReadonlyArray<{ id: string; name: string }> = [
   { id: OPENROUTER_DEFAULT_MODEL, name: "TypeSafe: Jev 1.13" },
   { id: "perplexity/pplx-decider-v1.1-27b", name: "Perplexity: Decider V1.1 27B" },
@@ -53,10 +38,7 @@ const builtin = (): OpenRouterModelList => ({
   models: OPENROUTER_DECIDER_MODELS.map((model) => ({ ...model, group: "recommended" as const, api: "decisions" as const })),
 });
 
-/** The decisions models in one `/models?output_modalities=decisions` body. They
- * take no JSON schema (`supported_parameters` is empty), so the only test is
- * that Settings can save the id. `:free` variants stay: they are the same
- * model. Null when the body is not a model list at all. */
+/** Decisions models take no JSON schema (`supported_parameters` is empty), so the only test is that Settings can save the id. */
 export function decisionsModels(body: unknown): Map<string, string> | null {
   if (!isRecord(body) || !Array.isArray(body.data)) return null;
   const found = new Map<string, string>();
@@ -70,8 +52,6 @@ export function decisionsModels(body: unknown): Map<string, string> | null {
   return found;
 }
 
-/** The curated models OpenRouter still lists (names refreshed), in the
- * curated order, then the rest by name. */
 export function mergeModels(decisions: Map<string, string>): OpenRouterModelList {
   const recommended = OPENROUTER_DECIDER_MODELS
     .filter((model) => decisions.has(model.id))
@@ -86,13 +66,11 @@ export function mergeModels(decisions: Map<string, string>): OpenRouterModelList
 }
 
 export interface OpenRouterModelCatalogDeps {
-  /** Tests pass a mock; production uses the global fetch. */
   fetch?: typeof fetch;
   now?: () => number;
 }
 
-/** A cached loader: an hour after an answer, a minute after a failure. Never
- * throws and never sends a key. */
+/** Cached an hour after an answer, a minute after a failure. Never throws and never sends a key. */
 export function createOpenRouterModelCatalog(deps: OpenRouterModelCatalogDeps = {}) {
   const fetchImpl = deps.fetch ?? fetch;
   const now = deps.now ?? (() => Date.now());

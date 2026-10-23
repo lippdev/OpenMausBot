@@ -7,16 +7,13 @@ import { appPermissionHandlers } from "./app-permissions.mjs";
 const require = createRequire(import.meta.url);
 const environments = require("./environments.cjs");
 
-// A Live call on a self-hosted server (#2424): the active saved server hears
-// the microphone only after the person allowed it, asked on its first request.
 const LOCAL = "http://127.0.0.1:48993";
 const VPS = "https://viernes.tail1.ts.net:9444";
 const OTHER = "https://other.tail1.ts.net:9444";
 const AUDIO = { isMainFrame: true, mediaTypes: ["audio"] };
 const mainSource = readFileSync(new URL("./main.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
-// The real appPermissionHandlers fed by the real environments authority, with
-// main's dialog replaced by `ctx.answer` ("allow", "deny" or null for no dialog).
+// The real handlers and environments authority, with main's dialog replaced by `ctx.answer` ("allow", "deny" or null).
 function harness(envState) {
   const mainContents = { getURL: () => "" };
   const ctx = { state: envState, main: mainContents, answer: null, asked: [], cloud: null, restoring: null };
@@ -106,7 +103,6 @@ test("the answer belongs to one server: no carry-over on a switch, and forgettin
   assert.equal(await h.request(`${LOCAL}/`), true, "Local keeps its microphone");
   h.ctx.state = environments.withActive(h.ctx.state, "vps");
   assert.equal(await h.request(`${VPS}/`), true, "back on VPS: still allowed");
-  // Forget, then pair the same address again: asked afresh.
   h.ctx.state = environments.withoutEnvironment(h.ctx.state, "vps");
   assert.equal(await h.request(`${VPS}/`), false, "forgotten");
   h.ctx.state = environments.withActive(environments.withEnvironment(h.ctx.state, { origin: VPS }, () => "vps2"), "vps2");
@@ -132,13 +128,11 @@ test("the Cloud opened as the active server waits for its sign-in to restore ins
     assert.deepEqual(h.ctx.asked, [], `${answer}: no dialog for the person's own Cloud`);
     assert.equal(environments.activeEnvironment(h.ctx.state).microphone, undefined, "nothing remembered on the record");
   }
-  // The sign-in did not come back: it is just a saved server now, so asked.
   const h = harness(cloudActive());
   h.ctx.answer = "allow";
   restoreTo(h, null);
   assert.equal(await h.request(`${CLOUD}/chat`), true, "allowed by the person after the restore failed");
   assert.deepEqual(h.ctx.asked, [CLOUD]);
-  // Another saved server asking during the restore: waits, then asked as before.
   const v = harness(viewing("vps"));
   v.ctx.answer = "deny";
   restoreTo(v, "https://omb-u-0123456789ab.fly.dev");

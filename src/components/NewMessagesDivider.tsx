@@ -2,9 +2,6 @@ import { t } from "@/lib/i18n";
 import { UNREAD_DIVIDER_FADE_MS } from "@/lib/unread-divider";
 import { cn } from "@/lib/cn";
 
-/** The line above the first message that came in while the person was away.
- * Fading, it folds its height and the transcript gap with it, so the rows
- * around it close up without a jump. */
 export function NewMessagesDivider({ fading }: { fading: boolean }) {
   return (
     <div

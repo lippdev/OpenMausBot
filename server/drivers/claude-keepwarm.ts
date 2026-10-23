@@ -1,5 +1,4 @@
-// The Claude driver's half of prompt-cache keep-warm (server/cache-keepwarm.ts):
-// one tool-less request forked from a thread's live Claude Code session.
+// The Claude driver's half of prompt-cache keep-warm: one tool-less request forked from a live session.
 //
 // Design ported from Cache Tax (MIT, Copyright (c) 2026 Karan Bansal,
 // https://github.com/karanb192/claude-code-mods): after an idle stretch it
@@ -7,22 +6,10 @@
 // so the provider re-reads the cached prefix (and refreshes its lifetime)
 // instead of the next real message re-writing all of it.
 //
-// A cache hit needs the request's prefix — tools, system prompt, then the
-// messages — to be byte-identical to what the session last sent. So the ping
-// relaunches the CLI with the exact launch contract of the live process
-// (same flags, same model and effort, same system prompt text, same MCP
-// servers, same environment), plus:
-//   --resume <session> --fork-session  read the session, answer in a copy;
-//   --no-session-persistence           the copy is never written to disk, so
-//                                      the thread's own session and its
-//                                      transcript are untouched;
-//   --output-format json, prompt on stdin, one result with the usage.
-// Nothing the ping says reaches the harness's event bus or the chat.
-//
-// Tools stay declared (removing any would change the prefix) but none can
-// run: a PreToolUse hook denies every call, the harness's permission proxy
-// points at a socket nobody listens on (it denies), and the harness's own
-// hooks (memory capture, skill review, activity) are not registered.
+// A cache hit needs a byte-identical prefix (tools, system prompt, messages), so the ping relaunches
+// with the live process's exact launch contract plus `--resume <session> --fork-session` and
+// `--no-session-persistence` (the copy is never written). Tools stay declared but none can run: a
+// PreToolUse hook denies every call and the permission proxy points at a dead socket.
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,31 +18,22 @@ import type { CacheWarmPingResult } from "../contracts.ts";
 import { killCliTree, spawnCli } from "../procs.ts";
 import { USAGE_LIMIT } from "./retry.ts";
 
-/** The fixed prompt of every ping. Short, and asks for one word back. */
 export const KEEP_WARM_PROMPT = "Reply with the single word: warm";
 export const KEEP_WARM_TIMEOUT_MS = 120_000;
 
-/** What a live CLI process was launched with, kept in memory only (it holds
- * the same credentials the turn already held) for the life of that process. */
+/** A live process's launch contract, kept in memory only (it holds the turn's credentials). */
 export interface KeepWarmContract {
   args: readonly string[];
   env: NodeJS.ProcessEnv;
   cwd: string;
-  /** --append-system-prompt-file's contents, or null when there was none */
   system: string | null;
-  /** the MCP servers of --mcp-config, as written */
   mcpServers: Record<string, unknown> | null;
-  /** the --settings object, without the harness's hooks */
   settings: Record<string, unknown> | null;
 }
 
-// Flags whose value is a per-launch file, a stream protocol choice or the
-// session to run: the ping supplies its own.
 const VALUE_FLAGS = new Set(["--output-format", "--input-format", "--mcp-config", "--settings", "--append-system-prompt-file", "--resume", "--session-id"]);
 const BARE_FLAGS = new Set(["--verbose", "--include-partial-messages", "--replay-user-messages"]);
 
-/** The ping's argv from the live process's launch argv. Everything that
- * shapes the request prefix is kept in order; the rest is replaced. */
 export function keepWarmArgs(
   launchArgs: readonly string[],
   files: { sessionId: string; mcpConfigPath: string | null; settingsPath: string | null; systemPromptPath: string | null },
@@ -76,9 +54,6 @@ export function keepWarmArgs(
   return kept;
 }
 
-/** The launch's MCP servers with the harness's permission proxy pointed at
- * `deadSocket`, where nobody answers: its tool list is unchanged (so is the
- * prefix) and any approval it is asked for is denied. */
 export function keepWarmMcpServers(mcpServers: Record<string, unknown>, deadSocket: string): Record<string, unknown> {
   const out: Record<string, unknown> = { ...mcpServers };
   const ogb = out.ogb as { args?: unknown } | undefined;
@@ -88,8 +63,7 @@ export function keepWarmMcpServers(mcpServers: Record<string, unknown>, deadSock
   return out;
 }
 
-/** The launch's settings without the harness's hooks, plus a PreToolUse hook
- * that denies every tool call. Hooks never enter the request prefix. */
+/** Hooks never enter the request prefix. */
 export function keepWarmSettings(settings: Record<string, unknown> | null, denyCommand: string): Record<string, unknown> {
   const { hooks: _harnessHooks, ...rest } = settings ?? {};
   return {
@@ -102,15 +76,13 @@ export const KEEP_WARM_DENY_HOOK = `process.stdout.write(JSON.stringify({ hookSp
 
 const count = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 
-/** Reads the CLI's `--output-format json` result into a ping result. */
 export function parseKeepWarmResult(stdout: string, stderr: string, code: number | null): CacheWarmPingResult {
   let frame: Record<string, unknown> | null = null;
   try {
     const parsed = JSON.parse(stdout.trim());
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) frame = parsed as Record<string, unknown>;
   } catch {
-    // not JSON: the CLI failed before it could answer (an unknown flag, a
-    // session it cannot resume); its own words are in stderr
+    // Not JSON: the CLI failed before answering (an unknown flag, a session it cannot resume).
   }
   if (!frame || frame.type !== "result") {
     const said = (stderr.trim() || stdout.trim()).split("\n").pop()?.slice(0, 300) ?? "";
@@ -135,9 +107,7 @@ export function parseKeepWarmResult(stdout: string, stderr: string, code: number
   };
 }
 
-/** Runs one ping. Never throws: a failure is a result with its reason. The
- * private files (MCP config with credentials, settings, system prompt) live
- * in a 0700 temp dir that is removed when the process ends. */
+/** Never throws. The credentialed MCP config, settings and prompt live in a 0700 temp dir removed at exit. */
 export function runKeepWarmPing(opts: {
   cli: string;
   contract: KeepWarmContract;
@@ -152,7 +122,7 @@ export function runKeepWarmPing(opts: {
   } catch (error) {
     return Promise.resolve({ ok: false, reason: `the ping could not start: ${(error as Error).message}` });
   }
-  const cleanup = () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* temp dir */ } };
+  const cleanup = () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} };
   let args: string[];
   const env: NodeJS.ProcessEnv = { ...contract.env };
   try {

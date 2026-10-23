@@ -17,13 +17,11 @@ describe("context warning", () => {
     const history = [line("user", "text"), line("bot", "text")];
     expect(threadContextWarning(usage(157_000, 200_000), history)).toBeNull();
     expect(threadContextWarning(usage(180_000, 200_000), history)).toEqual({ percent: 90 });
-    // No window means no percentage, so no warning on a guess.
     expect(threadContextWarning(usage(180_000), history)).toBeNull();
     expect(threadContextWarning(undefined, history)).toBeNull();
     const compacted = [...history, line("bot", "compaction")];
     expect(compactedSinceReading(compacted)).toBe(true);
     expect(threadContextWarning(usage(180_000, 200_000), compacted)).toBeNull();
-    // A reply after the compaction carries a fresh reading again.
     expect(compactedSinceReading([...compacted, line("user", "text"), line("bot", "activity"), line("bot", "text")])).toBe(false);
   });
 

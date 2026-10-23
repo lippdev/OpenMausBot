@@ -8,49 +8,41 @@ import { describe, expect, it } from "vitest";
 import en from "./en.json";
 import { locales } from "./index";
 
-// One name per thing, in every word a person reads:
-// - MausBot Cloud: the paid plan, and its sign-in in Settings.
-// - My Cloud: the person's always-on home in the cloud.
-// - Cloud computer: a desktop in the cloud that a bot uses.
-// - This computer: the device the app runs on.
-// - Plan page: the web page with the plan, payments and use.
-// "Local VM" keeps its name. "Cloud" alone never names a Works on choice,
-// "OMB" is never shown, and "Boat" names only the provider behind a person's
-// own key (Settings → API keys). The app itself is still OpenMausBot.
 const RETIRED: ReadonlyArray<readonly [string, RegExp, string]> = [
   ["OMB Cloud", /OMB Cloud/i, "MausBot Cloud"],
   ["OpenMausBot Cloud", /OpenMausBot Cloud/i, "MausBot Cloud"],
-  // Pro is one of its plans, never the product ("OpenMausBot Pro" too).
   ["MausBot Pro", /MausBot Pro\b/, "MausBot Cloud"],
   // \b before "_" fails, so environment names such as OMB_PUBLIC_IPV4 pass.
   ["OMB", /\bOMB\b/, "OpenMausBot"],
-  ["Cloud box", /Cloud box/i, "Cloud computer"],
-  ["Hosted desktop", /Hosted desktop/i, "Cloud computer"],
-  ["Cloud VM", /Cloud VM/i, "Cloud computer"],
-  ["Boat cloud runner", /Boat cloud runner/i, "Cloud computer"],
+  ["Cloud box", /Cloud box/i, "cloud desktop"],
+  ["Hosted desktop", /Hosted desktop/i, "cloud desktop"],
+  ["Cloud VM", /Cloud VM/i, "cloud desktop"],
+  ["Boat cloud runner", /Boat cloud runner/i, "cloud desktop"],
   ["Cloud dashboard", /Cloud dashboard/i, "Plan page"],
-  ["Connect to my Cloud", /Connect to my Cloud/i, "Open My Cloud"],
-  ["your Cloud", /\b[Yy]our Cloud\b(?! plan| account| sign-in| subscription)/, "My Cloud"],
-  ["my Cloud", /\bmy Cloud\b/, "My Cloud"],
+  ["Connect to my Cloud", /Connect to my Cloud/i, "Open the Cloud"],
+  ["your Cloud", /\b[Yy]our Cloud\b(?! plan| account| sign-in| subscription)/, "the Cloud"],
+  ["my Cloud", /\bmy Cloud\b/, "the Cloud"],
   ["Local (this computer)", /Local \(this computer\)/, "This computer"],
-  ["Cloud as a Works on choice", /\b(?:[Cc]hoose|[Ss]elect) Cloud\b(?! computer)|\bAuto, Cloud\b(?! computer)|, Cloud, /, "Cloud computer"],
+  ["Cloud as a Works on choice", /\b(?:[Cc]hoose|[Ss]elect) Cloud\b(?! computer| desktop)|\bAuto, Cloud\b(?! computer| desktop)|, Cloud, /, "Cloud desktop"],
   ["T3", /\bT3\b/, "no other app's name"],
 ];
 
-/** "Boat" inside these phrases names the provider of a person's own key. */
 const OWN_KEY = /Boat (?:API key|account|key|token|plan|provider|credentials|setup|is not configured|is not connected|is a paid service)|boat\.dev|\b(?:Connect|Configure) Boat\b/g;
 const BOAT = /\bBoats?\b/;
 
-/** What a piece of copy still says that the vocabulary retired. */
 function retiredIn(text: string, boat: RegExp = BOAT): string[] {
   const found = RETIRED.filter(([, pattern]) => pattern.test(text)).map(([word, , use]) => `"${word}" (say ${use})`);
-  if (boat.test(text.replace(OWN_KEY, ""))) found.push(`"Boat" (say cloud computer; Boat only names a person's own key)`);
+  if (boat.test(text.replace(OWN_KEY, ""))) found.push(`"Boat" (say cloud desktop; Boat only names a person's own key)`);
   return found;
 }
 
-// Keys another branch rewrites with its own wording go here until it lands.
 const PENDING_KEY_PREFIXES: string[] = [];
-const EN_ALLOWED: Record<string, string> = {};
+const EN_ALLOWED: Record<string, string> = {
+  "botAccess.cloud.boat": "the own-key provider picker names its two providers, Boat and a VPS",
+  "botAccess.cloud.hostedDescription": "the own-key provider picker names its two providers, Boat and a VPS",
+  "botAccess.cloud.hostedBackendDescription": "the own-key provider picker names its two providers, Boat and a VPS",
+  "botAccess.cloud.vpsAutoDescription": "the own-key provider picker's VPS line names its Cloud choice",
+};
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SCANNED = ["src", "server", "electron", "shared"];
@@ -58,16 +50,11 @@ const SCANNED = ["src", "server", "electron", "shared"];
 const SKIPPED_DIRS = new Set(["node_modules", "resources", "testing", "dist"]);
 const isSource = (name: string) => /\.(?:ts|tsx|mjs|cjs|js)$/.test(name) && !/\.test\.|\.node-test\.|\.d\.ts$/.test(name);
 
-/** Hard-coded strings that keep a retired word on purpose. A file with no
- * snippet keeps it everywhere; otherwise only literals containing a snippet. */
+/** No snippet keeps the word file-wide; otherwise only literals containing the snippet. */
 const ALLOWED: ReadonlyArray<{ file: string; snippet?: string; why: string }> = [
-  { file: "src/components/CloudBackendPicker.tsx", why: "the own-key provider picker names its two providers, Boat and a VPS" },
   { file: "shared/credential-request.ts", snippet: "when Boat is selected", why: "the card that asks for a person's own Boat key" },
   { file: "server/boat-create-idempotency.ts", snippet: "unnamed Boat", why: "own-key repair: boat.dev's own name for a machine" },
-  { file: "server/request-auth.ts", snippet: "OMB Cloud home", why: "a request-trust reason and log warning, never shown in the app" },
-  { file: "electron/cloud-account.mjs", snippet: "[cloud] OMB Cloud sent plan", why: "a log line" },
   { file: "server/workspace-backup.ts", snippet: "OMB-WORKSPACE-1", why: "a backup file's format marker" },
-  { file: "electron/cloud-move.mjs", snippet: "OMB-WORKSPACE-1", why: "a backup file's format marker" },
   { file: "electron/company-backups.mjs", snippet: "OMB-WORKSPACE-1", why: "a backup file's format marker" },
 ];
 
@@ -80,8 +67,6 @@ function* sources(dir: string): Generator<string> {
   }
 }
 
-/** Every string a source file could show: literals, template text and JSX
- * text, never comments or identifiers. */
 function literals(path: string): Array<{ line: number; text: string }> {
   const kind = path.endsWith(".tsx") ? ts.ScriptKind.TSX : /\.(?:mjs|cjs|js)$/.test(path) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
   const file = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, false, kind);
@@ -96,7 +81,6 @@ function literals(path: string): Array<{ line: number; text: string }> {
   return found;
 }
 
-/** Every hard-coded string that says a retired word, before the allow-list. */
 function hardcodedFindings(): Array<{ file: string; line: number; text: string; what: string[] }> {
   const found: Array<{ file: string; line: number; text: string; what: string[] }> = [];
   for (const top of SCANNED) {
@@ -115,7 +99,7 @@ const allows = (entry: (typeof ALLOWED)[number], finding: { file: string; text: 
   entry.file === finding.file && (entry.snippet === undefined || finding.text.includes(entry.snippet));
 
 describe("one name per thing", () => {
-  it("English copy uses MausBot Cloud, My Cloud, Cloud computer, This computer and Plan page", () => {
+  it("English copy uses MausBot Cloud, the Cloud, Cloud desktop, This computer and Plan page", () => {
     const offending = Object.entries(en as Record<string, string>)
       .filter(([key]) => !PENDING_KEY_PREFIXES.some((prefix) => key.startsWith(prefix)) && !Object.hasOwn(EN_ALLOWED, key))
       // English keys are UI copy, so lower-case "boat" counts too.
@@ -123,8 +107,6 @@ describe("one name per thing", () => {
     expect(offending).toEqual([]);
   });
 
-  // The product's name is never translated: a pack says "MausBot Cloud" where
-  // the English does, and never an old name for it.
   const productNames = RETIRED.filter(([, , use]) => use === "MausBot Cloud");
   it("translations never show OMB, T3 or an old name for MausBot Cloud, keep its name as it is, and say Boat only where the English does", () => {
     const offending = Object.entries(locales).filter(([code]) => code !== "en").flatMap(([code, pack]) =>
@@ -143,7 +125,6 @@ describe("one name per thing", () => {
       .filter((finding) => !ALLOWED.some((entry) => allows(entry, finding)))
       .flatMap(({ file, line, text, what }) => what.map((one) => `${file}:${line}: ${one}: ${JSON.stringify(text.trim().slice(0, 120))}`));
     expect(offending).toEqual([]);
-    // An entry that no longer matches anything has outlived its reason.
     const stale = ALLOWED.filter((entry) => !findings.some((finding) => allows(entry, finding)))
       .map((entry) => `${entry.file}${entry.snippet ? ` (${entry.snippet})` : ""}`);
     expect(stale).toEqual([]);
@@ -151,11 +132,9 @@ describe("one name per thing", () => {
     expect(staleKeys).toEqual([]);
   });
 
-  // The public guide (apps/docs, published from main) calls the person's
-  // Cloud and the plan what the app calls them. Only those names are checked
-  // there: its Boat and Works on pages wait for their own rewrite.
-  it("the public docs name My Cloud and MausBot Cloud as the app does", () => {
-    const cloudNames = RETIRED.filter(([, , use]) => /My Cloud|MausBot Cloud/.test(use));
+  it("the public docs name MausBot Cloud and the Cloud as the app does", () => {
+    const names = new Set(["OMB Cloud", "OpenMausBot Cloud", "MausBot Pro", "Connect to my Cloud", "your Cloud", "my Cloud"]);
+    const cloudNames = RETIRED.filter(([word]) => names.has(word));
     const pages = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
       const path = join(dir, name);
       return statSync(path).isDirectory() ? pages(path) : /\.mdx?$/.test(name) ? [path] : [];
@@ -171,7 +150,6 @@ describe("one name per thing", () => {
     const e = en as Record<string, string>;
     const source = (file: string) => readFileSync(join(ROOT, file), "utf8");
     const settings = `Settings → ${e["settings.section.cloudAccount"]}`;
-    // The menus' own names for the two places: the Server menu and the sidebar switcher.
     const myCloud = /CLOUD_HOME_NAME = "([^"]+)"/.exec(source("electron/cloud-home.mjs"))?.[1];
     const thisComputer = /id: "workspace-local", label: "([^"]+)"/.exec(source("electron/environments.cjs"))?.[1];
     const serverMenuLocal = /\{ label: "([^"]+)", type: "radio", checked: !active/.exec(source("electron/menu.mjs"))?.[1];
@@ -180,8 +158,11 @@ describe("one name per thing", () => {
       ["cloudHome.connectHelp", [e["place.local"]!]],
       ["cloudPhone.step1", [myCloud!]],
       ["lending.status.connectFirst", [e["cloudHome.connect"]!]],
-      ["computer.worksOnHintCloudHome", [e["lending.title"]!, settings]],
-      ["cloudAccount.onCloudSignIn", [e["cloudAccount.signInAgain"]!, settings]],
+      ["computer.worksOnHintCloudHome", [e["lending.title.computer"]!, settings]],
+      ["lending.cloudSide.empty", [e["lending.title.computer"]!, settings]],
+      ["browser.passkey.lendPc", [e["lending.title.pc"]!, settings]],
+      ["lending.explain", [e["lending.more"]!]],
+      ["cloudAccount.onCloudSignIn", [e["cloudAccount.signInAgain"]!]],
       ["cloudAccount.storageFailed", [e["cloudAccount.signOut"]!]],
       ["cloudAccount.codeExpired", [e["cloudAccount.signIn"]!]],
       ["computer.routines.offWarning", [e["routines.runsOn.boat"]!]],
@@ -200,7 +181,7 @@ describe("one name per thing", () => {
     ]) expect(retiredIn(bad), bad).not.toEqual([]);
     for (const good of [
       "Sign in to MausBot Cloud", "Pro active · verified by MausBot Cloud", "Restart OpenMausBot", "locked by another OpenMausBot process",
-      "set OMB_PUBLIC_IPV4", "Open My Cloud", "Choose Cloud computer to wake",
+      "set OMB_PUBLIC_IPV4", "Open My Cloud", "Open the Cloud", "Choose Cloud desktop to wake", "Auto, Cloud desktop or Browser",
       "Included with your Cloud plan", "Add a Boat API key in Settings → API keys", "Connect Boat", "Check boat.dev",
       "Local VM", "Open your Plan page",
     ]) expect(retiredIn(good), good).toEqual([]);

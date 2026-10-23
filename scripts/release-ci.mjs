@@ -1,31 +1,12 @@
-// The release's CI gate (release.yml, job `ci`): ship only a commit whose
-// code passed CI (ci.yml's gate job `CI`, with the vitest shards really run).
+// The release's CI gate: ship only a commit whose code passed CI with every
+// vitest job run, on the commit itself, on a commit with the same tree, or (for
+// a version-only bump) on its parent.
 //
-// Proof is accepted in this order (docs/ci.md, "Main and releases"):
-//   (a) a finished CI run on the release commit itself;
-//   (b) a finished CI run on any commit with the same git tree (the all-OS
-//       manual run prepare-release.yml starts on the bump branch, when main
-//       did not move before the merge);
-//   (c) when the release commit only changes package.json's "version" from
-//       its parent, the parent's proof by (a) or (b). A parent run that is
-//       still going is waited for; a red or missing one never counts.
-// A run counts only when its `CI` job passed AND every vitest job ran and
-// passed, so a docs-only or version-only run (vitest skipped) is no proof.
-//
-// Main keeps at most one CI run going and one waiting, and each merge
-// replaces the waiting one, so the release commit's own push run can be
-// skipped. When that happens (or no run exists), this starts CI on the commit
-// in its own lane: a `release-ci/v<version>` branch at the pinned commit,
-// whose concurrency group no merge on main can touch. The branch is deleted
-// at the end.
-//
-// A run on the release commit that failed only because some jobs never got a
-// runner (macOS "failed to be acquired": no step ever started) is not a test
-// verdict. The release lane's own run has its failed jobs re-run once and the
-// wait goes on. Any other such run (main's push run) is never re-run in place:
-// a re-run joins main's concurrency group, where it would cancel the newest
-// merge's waiting run (and re-run main-only deploys from an older tree). It
-// counts as no run, so CI starts in the lane instead.
+// Main's concurrency group keeps one run going and one waiting, so the release
+// commit's own push run can be skipped; CI then starts on a
+// `release-ci/v<version>` branch no merge on main can touch. A main run is never
+// re-run in place: the re-run would join main's group and cancel the newest
+// merge's waiting run.
 import { pathToFileURL } from "node:url";
 import { versionOnlyPackageJson } from "./ci-scope.mjs";
 
@@ -113,7 +94,6 @@ export async function waitForReleaseCi({ api, sha, version, sleep = (ms) => new 
     return null;
   };
 
-  // What the release commit is: its tree, and whether it only bumps the version.
   let tree = null;
   let parent = null;
   try {
@@ -132,7 +112,6 @@ export async function waitForReleaseCi({ api, sha, version, sleep = (ms) => new 
 
   try {
     while (now() - started < maxWaitMs) {
-      // One read of each list per poll.
       const cache = new Map();
       const memo = (key, read) => (cache.has(key) ? cache.get(key) : cache.set(key, read()).get(key));
       const runsFor = (target) => memo(target, async () => releaseRuns(await api.runsForCommit(target)));
@@ -177,8 +156,7 @@ export async function waitForReleaseCi({ api, sha, version, sleep = (ms) => new 
           log(laneRun ? `Release-lane CI run ${laneRun.id} is ${laneRun.status}; waiting.` : "Waiting for the release-lane CI run to appear.");
         }
       } else {
-        // Red is red: a failed gate on this commit stops the release rather
-        // than being retried until it passes.
+        // Red is red: a failed gate stops the release rather than being retried.
         let rerunning = false;
         for (const run of runs.filter((run) => run.status === "completed")) {
           const { wait, result } = await settle(run);
@@ -193,9 +171,6 @@ export async function waitForReleaseCi({ api, sha, version, sleep = (ms) => new 
         } else if (parentLive) {
           log(`CI run ${parentLive.id} on the parent ${parent.sha} is ${parentLive.status}; waiting.`);
         } else {
-          // No run, only cancelled/skipped ones (a newer merge replaced it),
-          // a main run that lost a runner, or only a run that skipped the
-          // tests and no green parent.
           log(`No usable finished or running CI for ${sha}; starting it on ${lane}.`);
           await api.pointBranch(lane, sha);
           await api.dispatchCi(lane);
@@ -211,9 +186,7 @@ export async function waitForReleaseCi({ api, sha, version, sleep = (ms) => new 
 }
 
 /** GitHub REST calls for the release job's GITHUB_TOKEN. A 5xx or a dropped
- * connection is GitHub having a moment, not a verdict: it is tried again
- * after each of `retryDelaysMs` before the release gives up. (v0.1.99's gate
- * died on one HTTP 500 from the CI dispatch.) */
+ * connection is retried after each of `retryDelaysMs`. */
 export function githubApi({ token, repository, apiUrl = "https://api.github.com", fetchImpl = fetch,
   retryDelaysMs = [5_000, 15_000, 45_000], sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   const call = async (method, path, body) => {

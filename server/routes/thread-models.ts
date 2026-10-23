@@ -1,11 +1,5 @@
-// "Switch them too": a bot's threads that run on a model of their own,
-// different from the bot's, follow the bot's model again. A one-time action
-// beside the bot's model setting, not a setting. Admin scope by default
-// (server/request-auth.ts), like the bot's model itself.
-//
-// POST /api/bots/:id/threads/follow-model, body {} for every such thread, or
-// { threadIds } for exactly those, each one of this bot's. A thread with a
-// turn running keeps its model until it settles; the reply counts it.
+// POST /api/bots/:id/threads/follow-model, body {} for every thread with its own model, or { threadIds } for exactly
+// those. A thread with a turn running keeps its model until it settles; the reply counts it.
 import type { ModelSelection } from "../contracts.ts";
 import type { RequestAuth } from "../request-auth.ts";
 import { sameModelSelection } from "../../shared/thread-model.ts";
@@ -20,13 +14,10 @@ export interface ThreadModelRouteDeps {
     approvalGrant?: unknown;
     tasks?: ReadonlyArray<{ threadId: string; modelSelection?: ModelSelection }>;
   } | null | undefined;
-  /** A turn is running in this thread. */
   busy(botId: string, threadId: string): boolean;
-  /** Clears these threads' own model in one write (Store.followBotModel). */
   follow(botId: string, threadIds: string[]): string[];
-  /** Whoever may change this bot's model: on a Cloud home, only its owner. */
+  /** On a Cloud home, only its owner. */
   mayChangeModel(auth: RequestAuth): boolean;
-  /** The bot as the reply carries it. */
   reply(botId: string): unknown;
 }
 

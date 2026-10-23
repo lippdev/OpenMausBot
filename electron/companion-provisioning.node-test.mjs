@@ -94,7 +94,6 @@ test("endpoint failure retains the installation across immediate Retry and resta
         assert.equal(installationCreated, true);
         return reply(response, 429, { error: "credential_rotation_rate_limited" });
       case "POST /v1/installations/self/endpoint":
-        // The release rides along with every endpoint request.
         assert.deepEqual(body, { appVersion: identity.appVersion });
         assert.equal(installationCreated, true);
         return endpointReady
@@ -226,7 +225,6 @@ test("a reclaimed endpoint is re-provisioned at restart and a full provider retr
     calls.push(key);
     let rawBody = "";
     for await (const chunk of request) rawBody += chunk;
-    // Only the endpoint request carries a body: the app's release.
     assert.deepEqual(
       rawBody ? JSON.parse(rawBody) : null,
       key === "POST /v1/installations/self/endpoint" ? { appVersion: identity.appVersion } : null,
@@ -241,7 +239,6 @@ test("a reclaimed endpoint is re-provisioned at restart and a full provider retr
       case "GET /v1/installations/self":
         return reply(response, 200, { installation, credentialExpiresAt });
       case "GET /v1/installations/self/endpoint":
-        // The idle tunnel was reclaimed while this computer was away.
         return reply(response, 200, { endpoint: null });
       case "POST /v1/installations/self/endpoint":
         return capacityAvailable
@@ -293,7 +290,6 @@ test("a reclaimed endpoint is re-provisioned at restart and a full provider retr
     assert.equal(full.status, "error");
     assert.match(full.message, /^Secure HTTPS links are temporarily full\. Try again in 10 minutes, or pair on this Wi-Fi or with Tailscale\./);
     assert.match(full.message, new RegExp(`Reference: ${REQUEST_ID}`));
-    // The old connector token is kept until a replacement exists.
     assert.equal(document[MANAGED_COMPANION_TOKEN_FIELD], OLD_CONNECTOR_TOKEN);
     const retry = scheduled.find((timer) => timer.milliseconds === 600_000);
     assert.ok(retry, "the server's Retry-After sets the automatic retry delay");
@@ -326,9 +322,7 @@ test("on demand, an address nothing needs is given back and comes back the same 
   const calls = [];
   const routeFailures = [];
   let installationCreated = false;
-  // Like the control plane: one hostname per installation for life. A DELETE
-  // removes the tunnel and leaves the row "deleted"; the next POST makes a
-  // new tunnel behind the same hostname.
+  // Like the control plane: one hostname per installation for life; a DELETE leaves the row "deleted" and the next POST reuses the hostname.
   let row = null;
   let tunnels = 0;
   let baseURL;
@@ -372,8 +366,6 @@ test("on demand, an address nothing needs is given back and comes back the same 
         assert.equal(installationCreated, true);
         return reply(response, 200, { installation, credentialExpiresAt });
       case "POST /v1/installations/self/endpoint":
-        // The release rides along here too, including when an address that
-        // was given back is asked for again.
         assert.deepEqual(body, { appVersion: identity.appVersion });
         tunnels += 1;
         row = { url: ENDPOINT, status: "ready" };
@@ -430,7 +422,6 @@ test("on demand, an address nothing needs is given back and comes back the same 
     });
     const count = (key) => calls.filter((call) => call === key).length;
 
-    // 1. Signing in creates the address H.
     const first = launch();
     await first.requestCode(EMAIL);
     assert.deepEqual(await first.verifyCode(EMAIL, "12345678"), {
@@ -439,8 +430,6 @@ test("on demand, an address nothing needs is given back and comes back the same 
     assert.equal(document[MANAGED_COMPANION_ENDPOINT_FIELD], ENDPOINT);
     assert.equal(count("POST /v1/installations/self/endpoint"), 1);
 
-    // 2. Nothing is paired. A later launch plans the release; the one after
-    // the grace period gives the address back, connector first.
     clock += 2 * HOUR_MS;
     await launch().restore();
     assert.equal(document[MANAGED_COMPANION_RELEASE_AT_FIELD], clock + 2.5 * HOUR_MS);
@@ -460,8 +449,6 @@ test("on demand, an address nothing needs is given back and comes back the same 
     const client = createControlPlaneClient({ baseURL, timeoutMs: 2_000 });
     assert.equal(await client.getEndpoint(INSTALLATION_CREDENTIAL), null);
 
-    // 3. The next pairing asks again and gets the same address, with a new
-    // connector, and no sign-in or new installation.
     const pairing = launch();
     await pairing.restore();
     const mark = calls.length;
@@ -477,14 +464,12 @@ test("on demand, an address nothing needs is given back and comes back the same 
       `fixture-connector-2.${"d".repeat(80)}`,
     ]);
 
-    // 4. A phone paired this time: it keeps the address through later launches.
     need = true;
     clock += 30 * 24 * HOUR_MS;
     await launch().restore();
     assert.equal(count("DELETE /v1/installations/self/endpoint"), 1);
     assert.equal(document[MANAGED_COMPANION_ENDPOINT_FIELD], ENDPOINT);
 
-    // 5. Removed again, a launch with no address never asks for one.
     need = false;
     await launch().restore();
     clock += 5 * HOUR_MS;
@@ -514,8 +499,7 @@ test("on demand, a give-back the control plane left pending is finished before t
   const installation = { id: INSTALLATION_ID, clientInstanceId: CLIENT_ID, ...identity };
   const calls = [];
   const routeFailures = [];
-  // Like the control plane: an owner DELETE that fails half-way leaves the
-  // row "deleting", and no endpoint is made for it until a DELETE finishes.
+  // Like the control plane: a half-failed owner DELETE leaves the row "deleting", with no endpoint until a DELETE finishes.
   let row = "ready";
   let deleteFailures = 1;
   let baseURL;
@@ -529,7 +513,6 @@ test("on demand, a give-back the control plane left pending is finished before t
     [MANAGED_COMPANION_ENDPOINT_FIELD]: ENDPOINT,
     [MANAGED_COMPANION_TOKEN_FIELD]: CONNECTOR_TOKEN,
     [MANAGED_COMPANION_ORIGIN_VERSION_FIELD]: MANAGED_COMPANION_ORIGIN_VERSION,
-    // Nothing has needed it for the grace period.
     [MANAGED_COMPANION_RELEASE_AT_FIELD]: 1,
   };
 
@@ -542,7 +525,6 @@ test("on demand, a give-back the control plane left pending is finished before t
     calls.push(key);
     let rawBody = "";
     for await (const chunk of request) rawBody += chunk;
-    // Only the endpoint request carries a body: the app's release.
     assert.deepEqual(
       rawBody ? JSON.parse(rawBody) : null,
       key === "POST /v1/installations/self/endpoint" ? { appVersion: identity.appVersion } : null,
@@ -605,14 +587,10 @@ test("on demand, a give-back the control plane left pending is finished before t
       clearTimer: () => {},
     });
 
-    // 1. The give-back is answered "cleanup pending": the address is
-    // forgotten here, and the control plane is still removing it.
     assert.deepEqual(await launch().restore(), { available: true, status: "ready", email: EMAIL });
     assert.equal(row, "deleting");
     assert.equal(Object.hasOwn(document, MANAGED_COMPANION_ENDPOINT_FIELD), false);
 
-    // 2. The next pairing finishes the removal first, then gets the same
-    // address back, instead of "still being prepared".
     const pairing = launch();
     await pairing.restore();
     const mark = calls.length;

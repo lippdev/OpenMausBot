@@ -1,4 +1,3 @@
-// Owned full server, disposable data, dynamically loaded enterprise hook.
 // The HTTPS backchannel is injected, never redirected to a real portal.
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -37,7 +36,7 @@ function call(path: string, options: { method?: string; cookie?: string; token?:
       ...(options.body === undefined ? {} : { "content-type": "application/json" }),
     } }, (res) => {
       let raw = ""; res.on("data", (chunk) => raw += chunk);
-      res.on("end", () => { let body: unknown = raw; try { body = JSON.parse(raw); } catch { /* static HTML */ }
+      res.on("end", () => { let body: unknown = raw; try { body = JSON.parse(raw); } catch {}
         resolve({ status: res.statusCode!, body, cookies: res.headers["set-cookie"] ?? [], location: res.headers.location, contractVersion: res.headers[HOSTED_CONTRACT_HEADER] }); });
     });
     req.on("error", reject); req.end(options.body === undefined ? undefined : JSON.stringify(options.body));
@@ -130,15 +129,13 @@ beforeAll(async () => {
     OMB_STATIC_DIR: join(home, "static"), OMB_BROWSER_CONNECTION: join(home, "browser-connection.json"),
     OMB_ENTERPRISE_DIR: layer, OMB_LICENSE_KEY: "fixture-only", OMB_ADMIN_URL: "https://admin.example.test",
     OMB_ADMIN_WORKSPACE: "acme", OMB_PUBLIC_URL: `https://${HOST}`,
-    // These cases exercise portal sessions and set fixtures up over loopback,
-    // so they keep the owner explicitly. A hosted workspace's default
-    // (service) has its own case at the end, which drops this override.
+    // These cases set fixtures up over loopback, so they keep the owner; the hosted default (service) has its own case.
     OMB_LOOPBACK_TRUST: "owner",
   }, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout?.on("data", (chunk) => log += chunk); child.stderr?.on("data", (chunk) => log += chunk);
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
-    try { if ((await call("/api/health", { local: true })).status === 200) return; } catch { /* starting */ }
+    try { if ((await call("/api/health", { local: true })).status === 200) return; } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Owned hosted fixture failed to start:\n${log}`);
@@ -212,8 +209,6 @@ describe("hosted bridge in the full server", () => {
     expect((await call(`/api/bots/${botId}`, { method: "PATCH", local: true,
       body: { approvalMode: "auto", acknowledgeLocalAuto: true, alwaysAllow: ["Bash:fixture-only"] } })).status).toBe(200);
     const before = (await call("/api/bots?messages=0", { local: true })).body.bots.find((bot: any) => bot.id === botId);
-    // Full over the settings routes stays closed on a company workspace, for
-    // its admins too: only this policy's new-task route grants it.
     for (const [method, path, body] of [
       ["PATCH", `/api/bots/${botId}`, { approvalMode: "full" }],
       ["PATCH", `/api/bots/${botId}/tasks/${before.tasks[0].threadId}`, { approvalMode: "full" }],
@@ -309,8 +304,7 @@ describe("hosted bridge in the full server", () => {
     await refuseFullTask();
   }, 25_000);
   it("withdraws hosted readiness the moment the running server's license grace period ends", async () => {
-    // Expired a week ago less eight seconds: still inside the 7-day grace
-    // (server/enterprise.ts LICENSE_GRACE_DAYS), which ends mid-test.
+    // Expired a week ago less eight seconds: inside the 7-day grace, which ends mid-test.
     state("admin", false, { expiresAt: new Date(Date.now() + 8_000 - 7 * 24 * 60 * 60_000).toISOString() });
     await restart({ OMB_ADMIN_MEMBERSHIP: "portal", OMB_SHARED_WORKSPACE_FULL_ACCESS: "1" });
     expect((await call("/api/health/hosted")).status).toBe(200);
@@ -343,14 +337,12 @@ describe("hosted bridge in the full server", () => {
     expect((await call(`/api/bots/${botId}`, { local: true, method: "PATCH", body: { hidden: false } })).status).toBe(200);
     state("member");
     expect((await call(path, { cookie })).status).toBe(401);
-    // A member reads Bot Settings too: same link, and Admin decides what its visitor may do.
     const memberCookie = await login();
     expect((await call("/api/auth/session", { cookie: memberCookie })).body.scopes).toEqual(["client"]);
     const asMember = await call(path, { cookie: memberCookie });
     expect(asMember.status).toBe(200);
     expect(asMember.body).toEqual(management.body);
     expect((await call(path, { cookie: memberCookie, method: "POST", body: {} })).status).toBe(403);
-    // No credential at all: the gate refuses a remote stranger before the route table runs.
     const stranger = await call(path);
     expect(stranger.status).toBe(403);
     expect(JSON.stringify(stranger.body)).not.toContain("admin.example.test");
@@ -374,7 +366,6 @@ describe("hosted bridge in the full server", () => {
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const botId = created.body.bot.id as string;
 
-    // What the loopback caller is, and the worker's whole path (cloud server/slack-worker.ts).
     expect((await call("/api/auth/session", { local: true })).body).toMatchObject({ kind: "loopback", scopes: ["client"], trust: "service" });
     const health = await call("/api/health", { local: true });
     expect(health.status).toBe(200);
@@ -392,7 +383,6 @@ describe("hosted bridge in the full server", () => {
     expect(sent.status, JSON.stringify(sent.body)).toBe(202);
     expect((await call(`/api/bots/${botId}/requests/${sendId}?threadId=${threadId}`, { local: true })).status).toBe(200);
 
-    // Admin changes from a bot's shell are refused, and leave nothing changed.
     const refused: Array<[string, string, unknown?]> = [
       ["PUT", "/api/config", { budgets: { monthlyUsd: 0 } }],
       ["POST", "/api/webhooks", { name: "Backdoor", prompt: "hi", botId }],
@@ -413,7 +403,6 @@ describe("hosted bridge in the full server", () => {
     expect(bots.some((bot: any) => bot.name === "Rogue")).toBe(false);
     expect(bots.find((bot: any) => bot.id === botId).approvalMode).not.toBe("auto");
 
-    // A real session still administers the workspace, and Settings learns who manages people.
     expect((await call("/api/config", { method: "PUT", cookie: admin, body: { decisions: { retentionDays: 365 } } })).status).toBe(200);
     const config = (await call("/api/config", { cookie: admin })).body;
     expect(config.decisions).toEqual({ retentionDays: 365 });

@@ -43,27 +43,46 @@ describe("live browser route authorization", () => {
     const path = `/api/bots/${botId}/browser/${suffix}`;
     const body = method === "POST" ? { viewerId: "forged", type: "take" } : undefined;
     expect((await call(method, path, body, remote)).status).toBe(403);
-    // A client session the bot is shown to is the person it asks to sign
-    // in: it gets past authorization to the same feature gates as the owner.
     expect((await call("PATCH", "/api/config", { features: { browser: true } })).status).toBe(200);
     const client = await call(method, path, body, { ...remote, authorization: `Bearer ${clientToken}` });
     expect(client.status).toBe(503);
-    expect(client.body.error).toContain("Install the browser engine");
+    expect(client.body.error).toContain("Install the browser");
     const crossOrigin = await call(method, path, body, { ...remote, cookie: ownerCookie, origin: "https://attacker.invalid" });
     expect(crossOrigin.status).toBe(403);
     expect(crossOrigin.body.error).toContain("cross-origin");
-    // The authenticated owner gets past authorization to the feature gates;
-    // no native browser is installed or launched in this fixture. The built-in
-    // browser is on by default, so the first gate met is the missing engine…
+    // No native browser is installed or launched in this fixture; the built-in browser is on by default, so the first gate met is the missing engine.
     expect((await call("PATCH", "/api/config", { features: { browser: true } })).status).toBe(200);
     const onByDefault = await call(method, path, body, { ...remote, cookie: ownerCookie });
     expect(onByDefault.status).toBe(503);
-    expect(onByDefault.body.error).toContain("Install the browser engine");
-    // …and a browser the person switched off still refuses before the engine.
+    expect(onByDefault.body.error).toContain("Install the browser");
     expect((await call("PATCH", "/api/config", { features: { browser: false } })).status).toBe(200);
     const owner = await call(method, path, body, { ...remote, cookie: ownerCookie });
     expect(owner.status).toBe(409);
     expect(owner.body.error).toContain("Enable this bot's browser");
+  });
+
+  it.each([["GET", "download/d1"], ["POST", "upload?chooser=c1"]])("opens the v2 %s %s to the bot's people only, as v1", async (method, suffix) => {
+    const path = `/api/bots/${botId}/browser/${suffix}`;
+    expect((await call("PATCH", "/api/config", { features: { browser: true } })).status).toBe(200);
+    expect((await call(method, path, undefined, remote)).status).toBe(403);
+    const client = await call(method, path, undefined, { ...remote, authorization: `Bearer ${clientToken}` });
+    expect(client.status).toBe(503);
+    expect(client.body.error).toContain("Install the browser");
+    const crossOrigin = await call(method, path, undefined, { ...remote, cookie: ownerCookie, origin: "https://attacker.invalid" });
+    expect(crossOrigin.status).toBe(403);
+  });
+
+  it("answers the v2 stream's handshake only for the bot's people, from its own origin", async () => {
+    const stream = `${fixture.info.url.replace(/^http/, "ws")}/api/bots/${botId}/browser/stream`;
+    const refused = (headers: Record<string, string>) => new Promise<number>((resolve) => {
+      const socket = new WebSocket(stream, { headers } as unknown as string[]);
+      socket.addEventListener("open", () => { resolve(0); socket.close(); });
+      socket.addEventListener("close", (event) => resolve(event.code));
+    });
+    expect(await refused(remote)).toBe(1006);
+    expect(await refused({ ...remote, cookie: ownerCookie, origin: "https://attacker.invalid" })).toBe(1006);
+    const plain = await fetch(stream.replace(/^ws/, "http"), { headers: { ...remote, authorization: `Bearer ${clientToken}` } });
+    expect(plain.status).toBe(426);
   });
 
   it("does not let client sessions change the bot's browser identity or shared logins", async () => {
@@ -91,8 +110,7 @@ describe("profile list compare-and-swap", () => {
     const currentBot = (await call("GET", "/api/bots")).body.bots.find((bot: any) => bot.id === botId);
     expect(currentBot.browserProfile).toBe("work");
 
-    // A reviewed, current deletion clears assignments on the server, not by
-    // optimistic renderer edits. The fixture has no engine or saved logins.
+    // The fixture has no engine or saved logins.
     const removed = await call("PATCH", "/api/config", { browserProfiles: [original[1]], expectedBrowserProfiles: renamed });
     expect(removed.status).toBe(200);
     expect(removed.body.browserProfiles).toEqual([original[1]]);

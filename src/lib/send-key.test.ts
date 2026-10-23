@@ -48,7 +48,6 @@ describe("which Enter sends", () => {
   it.each(SEND_KEYS)("never sends while an input method is composing (%s mode)", (mode) => {
     for (const modifiers of [{}, { shiftKey: true }, { ctrlKey: true }, { metaKey: true }]) {
       expect(sendsMessage(key({ ...modifiers, isComposing: true }), mode)).toBe(false);
-      // WebKit's confirming Enter arrives after compositionend, still as 229
       expect(sendsMessage(key({ ...modifiers, keyCode: 229 }), mode)).toBe(false);
     }
   });

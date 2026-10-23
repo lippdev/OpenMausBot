@@ -1,6 +1,3 @@
-// One line for a thread's prompt-cache keep-warm status in the usage
-// popover (server/cache-keepwarm.ts): "cache warm · next ping 12:40 · last
-// ping read 154k for $0.05". Pure, so it can be tested without components.
 import type { CacheKeepWarmStatus } from "../../shared/wire";
 import { t } from "./i18n";
 import { formatTokens, formatUsd, hasFiniteCost } from "./usage";

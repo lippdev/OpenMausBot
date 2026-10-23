@@ -1,8 +1,3 @@
-// The card after the update (docs/cloud-pro.md, "Add a Cloud"): OpenMausBot
-// Cloud's free trial, for someone with no plan, in the words the Admin's
-// numbers allow (lib/cloud-plan cloudIntroView). Start free trial opens the
-// Add a Cloud dialog; Show me how points at the menu that keeps it. Its days
-// and dismissal belong to the notice queue (AppNotices, lib/notices).
 import { Check, Cloud } from "lucide-react";
 import type { CloudOffer } from "../../electron/cloud-home.mjs";
 import { cloudIntroView } from "@/lib/cloud-plan";
@@ -12,9 +7,7 @@ import { NoticeCard, NotNowButton, PRIMARY_BUTTON } from "./NoticeCard";
 export function CloudTrialIntroCard({ offer, onStart, onHowTo, onSignIn, onNotNow, onDismiss }: {
   offer: CloudOffer;
   onStart: () => void; onHowTo: () => void;
-  /** Signed out only: someone who already pays signs in instead. */
   onSignIn?: () => void;
-  /** Not now; and the X or Escape. Both end it for good. */
   onNotNow: () => void; onDismiss: () => void;
 }) {
   const view = cloudIntroView(offer);

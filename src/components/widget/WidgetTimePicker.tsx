@@ -1,10 +1,3 @@
-// A time of day, picked and never typed. The trigger is drawn like the
-// DatePicker beside it and opens a list of times every `step` minutes from
-// `min` to `max`. Focus stays on the trigger, as on a select-only combobox:
-// the arrow keys, Page Up and Down (an hour), Home and End walk the list,
-// typing a time ("9", "14", "930") jumps to it, Enter or Space takes it and
-// Escape closes it. The value is "HH:MM" on a 24-hour clock; what is shown
-// is the person's own way of writing a time.
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Clock, X } from "lucide-react";
@@ -14,7 +7,6 @@ import { widgetNumber, widgetString, type WidgetNode } from "../../../shared/wid
 import { useWidgetField, WIDGET_BARE, WIDGET_FIELD, WIDGET_FIELD_ACTION } from "./WidgetControls";
 
 const DAY = 24 * 60;
-/** One row of the list, and the list's own padding top and bottom. */
 const ROW = 32;
 const LIST_PAD = 10;
 const LIST_MAX = ROW * 8 + LIST_PAD;
@@ -28,15 +20,11 @@ function minutesOf(time: string | undefined): number | undefined {
 
 const timeOf = (minutes: number): string => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 
-/** "HH:MM", zero-padded, for any time a tree or an older record holds ("9:05" too); "" for anything else. */
 export function widgetTime(value: string): string {
   const minutes = minutesOf(value.trim());
   return minutes === undefined ? "" : timeOf(minutes);
 }
 
-/** Every time on offer, in order: each `step` minutes (15 when it names none)
- * from `min` to `max` (the whole day when they are left out), and the time
- * the field holds where that falls between two steps. */
 export function widgetTimeSlots(node: WidgetNode, held = ""): string[] {
   const from = minutesOf(widgetString(node, "min")) ?? 0;
   const to = minutesOf(widgetString(node, "max")) ?? DAY - 1;
@@ -53,7 +41,6 @@ export function widgetTimeSlots(node: WidgetNode, held = ""): string[] {
 
 let format: Intl.DateTimeFormat | undefined;
 
-/** A time as the person writes one: "9:30 AM", "09:30", "9:30 am", by their locale. */
 export function widgetTimeLabel(time: string): string {
   const minutes = minutesOf(time);
   if (minutes === undefined) return time;
@@ -61,14 +48,12 @@ export function widgetTimeLabel(time: string): string {
   return format.format(new Date(2000, 0, 1, Math.floor(minutes / 60), minutes % 60));
 }
 
-/** Where the list opens before anything is picked: at the first time from now on. */
 function nearNow(slots: string[]): number {
   const now = new Date();
   const at = slots.findIndex((slot) => (minutesOf(slot) ?? 0) >= now.getHours() * 60 + now.getMinutes());
   return at >= 0 ? at : slots.length - 1;
 }
 
-/** The time whose written form, or whose digits, begin with what was typed. */
 function seek(slots: string[], typed: string): number {
   const text = typed.toLowerCase().replace(/[\s:.]/g, "");
   const digits = typed.replace(/\D/g, "");
@@ -101,7 +86,6 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
   const chosen = value ? slots.indexOf(value) : -1;
   const showing = open && !field.disabled && slots.length > 0;
 
-  // a field that locks (its press is on its way, the card settled) closes its list
   useEffect(() => {
     if (field.disabled) setOpen(false);
   }, [field.disabled]);
@@ -117,7 +101,6 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
     setOpen(false);
   };
 
-  // below the trigger, or above it where there is more room there; never past the window's edges
   useLayoutEffect(() => {
     if (!showing) return;
     const measure = (event?: Event) => {
@@ -143,7 +126,6 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
     };
   }, [showing, slots.length]);
 
-  // a click anywhere else closes the list
   useEffect(() => {
     if (!showing) return;
     const outside = (event: MouseEvent) => {
@@ -154,7 +136,6 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
     return () => document.removeEventListener("mousedown", outside);
   }, [showing]);
 
-  // the time it opens on sits in the middle of the list; after that the list follows the keys
   const opened = useRef(false);
   useLayoutEffect(() => {
     if (!showing || !place) {
@@ -179,7 +160,6 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    // Alt with an arrow opens or closes the list, as on a select; other chords are not this field's
     if (field.disabled || event.ctrlKey || event.metaKey || (event.altKey && event.key !== "ArrowDown" && event.key !== "ArrowUp")) return;
     const last = slots.length - 1;
     const hour = Math.max(1, Math.round(60 / Math.max(1, widgetNumber(node, "step") ?? 15)));
@@ -196,7 +176,6 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
     else if (event.key === "End") setActive(last);
     else if (event.key === "Enter" || event.key === " ") take(active);
     else if (event.key === "Escape") {
-      // closes the list only: the chat's own Escape does not see it
       event.stopPropagation();
       setOpen(false);
     } else if (event.key === "Tab") {
@@ -220,11 +199,10 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
         aria-expanded={showing}
         aria-controls={showing ? listId : undefined}
         aria-activedescendant={showing ? `${listId}-${active}` : undefined}
-        // what the field holds, as it is sent
         value={value}
         onClick={() => (showing ? setOpen(false) : show())}
         onKeyDown={onKeyDown}
-        // Space is taken on keydown: its keyup must not click the trigger again
+        // Space is taken on keydown, so its keyup must not click the trigger again.
         onKeyUp={(event) => event.key === " " && event.preventDefault()}
         className={cn(
           bare ? WIDGET_BARE : WIDGET_FIELD, "relative flex items-center gap-2 text-start focus-visible:border-focus focus-visible:outline-none",
@@ -246,10 +224,9 @@ export function WidgetTimePicker({ node, bare }: { node: WidgetNode; bare: boole
           id={listId}
           role="listbox"
           aria-label={t("widget.time.options", { label: control["aria-label"] })}
-          // a press in the list keeps the focus on the trigger
+          // preventDefault on mousedown keeps the focus on the trigger.
           onMouseDown={(event) => event.preventDefault()}
           style={{ position: "fixed", ...place, visibility: place ? undefined : "hidden" }}
-          // the app's popover menu (SidebarPopoverMenu): the menu tone, a hairline, the deep shadow
           className="z-[70] animate-pop-in overflow-y-auto overscroll-contain rounded-xl border border-hairline/50 bg-menu py-1 shadow-2xl shadow-black/50"
         >
           {slots.map((slot, index) => (

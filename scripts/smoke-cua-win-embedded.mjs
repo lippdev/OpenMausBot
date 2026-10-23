@@ -1,7 +1,6 @@
-// Windows CUA smoke: prove the staged win32 SDK bundle loads through the same
-// env-var redirect the packaged app uses and that one embedded driver host can
-// start and stop. Mirrors electron/cua.mjs startEmbedded(); run it after
-// `pnpm build:cua:win`, which produces dist-native/cua-win32-x64/.
+// Windows CUA smoke: the staged win32 SDK bundle loads through the packaged
+// app's env-var redirect, and one embedded driver host starts and stops. Run it
+// after `pnpm build:cua:win`.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -154,7 +153,6 @@ try {
   try {
     await host.stop();
   } catch {
-    // startup already failed; stop is best-effort before destroy
   }
   host.uniffiDestroy?.();
   console.error("smoke:cua-win FAILED:", err);

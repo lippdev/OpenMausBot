@@ -1,13 +1,4 @@
-/**
- * Two to four plain lines from a release's notes, for the update card.
- *
- * The notes come from the update feed as published: the GitHub provider
- * gives the release body as HTML, a generic feed often gives Markdown. Each
- * release here opens its items with a bold lead ("**Faster start.** After the
- * first launch…"), so an item reads as its lead when it has one and as its
- * first sentence when not. Group labels ("**Chats:**"), headings and
- * references (#1234, by @someone in a link) are not highlights.
- */
+/** The GitHub update provider gives release notes as HTML; a generic feed often gives Markdown. */
 export function releaseHighlights(notes: string | undefined, max = 4): string[] {
   if (!notes?.trim()) return [];
   const markdown = notes
@@ -29,7 +20,6 @@ export function releaseHighlights(notes: string | undefined, max = 4): string[] 
     const item = /^\s*[-*+]\s+(.*)$/.exec(raw)?.[1]?.trim();
     if (!item) continue;
     const lead = /^\*\*(.+?)\*\*/.exec(item)?.[1]?.trim();
-    // a bold label that only names a group of sub-items
     if (lead?.endsWith(":") && item.replace(/^\*\*.+?\*\*/, "").trim() === "") continue;
     let line = lead ?? (/^(.+?[.!?])(\s|$)/.exec(item)?.[1] ?? item);
     line = line

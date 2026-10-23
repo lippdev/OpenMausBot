@@ -1,9 +1,7 @@
 /**
- * A bot asking the person to sign in to a website themselves, in the place
- * the bot works. OpenMausBot never receives a website password: the person
- * types it into the page, and the session the page keeps is what the bot
- * then uses. This is the card's whole vocabulary, shared by the server that
- * writes it and every client that draws it.
+ * A bot asking the person to sign in to a website themselves, in the place the
+ * bot works. OpenMausBot never receives a website password: the person types it
+ * into the page, and the bot uses the session the page keeps.
  */
 import type { Surface } from "./wire.ts";
 

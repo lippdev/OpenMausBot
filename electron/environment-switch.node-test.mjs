@@ -124,8 +124,6 @@ test("probe reports exited: rollback restarts old child exactly once, no double 
       calls.push("probe");
       return "exited";
     },
-    // The real rollback kills the failed child, reacquires the old lease and
-    // restarts the old environment through the same start path.
     rollback: (port) => {
       calls.push("rollback");
       deps.startChild(port);

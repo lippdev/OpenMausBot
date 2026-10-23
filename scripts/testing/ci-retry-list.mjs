@@ -1,6 +1,4 @@
 // The known-flaky list (ci-retry-list.json) and how a test is matched to it.
-// Shared by the vitest runner (ci-retry-runner.ts) and the job-summary step
-// (ci-retry-summary.mjs). docs/ci.md, "Flaky tests".
 import { readFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,8 +16,7 @@ export function loadRetryList(env = process.env) {
 }
 
 /** A plain path, never `new URL(…)`: in a jsdom or happy-dom test file the
- * global URL is the DOM's, and fs refuses its URL objects ("The URL must be of
- * scheme file"), which failed every vitest job that ran such a file in CI. */
+ * global URL is the DOM's, and fs refuses its URL objects. */
 const DEFAULT_LIST = join(dirname(fileURLToPath(import.meta.url)), "ci-retry-list.json");
 
 /** CI sets CI=true; a developer's run never retries. */

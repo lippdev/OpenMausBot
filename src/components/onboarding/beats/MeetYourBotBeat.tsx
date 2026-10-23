@@ -1,19 +1,13 @@
-// The exit beat: the seeded bot gets a name, a color, and one standing
-// instruction. This is the first touch of bot settings, so every field is
-// optional with a sensible default and Finish always works, even when the
-// save fails (the bot can be edited later from its settings).
 import { useEffect, useState } from "react";
 import { MausAvatar } from "@/components/Avatar";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { MAUS_COLOR_NAMES, MAUS_COLORS, type MausColor } from "@/lib/mascot";
+import { colorSwatch, MAUS_COLOR_LABEL, MAUS_COLOR_NAMES, type MausColor } from "@/lib/mascot";
 import { api, type Bot } from "@/state/store";
 import { inputClass, PrimaryButton, QuietButton, staggerIndex, type BeatProps } from "./shared";
 
 const SOUL_LINE_LIMIT = 200;
 
-/** The instruction line joins whatever SOUL the bot already has rather than
- * replacing it; a bot imported from a team keeps its playbook. */
 function soulWithLine(existing: string | undefined, line: string): string | undefined {
   const trimmed = line.trim();
   if (!trimmed) return undefined;
@@ -74,11 +68,10 @@ export function MeetYourBotBeat({
   return (
     <div className="stagger flex flex-col">
       <p className="animate-rise mt-1 text-[13.5px] leading-relaxed text-ink-secondary" style={staggerIndex(0)}>
-        {t("onboarding.bot.intro")}
+        {t(bot?.chiefOfStaff ? "onboarding.bot.chiefIntro" : "onboarding.bot.intro")}
       </p>
 
       <div className="animate-rise mt-5 flex items-center gap-4" style={staggerIndex(1)}>
-        {/* the bot itself, in its chosen color, next to the guide */}
         <MausAvatar color={color} state="happy" size={64} label={name || bot?.name} />
         <div className="min-w-0 flex-1">
           <label className="text-[11.5px] font-medium uppercase tracking-wide text-ink-secondary" htmlFor="welcome-bot-name">
@@ -107,7 +100,7 @@ export function MeetYourBotBeat({
               type="button"
               role="radio"
               aria-checked={c === color}
-              aria-label={t("onboarding.bot.colorAria", { color: c })}
+              aria-label={t("onboarding.bot.colorAria", { color: t(MAUS_COLOR_LABEL[c]) })}
               onClick={() => {
                 setColor(c);
                 bump("customize");
@@ -116,7 +109,7 @@ export function MeetYourBotBeat({
                 "size-7 rounded-full border-2 transition-transform duration-150 hover:scale-110 active:scale-95",
                 c === color ? "border-ink" : "border-transparent",
               )}
-              style={{ backgroundColor: MAUS_COLORS[c] }}
+              style={{ background: colorSwatch(c) }}
             />
           ))}
         </div>

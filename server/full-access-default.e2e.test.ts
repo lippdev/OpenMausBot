@@ -1,7 +1,4 @@
-// Real server, repository-owned fake engines only. Every bot starts at Full
-// access (DEFAULT_APPROVAL_MODE in shared/approval-mode.ts), so its turns run
-// in each engine's own most permissive mode, and a level a person picks, Ask
-// included, stays.
+// Real server, repository-owned fake engines only.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -59,15 +56,12 @@ it("starts new bots and threads at Full access on each engine family, and keeps 
     const instances = (await api("GET", "/api/instances")).instances as any[];
     const model = (instanceId: string) => ({ instanceId, model: instances.find((item) => item.instanceId === instanceId).models.default });
 
-    // A bot made with no level stores none: it follows the default, Full.
     const bots: Record<string, any> = {};
     for (const instanceId of ["claude", "codex", "droid"]) {
       bots[instanceId] = (await api("POST", "/api/bots", { name: `Default ${instanceId}`, modelSelection: model(instanceId) }, 201)).bot;
       expect(bots[instanceId].approvalMode).toBe("full");
       expect(stored(bots[instanceId].id).approvalMode).toBeUndefined();
     }
-    // A new thread on that bot starts at Full and runs in the engine's own
-    // most permissive mode.
     const threads: Record<string, string> = {};
     for (const [instanceId, bot] of Object.entries(bots)) {
       const task = (await api("POST", `/api/bots/${bot.id}/tasks`, { title: `New ${instanceId} thread` }, 201)).task;
@@ -82,14 +76,11 @@ it("starts new bots and threads at Full access on each engine family, and keeps 
     expect(codexTurn.params).toMatchObject({ approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
     expect(JSON.parse(readFileSync(`${droidDump}.config.json`, "utf8"))[0])
       .toMatchObject({ method: "session/set_mode", params: { modeId: "auto-high" } });
-    // Droid's remaining permission request was answered by Full, not carded.
     const decisions = (await api("GET", "/api/decisions")).decisions as any[];
     expect(decisions.filter((row) => row.threadId === threads.droid).map((row) => `${row.decision}:${row.source}`))
       .toEqual(["auto-approved:full-access"]);
     expect(await openCard(threads.droid)).toBeUndefined();
 
-    // Onboarding's first bot is made the same way, whenever its engine is
-    // connected: no level, so Full, and on Codex the never / dangerFullAccess turn.
     const starter = (await api("GET", "/api/bots?messages=0")).bots.find((bot: any) => !Object.values(bots).some((mine: any) => mine.id === bot.id));
     expect(starter.approvalMode).toBe("full");
     expect(stored(starter.id).approvalMode).toBeUndefined();
@@ -99,8 +90,6 @@ it("starts new bots and threads at Full access on each engine family, and keeps 
     expect(JSON.parse(readFileSync(codexDump, "utf8")).calls.findLast((call: any) => call.method === "turn/start").params)
       .toMatchObject({ approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
 
-    // A level a person picks stays: Ask reaches the bot and every thread,
-    // survives a restart, and asks again on the next thread.
     expect((await api("PATCH", `/api/bots/${bots.droid.id}`, { approvalMode: "ask", applyToAllThreads: true })).bot.approvalMode).toBe("ask");
     await waitForExit(server!, { signal: "SIGTERM" });
     await start();

@@ -1,8 +1,3 @@
-// The Data tab's routes through the route table over a real HTTP server
-// with a fake engine: the sheet, the person's SQL becoming a card on the
-// panel's connection, cancel interrupting that connection, card edits,
-// paging, the explorer's stats, export under an allowed folder, images, the
-// error envelope and its statuses, and PASS for every other path.
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";

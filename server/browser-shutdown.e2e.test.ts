@@ -1,9 +1,4 @@
-// The agent-browser daemon outlives the MCP transport that started it, and
-// the server: a server that only stopped its transports left the daemon and
-// its Chrome running after a quit, until the engine's one-hour idle timeout,
-// and a crash left them for that long too. Real server, fake Claude CLI, and
-// an agent-browser stub that logs each command it gets and lists the
-// daemons the test marks as running.
+// Real server, fake Claude CLI, and an agent-browser stub that logs each command it gets and lists the daemons the test marks running.
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -84,9 +79,6 @@ async function startServer(home: string, engine: string) {
   return { child, api };
 }
 
-/** Run one browser turn for a bot that works on the browser, then stop the
- * server the way quitting the app does. Returns the commands the stub got
- * during shutdown. */
 async function browserTurnThenQuit(config: Record<string, unknown> = {}, browserProfile?: string,
   beforeQuit?: (api: Awaited<ReturnType<typeof startServer>>["api"], fixture: ReturnType<typeof engineHome>) => Promise<void>) {
   const fixture = engineHome(config);
@@ -143,7 +135,6 @@ describe.skipIf(process.platform === "win32")("closing the browsers at shutdown"
       expect(switched.status).toBe(200);
       expect(switched.body.browserProfiles).toEqual([{ ...work, browser: "chrome" }]);
       await expect.poll(() => readFileSync(fixture.log, "utf8").split("--- switch\n")[1]?.split("\n"), { timeout: 10_000 }).toContain("profile-work close");
-      // The person's Chrome is attached now, by a daemon of its own.
       await expect.poll(() => existsSync(join(fixture.home, "running", "profile-work"))).toBe(false);
       fixture.run("profile-work");
       // The list the person saw carries the choice, so switching back is not
@@ -151,14 +142,11 @@ describe.skipIf(process.platform === "win32")("closing the browsers at shutdown"
       const back = await api("PATCH", "/api/config", { browserProfiles: [work], expectedBrowserProfiles: [{ ...work, browser: "chrome" }] });
       expect(back.status).toBe(200);
       expect(back.body.browserProfiles).toEqual([work]);
-      // Letting go of the person's Chrome is a close of that session too.
       await expect.poll(() => readFileSync(fixture.log, "utf8").split("--- switch\n")[1]?.split("\n").filter((line) => line === "profile-work close").length, { timeout: 10_000 }).toBe(2);
     });
     expect(session).toBe("profile-work");
   }, 60_000);
 
-  // A crash closes nothing: the next start finds this data dir's browsers by
-  // name and closes them, and leaves anything else under the same HOME.
   it("closes the browsers a crashed server left when it starts again", async () => {
     const fixture = engineHome();
     const first = await startServer(fixture.home, fixture.engine);

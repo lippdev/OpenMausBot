@@ -96,7 +96,6 @@ test("permission refresh stays on one thread", () => {
   assert.equal(message.refreshPermissions, true);
   assert.equal(message.threadOnly, true);
   assert.equal(message.threadId, "thread-1");
-  // A refresh without thread scope would let a lost reply downgrade the bot.
   assert.throws(() => trustedApprovalModeRequest(REQUEST_ID, "bot-1", "full", false, "thread-1", undefined, undefined, false, false, true), /permission refresh/);
   assert.throws(() => trustedApprovalModeRequest(REQUEST_ID, "bot-1", "full", false, undefined, undefined, undefined, false, true, true), /permission refresh/);
   assert.throws(() => trustedApprovalModeRequest(REQUEST_ID, "bot-1", "ask", false, undefined, undefined, undefined, false, false, "yes"), /permission refresh/);

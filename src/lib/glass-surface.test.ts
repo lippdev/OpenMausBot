@@ -1,6 +1,3 @@
-// The liquid-glass pop-up surface is built only from each skin's own tokens:
-// no skin block changes, no colour is written down twice, and people who ask
-// their system for less transparency get the opaque menu colour back.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -10,8 +7,6 @@ import { glassPopupTopInset } from "./glass-popup";
 const src = join(dirname(fileURLToPath(import.meta.url)), "..");
 const css = readFileSync(join(src, "styles.css"), "utf8");
 
-/** The body of the first rule whose selector is exactly `selector`, at the
- * given starting offset. */
 function rule(selector: string, from = 0): string {
   const start = css.indexOf(`${selector} {`, from);
   expect(start, selector).toBeGreaterThanOrEqual(0);
@@ -50,19 +45,18 @@ describe("glass surface", () => {
 
   it("lives outside every skin block, and every skin still defines the tokens it reads", () => {
     const blocks = skinBlocks();
-    expect(blocks).toHaveLength(9);
+    expect(blocks).toHaveLength(11);
     for (const block of blocks) {
       expect(block).not.toContain("glass");
       for (const token of ["--color-menu", "--color-card", "--color-ink"]) expect(block).toContain(`${token}:`);
     }
   });
 
-  it("is what the Settings, Apps and Triggers pop-ups are drawn on", () => {
-    for (const file of ["SettingsModal.tsx", "PluginsPanel.tsx", "TriggersPanel.tsx"]) {
+  it("is what the Settings and Apps pop-ups are drawn on", () => {
+    for (const file of ["SettingsModal.tsx", "PluginsPanel.tsx"]) {
       const source = readFileSync(join(src, "components", file), "utf8");
       expect(source, file).toContain("glass-surface");
-      // the scrim is a sibling: a backdrop-filter on an ancestor would hide
-      // the app from the pane's own blur
+      // The scrim is a sibling: a backdrop-filter on an ancestor would hide the app from the pane's own blur.
       expect(source, file).toContain('className="glass-scrim pointer-events-none absolute inset-0"');
     }
   });
@@ -72,20 +66,16 @@ describe("glass surface", () => {
     expect(frame).toContain("position: fixed");
     expect(frame).toContain("padding: var(--glass-popup-top, 24px) 24px 24px");
     const pane = rule(".glass-popup");
-    // min(1040px, 100% - 48px) by min(760px, 100% - top - 24px): the frame's
-    // padding has already taken the insets off
     expect(pane).toContain("width: min(1040px, 100%)");
     expect(pane).toContain("height: min(760px, 100%)");
-    // macOS traffic lights and the Windows caption buttons get a 56px top
     expect(glassPopupTopInset("mac-inset")).toBe(56);
     expect(glassPopupTopInset("win-caption")).toBe(56);
     expect(glassPopupTopInset("native")).toBe(24);
-    for (const file of ["SettingsModal.tsx", "PluginsPanel.tsx", "TriggersPanel.tsx"]) {
+    for (const file of ["SettingsModal.tsx", "PluginsPanel.tsx"]) {
       const source = readFileSync(join(src, "components", file), "utf8");
       expect(source, file).toContain('className="glass-popup-frame"');
       expect(source, file).toContain("style={glassPopupFrameStyle()}");
       expect(source, file).toMatch(/className="glass-surface glass-popup /);
-      // no viewport-sized caps left fighting the safe area
       expect(source, file).not.toMatch(/100dvh/);
     }
   });

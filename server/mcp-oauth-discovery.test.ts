@@ -11,8 +11,6 @@ const AS = {
   code_challenge_methods_supported: ["S256"],
 };
 
-/** A fetch that answers JSON for known URLs and 404 for everything else,
- * and records what was asked. */
 function stubFetch(routes: Record<string, unknown>) {
   const asked: string[] = [];
   const impl = (async (input: string | URL | Request) => {

@@ -1,7 +1,5 @@
-// A throwaway TLS certificate for tests that need a real https:// server:
-// made at test time with the openssl command line, valid for two days, for
-// this computer's loopback names and the made-up host proxy tests use. A
-// child process trusts it through NODE_EXTRA_CA_CERTS=<certPath>.
+// A throwaway TLS certificate (openssl, two days) for real https:// test servers on loopback names and
+// TEST_TLS_HOST; a child trusts it through NODE_EXTRA_CA_CERTS=<certPath>.
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9,7 +7,6 @@ import { join } from "node:path";
 export interface TestTls {
   key: string;
   cert: string;
-  /** the certificate's file, for NODE_EXTRA_CA_CERTS */
   certPath: string;
 }
 

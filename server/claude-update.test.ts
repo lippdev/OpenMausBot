@@ -55,9 +55,6 @@ describe("updateClaudeCli", () => {
     );
   });
 
-  // The app's copy shadows every other Claude on PATH. `claude update` on it
-  // reinstalled through some other npm and left it old, so the turn kept
-  // failing "does not support this model" however often the person updated.
   it("updates the copy the app installed through npm, not `claude update`, and reports that copy's version", async () => {
     const calls: string[][] = [];
     const reinstalled: Array<{ cli: string; env: NodeJS.ProcessEnv }> = [];
@@ -102,7 +99,6 @@ describe("isAppInstalledClaude", () => {
       registerPathDir(engines);
 
       expect(isAppInstalledClaude("claude", engines)).toBe(true);
-      // Another engines folder, a configured path, or a wrapper is not the app's copy.
       expect(isAppInstalledClaude("claude", other)).toBe(false);
       expect(isAppInstalledClaude("/opt/homebrew/bin/claude", engines)).toBe(false);
       expect(isAppInstalledClaude("/usr/local/bin/ag claude agp", engines)).toBe(false);

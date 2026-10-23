@@ -1,8 +1,7 @@
 /** Canonical runtime-event shapes, as they ride the live wire and the
- * inspector log. Single home in shared/ so the server contracts, the client
- * store, and the inspector panel cannot drift; server/contracts.ts and
- * server/thread-events.ts re-export these under their historical names. */
+ * inspector log. */
 import type { AskQuestion } from "./ask-question.ts";
+import type { TurnProgressFields } from "./turn-progress.ts";
 
 export type DriverKind = string;
 export type InstanceId = string;
@@ -19,10 +18,8 @@ export interface ModelVariantState {
   currentValue?: string;
 }
 
-// Subset of upstream's 49-member ProviderRuntimeEvent union — the ~12 types
-// the recipe says to start with, sharing one base. `raw` carries the
-// native protocol message when a consumer needs to see behind the
-// normalization.
+// A subset of upstream's ProviderRuntimeEvent union, sharing one base. `raw`
+// carries the native protocol message behind the normalization.
 export interface RuntimeEventBase {
   eventId: string;
   provider: DriverKind;
@@ -55,7 +52,7 @@ export type RuntimeEvent = RuntimeEventBase &
         /** 1-based: the retry about to be launched (1 = first relaunch). */
         attempt: number;
         delayMs: number;
-        /** Why this failure was judged retry-worthy (classifyError's reason). */
+        /** Why this failure was judged retry-worthy. */
         reason: string;
       }
     | {
@@ -64,17 +61,14 @@ export type RuntimeEvent = RuntimeEventBase &
         stopReason?: string | null;
         cost?: number | null;
         denials?: string[];
-        /** THIS turn's token total, as the provider reports it at the end.
-         * The one figure the harness accumulates — thread.token-usage.updated
-         * is a live indicator whose meaning differs per driver (a per-call
-         * delta, a thread total, a per-step figure) and must never be summed. */
+        /** THIS turn's token total, as the provider reports it at the end: the
+         * one figure the harness accumulates. thread.token-usage.updated means
+         * something different per driver and must never be summed. */
         usage?: { input: number; output: number; cachedInput?: number };
       }
     | {
-        /** A resumable terminal: the turn exhausted its model/tool budget,
-         * and a structured handoff was persisted. The harness may start a
-         * `Continue:` thread automatically; an assigned turn's requester gets
-         * the handoff with the stop instead (server/turn-continuation.ts). */
+        /** A resumable terminal: the turn exhausted its model/tool budget and
+         * a structured handoff was persisted. */
         type: "cap.exhausted";
         /** Absolute path to the persisted handoff for the dead turn. */
         handoffPath: string;
@@ -86,7 +80,7 @@ export type RuntimeEvent = RuntimeEventBase &
         /** The computer resource this turn queued behind (e.g. "computer:box:bx_…"). */
         resource: string;
         /** Where this turn sat in the resource's arrival-ordered waitlist when
-         * the wait began (#1652). */
+         * the wait began. */
         position?: number;
         /** Who held the computer when the wait began, if the holder was known. */
         holder?: { name: string; task?: string };
@@ -99,8 +93,7 @@ export type RuntimeEvent = RuntimeEventBase &
         waitedMs: number;
         /** acquired: the claim landed; stopped: the turn was stopped or
          * cancelled while waiting; parked: the wait ceiling settled the turn
-         * for resume (#1651); gave_up: the pre-parking ceiling, kept so
-         * recorded logs still replay. */
+         * for resume; gave_up: only in older recorded logs. */
         outcome: "acquired" | "gave_up" | "parked" | "stopped";
       }
     | {
@@ -115,12 +108,13 @@ export type RuntimeEvent = RuntimeEventBase &
         input?: string;
       }
     | { type: "item.updated"; itemType: "tool" | "reasoning"; tokens?: number | null }
+    /** What the engine is doing right now (a tool call being written or run), for the chat's status line. Live only:
+     * the bus coalesces it and never writes it to the event log; nothing stores it. */
+    | Omit<TurnProgressFields, "itemId">
     | { type: "item.completed"; itemType: "tool"; ok: boolean; output?: string }
     | { type: "item.completed"; itemType: "assistant_text"; text: string }
-    /** Provider-generated raster bytes. This event is folded into the
-     * private attachment store and is never forwarded to renderer SSE: a
-     * multi-megabyte base64 result belongs in one durable message URL, not
-     * duplicated through every connected window. */
+    /** Provider-generated raster bytes, folded into the private attachment
+     * store and never forwarded to renderer SSE. */
     | { type: "item.completed"; itemType: "assistant_image"; data: string; alt?: string }
     | { type: "content.delta"; streamKind: "assistant_text" | "reasoning_text"; delta: string }
     | {
@@ -132,28 +126,27 @@ export type RuntimeEvent = RuntimeEventBase &
          * Used for exact-command grants; never reconstructed from a display
          * summary, tool title, or argv. Absent when either value is unknown. */
         command?: { command: string; cwd: string };
+        /** The shell command line exactly as the engine sent it, even when `command` is absent for want of a cwd.
+         * Read only by the safety floor; no grant is ever made from it, and like `command` it is never broadcast. */
+        commandLine?: string;
         choices?: string[];
         /** A provider's structured ask (Claude's AskUserQuestion): the whole
          * set of questions, each with its own options, so the card can offer
          * them instead of an Allow/Deny a person cannot answer. */
         questions?: AskQuestion[];
-        /** Where the ask came from: a harness tool call ("tool" — the
-         * default, and what every event before this field implied), or a
-         * block parsed out of model-authored final output ("output", only in
-         * event logs the removed Computer engine wrote). Cards and logs can
-         * badge the latter as agent-composed; untrusted-input rules apply
-         * either way. */
+        /** "tool" (or absent): a harness tool call; "output": a block parsed
+         * from model-authored final output. Untrusted-input rules apply either
+         * way. */
         origin?: "tool" | "output";
         approvalScope?: "local-computer";
         /** Provider asks to widen its configured sandbox. Only explicit Full
          * access may answer this automatically; Auto/remembered grants may not. */
         requiresExplicitApproval?: boolean;
         /** Whether the provider's own automatic reviewer was running when it
-         * raised this request. Only providers that can tell set it: Claude
-         * reports the effective permission mode in its init frame, and starts
-         * in Manual without a word when Auto is unavailable for the model.
-         * "inactive" means this ask is not a reviewer's verdict, so the app's
-         * own safe-Auto rules may answer it; unset means nobody knows. */
+         * raised this request. Claude reports its effective permission mode in
+         * its init frame and silently starts in Manual when Auto is unavailable
+         * for the model. "inactive": the app's own safe-Auto rules may answer;
+         * unset: nobody knows. */
         nativeReview?: "active" | "inactive";
         /** The provider can keep an allow for the rest of its session
          * ("Always allow this session"): Claude through its own suggested
@@ -176,18 +169,18 @@ export type RuntimeEvent = RuntimeEventBase &
          * whole prompt, cache reads included — and the window's size when the
          * driver knows it. The figure that predicts the next message's cost. */
         contextTokens?: number; contextWindow?: number;
+        /** The part of `output` spent reasoning, where the engine reports it. A per-call report carries the call's own
+         * message id in `itemId`, repeated on every frame of that call. */
+        reasoning?: number;
       }
-    // `setup: true` marks a failure the user fixes by installing or
-    // configuring something, not by retrying — the UI offers setup instead.
-    // `terminal: true` records failure of the complete turn, rather than a
-    // transient error or a legacy provider's diagnostic during cancellation.
-    // `claudeUpdate: true` narrows a setup failure to "this Claude Code is
-    // too old for the model": the UI offers to run `claude update` for them.
-    // `trialCredit`: the trial's Claude credit refused the call (used up, no
-    // longer on this Cloud, paused for now, or too little left for this
-    // request); its engine stops offering itself only when used up or gone
-    // (server/cloud-credit-provider.ts).
-    | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean; claudeUpdate?: boolean; trialCredit?: "used_up" | "ended" | "paused" | "too_low" }
+    // `setup`: fixed by installing or configuring something, not by retrying.
+    // `terminal`: the complete turn failed, not a transient error.
+    // `claudeUpdate`: this Claude Code is too old for the model.
+    // `trialCredit`: the trial's Claude credit refused the call.
+    // `stalled`: the engine went silent and the turn was stopped as stuck.
+    // `limitResetsAt`: epoch ms when the usage limit refusing this account resets, when the engine says.
+    | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean; claudeUpdate?: boolean; trialCredit?: "used_up" | "ended" | "paused" | "too_low";
+        stalled?: boolean; limitResetsAt?: number }
     /** Something the person should know that did not fail the turn — for
      * example, a saved model the engine no longer offers was replaced. */
     | { type: "runtime.notice"; message: string }

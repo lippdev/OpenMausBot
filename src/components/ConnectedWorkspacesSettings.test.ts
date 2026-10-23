@@ -1,9 +1,6 @@
-// Settings → Servers: Copy this computer here on each server this app added
-// (docs/copy-workspace.md), opening the same copy panel as Settings → OMB Cloud.
 import { Children, createElement, isValidElement, type EffectCallback, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { CloudMoveBridge } from "../../electron/cloud-move.mjs";
 import { setLocale } from "@/lib/i18n";
 const f = vi.hoisted(() => ({ values: [] as unknown[], index: 0, effects: [] as EffectCallback[] }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
@@ -12,7 +9,8 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
   useRef: (initial: unknown) => { const index = f.index++; if (!(index in f.values)) f.values[index] = { current: initial }; return f.values[index]; },
   useEffect: (effect: EffectCallback) => { f.effects.push(effect); },
 }));
-vi.mock("@/state/store", () => ({ useStore: () => ({ state: { config: {} }, dispatch: () => {} }) }));
+const config = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
+vi.mock("@/state/store", () => ({ useStore: () => ({ state: { config: config.value }, dispatch: () => {} }) }));
 import { ConnectedWorkspacesSettings } from "./ConnectedWorkspacesSettings";
 
 type Node = ReactElement<{ children?: ReactNode; onClick?: () => void; "aria-label"?: string;
@@ -30,78 +28,22 @@ function render() {
   return { html, nodes: nodes(tree) };
 }
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
-const copyButtons = () => render().nodes.filter(node => node.type === "button" && Children.toArray(node.props.children).join("") === "Copy this computer here");
 
 const VPS = { id: "vps", name: "VPS", origin: "https://bots.example.test" };
-let move: CloudMoveBridge;
 function stub(extra: Record<string, unknown> = {}) {
   vi.stubGlobal("window", {
     ogb: { environments: { state: vi.fn().mockResolvedValue({ localOrigin: "http://127.0.0.1:1", remote: false, activeId: "local", environments: [VPS] }),
-      switch: vi.fn(), forget: vi.fn(), addFromLink: vi.fn(), onOpenSettings: () => () => {} }, cloudMove: move, ...extra },
+      switch: vi.fn(), forget: vi.fn(), addFromLink: vi.fn(), onOpenSettings: () => () => {} }, ...extra },
     location: { search: "", href: "http://127.0.0.1:1/settings" }, history: { replaceState: () => {} },
   });
 }
 async function mount() { render(); for (const effect of f.effects) effect(); await flush(); }
 beforeEach(() => {
   f.values = []; f.index = 0; f.effects = [];
-  move = { state: vi.fn().mockResolvedValue({ phase: "idle", local: null, cloud: null, suggest: false, destination: { ...VPS, kind: "server" }, blocked: null }),
-    start: vi.fn(), cancel: vi.fn(), restorePrevious: vi.fn(), dismiss: vi.fn(), onState: vi.fn(() => () => {}) };
   stub(); setLocale("en");
 });
-afterEach(() => { vi.unstubAllGlobals(); setLocale("en"); });
+afterEach(() => { vi.unstubAllGlobals(); setLocale("en"); config.value = {}; });
 
-it("each server this app added (not this computer) offers Copy this computer here, which opens the copy for that server", async () => {
-  await mount();
-  const buttons = copyButtons();
-  expect(buttons).toHaveLength(1);
-  expect(buttons[0]!.props["aria-label"]).toBe("Copy this computer here: VPS");
-  expect(render().html).not.toContain("Copy this computer's bots and chats");
-  buttons[0]!.props.onClick!();
-  await mount();
-  expect(vi.mocked(move.state).mock.calls).toContainEqual(["vps"]);
-  const { html } = render();
-  expect(html).toContain("Copy this computer's bots and chats");
-  expect(html).toContain("from this computer to VPS");
-});
-
-it("is not offered without the desktop app's copy, or to a companion connected to another computer", async () => {
-  stub({ cloudMove: undefined });
-  await mount();
-  expect(copyButtons()).toHaveLength(0);
-  f.values = [];
-  stub({ remoteClient: { active: true } });
-  await mount();
-  expect(copyButtons()).toHaveLength(0);
-  expect(move.state).not.toHaveBeenCalled();
-});
-
-it("a server's own Copy brings the person here, on that server's copy, to start it themselves", async () => {
-  // The window switched to this computer at ?desktop-settings=workspaces&copy-to=vps.
-  const replaced: string[] = [];
-  stub({});
-  vi.stubGlobal("window", { ...window, location: { search: "?desktop-settings=workspaces&copy-to=vps", href: "http://127.0.0.1:1/?desktop-settings=workspaces&copy-to=vps" },
-    history: { replaceState: (_state: unknown, _title: string, url: string) => { replaced.push(url); } } });
-  await mount(); await mount();
-  expect(vi.mocked(move.state).mock.calls).toContainEqual(["vps"]);
-  expect(render().html).toContain("from this computer to VPS");
-  // The panel is open, and nothing started: the person starts it here.
-  expect(move.start).not.toHaveBeenCalled();
-  expect(replaced.at(-1)).toBe("/?desktop-settings=workspaces");
-  // Already on this page: main's message names the panel; Computer access stays its own.
-  f.values = [];
-  let listener: (id?: string | null, panel?: "copy") => void = () => {};
-  stub({});
-  (window.ogb!.environments as { onOpenSettings: unknown }).onOpenSettings = (callback: typeof listener) => { listener = callback; return () => {}; };
-  await mount();
-  expect(render().html).not.toContain("Copy this computer's bots and chats");
-  listener("vps");
-  expect(render().html).not.toContain("Copy this computer's bots and chats");
-  listener("vps", "copy");
-  await mount();
-  expect(render().html).toContain("from this computer to VPS");
-});
-
-// ── Local environments (Environments on this computer) ─────────────────────
 const LOCAL_ENV = { id: "env-1", kind: "local", name: "Work", dataDir: "/home/me/.openmausbot-work", missing: false };
 const GONE_ENV = { id: "env-2", kind: "local", name: "Old", dataDir: "/home/me/.openmausbot-old", missing: true };
 const envState = (overrides: Record<string, unknown> = {}) => ({
@@ -146,14 +88,12 @@ it("creates an environment with the chosen folder — and without one when the f
   forms()[0]!.props.onSubmit!({ preventDefault: () => {} });
   await flush();
   expect(environments.create).toHaveBeenCalledWith("Work", "/data/work");
-  // The form is empty again, so a second create without a path sends none.
   expect(envFormFields()[0]!.props.value).toBe("");
   expect(envFormFields()[1]!.props.value).toBe("");
   envFormFields()[0]!.props.onChange!({ target: { value: "Solo" } });
   forms()[0]!.props.onSubmit!({ preventDefault: () => {} });
   await flush();
   expect(environments.create).toHaveBeenLastCalledWith("Solo", undefined);
-  // A failed create says one generic thing, whatever main's reason was.
   environments.create.mockResolvedValueOnce({ ok: false, error: "duplicate" });
   envFormFields()[0]!.props.onChange!({ target: { value: "Work" } });
   forms()[0]!.props.onSubmit!({ preventDefault: () => {} });
@@ -179,7 +119,6 @@ it("asks what to do with the folder when forgetting a local environment, and del
   await mount();
   expect(render().html).not.toContain("Also delete this folder");
   expect(environments.forget).not.toHaveBeenCalled();
-  // Keep the files (default): no purge argument at all.
   rowButton("Forget Work")!.props.onClick!();
   await mount();
   textButton("Forget")!.props.onClick!();
@@ -231,4 +170,20 @@ it("offers no Forget for the environment this app is on", async () => {
   const { html } = render();
   expect(html).not.toContain('aria-label="Forget Work"');
   expect(html).toContain('aria-label="Forget Old"');
+});
+
+// Two controls over one record let the Cloud switch read off while Computer access lent apps and screen to the same Cloud.
+it("My Cloud's entry has one lending control, Let my bots use this computer; other servers keep Computer access", async () => {
+  config.value = { features: { sharedComputers: true } };
+  const open = vi.fn().mockResolvedValue(undefined);
+  const cloud = { id: "cloud", name: "My Cloud", origin: "https://omb-u-1.fly.dev", home: true };
+  stub({ computerSharing: { state: vi.fn() }, cloudLending: { open } });
+  vi.mocked((globalThis.window as unknown as { ogb: { environments: { state: ReturnType<typeof vi.fn> } } }).ogb.environments.state)
+    .mockResolvedValue({ localOrigin: "http://127.0.0.1:1", remote: false, activeId: "local", environments: [VPS, cloud] });
+  await mount();
+  const labels = render().nodes.filter(node => node.type === "button").map(node => node.props["aria-label"] ?? Children.toArray(node.props.children).join(""));
+  expect(labels).toContain("Computer access for VPS");
+  expect(labels).not.toContain("Computer access for My Cloud");
+  render().nodes.find(node => node.type === "button" && Children.toArray(node.props.children).join("") === "Let my bots use this computer")!.props.onClick!();
+  expect(open).toHaveBeenCalledOnce();
 });

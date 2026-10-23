@@ -1,7 +1,3 @@
-// The harness's part in a provider's permission request: pass it through.
-// These pin that nothing here judges an action, that Full access answers
-// everything, that Approve for me also allows a web search, and that every
-// note a card can show has a catalog key.
 import { describe, expect, it, vi } from "vitest";
 
 import englishCatalog from "../src/locales/en.json" with { type: "json" };
@@ -41,7 +37,6 @@ describe("autoVerdict", () => {
     for (const mode of ["ask", "edits", "auto", "custom"] as const) {
       expect(autoVerdict(mode, "mcp__composio__GMAIL_SEND_DRAFT", { commandAllowed: true })).toEqual({ approve: null, source: "outbound-guard" });
     }
-    // Native Full still belongs to the provider; Composio's relay enforces its independent gate.
     expect(autoVerdict("full", "GMAIL_SEND_EMAIL").source).toBe("full-access");
   });
   it("applies an explicit exact command grant without changing Full or answering questions/elevations", () => {
@@ -145,15 +140,12 @@ describe("held notes", () => {
     expect(approvalHeldNote({ source: "web-search", permission: true })).toBeUndefined();
     expect(approvalHeldNote({ source: "no-grant", permission: true })).toBeUndefined();
     expect(approvalHeldNote({ source: undefined, permission: true })).toBeUndefined();
-    // questions are never held for a mode reason
     expect(approvalHeldNote({ source: "native-approval", permission: false })).toBeUndefined();
     expect(approvalHeldReason({ source: "native-approval", permission: true }))
       .toBe("The provider requires your approval for this action.");
   });
 
-  // Both ways: every note the server can send has a catalog entry, so the
-  // client translates by key, and the catalog holds no note the server no
-  // longer sends. A note left behind describes behaviour that has gone.
+  // Both ways: the client translates every note by key, and a catalog note the server no longer sends describes behaviour that has gone.
   it("the catalog's held notes are exactly the ones the server sends", () => {
     const catalog = Object.fromEntries(Object.entries(englishCatalog).filter(([key]) => key.startsWith("approval.held.")));
     expect(catalog).toEqual(HELD_NOTE);
@@ -161,11 +153,8 @@ describe("held notes", () => {
 });
 
 describe("tools that ask a person", () => {
-  // A question normally arrives typed as a question and never reaches a
-  // verdict. This is the backstop for the path where one arrives typed as a
-  // permission: no mode may answer it, because approving does not answer
-  // anything — the CLI runs the tool with no answers and the model is told
-  // "The user did not answer the questions."
+  // The backstop for a question arriving typed as a permission: approving runs the tool with no answers, and the model is
+  // told "The user did not answer the questions."
   const modes = ["ask", "edits", "auto", "custom", "full"] as const;
 
   it("never answers AskUserQuestion for the person, even under Full access", () => {
@@ -197,7 +186,6 @@ describe("delegatedApprovalMode", () => {
   it("passes an Approve-for-me or Auto-accept-edits Chief's level on too", () => {
     expect(delegatedApprovalMode({ ...base, senderMode: "auto" })).toBe("auto");
     expect(delegatedApprovalMode({ ...base, senderMode: "edits" })).toBe("edits");
-    // A Chief's own Custom config reads as Approve for me for a teammate.
     expect(delegatedApprovalMode({ ...base, senderMode: "custom", recipientDriverKind: "codex" })).toBe("auto");
   });
   it("passes nothing on from an ordinary bot, a Chief on Ask, or a bot to itself", () => {
@@ -213,7 +201,6 @@ describe("delegatedApprovalMode", () => {
     expect(delegatedApprovalMode({ ...base, recipientMode: "custom", recipientDriverKind: "codex" })).toBeNull();
   });
   it("steps down to the next level the teammate's engine has", () => {
-    // Every engine runs Full, the default level, so a Chief's Full arrives whole.
     expect(delegatedApprovalMode({ ...base, recipientDriverKind: "hermesAgent" })).toBe("full");
     expect(delegatedApprovalMode({ ...base, recipientDriverKind: undefined })).toBe("full");
     // Codex has no Auto-accept edits (its Ask already writes the workspace).

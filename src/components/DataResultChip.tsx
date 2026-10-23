@@ -3,7 +3,6 @@ import { ArrowUpRight, ChartNoAxesCombined, ChevronRight, Table2 } from "lucide-
 import { useStore, type Message } from "@/state/store";
 import { t } from "@/lib/i18n";
 
-/** The query is a receipt of what ran, not the viewer's mutable SQL draft. */
 export function DataResultChip({ message }: { message: Message }) {
   const { state, dispatch } = useStore();
   const [expanded, setExpanded] = useState(false);

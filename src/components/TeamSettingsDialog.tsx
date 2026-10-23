@@ -1,8 +1,3 @@
-// "Set for all bots in this team…" from a team's sidebar menu: one approval
-// level, or one model and effort, for every bot in the team. Choose, read
-// what each bot will get (and which ones are skipped, and why), apply, then
-// read the result. Each bot is saved through its own settings panel's request
-// (lib/team-bulk-settings.ts explains why there is no bulk route).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
@@ -28,12 +23,12 @@ import { EFFORT_LEVELS, type EffortLevel } from "../../shared/wire";
 import { approvalModeOptions } from "./ApprovalModeSelector";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import { effortLabel } from "./ModelPicker";
+import { Select } from "./Select";
 
 type Tab = "approval" | "model";
 const KEEP = "";
 const ENGINE_DEFAULT = "default";
 
-/** The per-bot preview or result list. Pure, for a markup test. */
 export function TeamSettingsRows({ rows }: { rows: ReadonlyArray<TeamPlanRow | TeamResultRow> }) {
   return (
     <ul className="flex flex-col gap-1" data-testid="team-settings-rows">
@@ -76,8 +71,6 @@ export function TeamSettingsDialog({ team, onClose }: { team: string; onClose: (
         ...(model === KEEP ? {} : { model }),
         ...(effort === KEEP ? {} : { effort: effort === ENGINE_DEFAULT ? null : effort as EffortLevel }),
       };
-  // Re-planned on every render: a bot that starts or finishes a turn while
-  // the dialog is open moves between "will change" and "skipped: busy".
   const plan = change ? planTeamChange(bots, state.instances, change) : [];
   const applying = plan.filter((row) => row.status === "apply").length;
 
@@ -106,7 +99,6 @@ export function TeamSettingsDialog({ team, onClose }: { team: string; onClose: (
   const counts = results ? teamResultCounts(results) : null;
   const tabClass = (active: boolean) => cn("flex-1 rounded-md px-2.5 py-1.5 text-[13px] font-medium",
     active ? "bg-raised text-ink" : "text-ink-secondary hover:text-ink");
-  const select = "mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2 py-1.5 text-[13px] text-ink";
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onMouseDown={(event) => {
@@ -154,17 +146,17 @@ export function TeamSettingsDialog({ team, onClose }: { team: string; onClose: (
             ) : (
               <fieldset disabled={running} className="flex flex-col gap-3">
                 <label className="text-[13px] text-ink-secondary">{t("teamSettings.model")}
-                  <select aria-label={t("teamSettings.model")} value={model} onChange={(event) => setModel(event.target.value)} className={select}>
+                  <Select className="mt-1 w-full" aria-label={t("teamSettings.model")} value={model} onChange={(event) => setModel(event.target.value)}>
                     <option value={KEEP}>{t("teamSettings.keepModel")}</option>
                     {models.map((choice) => <option key={choice.id} value={choice.id}>{`${choice.label} · ${choice.engines.join(", ")}`}</option>)}
-                  </select>
+                  </Select>
                 </label>
                 <label className="text-[13px] text-ink-secondary">{t("teamSettings.effort")}
-                  <select aria-label={t("teamSettings.effort")} value={effort} onChange={(event) => setEffort(event.target.value)} className={select}>
+                  <Select className="mt-1 w-full" aria-label={t("teamSettings.effort")} value={effort} onChange={(event) => setEffort(event.target.value)}>
                     <option value={KEEP}>{t("teamSettings.keepEffort")}</option>
                     <option value={ENGINE_DEFAULT}>{t("teamSettings.engineDefaultEffort")}</option>
                     {efforts.map((level) => <option key={level} value={level}>{effortLabel(level)}</option>)}
-                  </select>
+                  </Select>
                 </label>
                 <p className="text-[12px] text-ink-secondary">{t("teamSettings.threadModels")}</p>
               </fieldset>

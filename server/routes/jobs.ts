@@ -1,13 +1,4 @@
-// GET /api/threads/:threadId/job: the job of one conversation as a person
-// reads it (server/job-view.ts), for the openmausbot CLI, MCP's
-// wait_for_conversation and anyone scripting OpenMausBot. With `wait` and the
-// `version` a previous read returned, the request is held until the job
-// changes or the wait runs out: one cheap request instead of a poll loop.
-// It wakes on the store's change feed (a turn starting or ending, a report
-// landing, a bot's activity), and looks again every few seconds for a change
-// the feed does not carry.
-//
-// Built by routes/threads.ts with the conversation reads it belongs to.
+// With `wait` and the `version` a previous read returned, the request is held until the job changes or the wait runs out.
 import type { RequestAuth } from "../request-auth.ts";
 import type { SessionRegistry } from "../sessions.ts";
 import type { Viewer, VisibleSet } from "../bot-visibility.ts";
@@ -18,7 +9,7 @@ import { hasQueuedSteeredMessages } from "../steer-queue.ts";
 import type { Store } from "../store.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 
-/** The longest a read is held. Clients ask again with the version they got. */
+/** Clients ask again with the version they got. */
 export const JOB_WAIT_MAX_MS = 25_000;
 const RECHECK_MS = 2_000;
 const SETTLE_MS = 150;
@@ -26,14 +17,12 @@ const SETTLE_MS = 150;
 export interface JobRouteDeps {
   store: Pick<Store, "bot" | "botByThread" | "groupByThread" | "taskByThread" | "groupTaskByThread" | "onChange">;
   coordinator: Pick<Coordinator, "job">;
-  /** A room thread has a turn running or is between speakers (index.ts). */
   groupThreadIsWorking(groupId: string, threadId: string): boolean;
   viewerFor(auth: RequestAuth): Viewer;
   visibleTo(viewer: Viewer): VisibleSet;
   /** A held read outlives its start: the session is asked again before it answers. */
   sessions: Pick<SessionRegistry, "isLive">;
   now?: () => number;
-  /** How often a held read looks again without a change (tests shorten it). */
   recheckMs?: number;
 }
 
@@ -61,7 +50,6 @@ export function createJobRoutes(deps: JobRouteDeps): RouteHandler {
     const { scopes, rows } = coordinator.job(threadId, since, owner?.id);
     return jobView({
       threadId, scope, since, now: now(), scopes, rows, conversation, full,
-      // A teammate's thread: its own activity; in a room, the speaking bot's.
       activityOf: (row) => row.assignee.destination.groupId
         ? store.bot(row.assignee.botId)?.activity
         : store.taskByThread(row.assignee.botId, row.assignee.destination.threadId)?.activity,
@@ -90,8 +78,7 @@ export function createJobRoutes(deps: JobRouteDeps): RouteHandler {
     const wait = number("wait", JOB_WAIT_MAX_MS);
     if (sinceParam === null) return json(res, 400, { error: "since must be a server time in milliseconds" });
     if (wait === null) return json(res, 400, { error: `wait must be 0 to ${JOB_WAIT_MAX_MS} milliseconds` });
-    // No `since`: the work open now. A waiter passes back the since it got,
-    // so the job it watches does not move under it.
+    // No `since`: the work open now. A waiter passes back the since it got, so its job does not move under it.
     const since = params.has("since") ? sinceParam : now();
     const full = params.get("full") === "1";
     const known = params.get("version") ?? "";
@@ -101,9 +88,6 @@ export function createJobRoutes(deps: JobRouteDeps): RouteHandler {
     if (!view) return json(res, 404, { error: "no such conversation" });
     if (!wait || view.version !== known) return json(res, 200, view);
 
-    // Held: answer at the first change, or with the same view when the wait
-    // runs out. A read that throws in a timer ends the hold with that error
-    // (the route table answers it) rather than escaping the request.
     const held = await new Promise<{ view: JobView | null } | { error: unknown }>((answer) => {
       let settleTimer: ReturnType<typeof setTimeout> | undefined;
       let done = false;
@@ -124,21 +108,18 @@ export function createJobRoutes(deps: JobRouteDeps): RouteHandler {
         if (always || !next || next.version !== known) finish({ view: next });
       };
       const abandoned = () => finish({ view: null });
-      // A burst of changes (a streaming reply) is read once it pauses.
       const unsubscribe = store.onChange(() => {
         clearTimeout(settleTimer);
         settleTimer = setTimeout(() => look(false), SETTLE_MS);
       });
       const recheck = setInterval(() => look(false), deps.recheckMs ?? RECHECK_MS);
       const deadline = setTimeout(() => look(true), wait);
-      // The response closes before it is written only when the client went away.
       res.on("close", abandoned);
     });
     if (res.writableEnded || res.destroyed) return;
     if ("error" in held) throw held.error;
     if (!held.view) return json(res, 404, { error: "no such conversation" });
-    // The hold may have outlived a sign-out or an audience change: authorize
-    // again, and read the job with what this person may see now.
+    // The hold may have outlived a sign-out or an audience change: authorize again.
     if (auth.kind === "session" && !deps.sessions.isLive(auth.session.id)) {
       return json(res, 401, { error: "unauthorized: this session has expired or was revoked" });
     }

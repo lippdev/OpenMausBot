@@ -1,8 +1,3 @@
-// Days of the week, picked by tapping them: seven round toggles, Monday
-// first, any number on, with a line under them that says what is picked
-// ("Weekdays", "Mon, Thu"). The toggles are one stop for Tab; the arrow
-// keys, Home and End move along them, and Space or Enter turns one on or
-// off. The value is a comma list in week order ("mon,tue"), "" for none.
 import { useState, type KeyboardEvent } from "react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -11,7 +6,7 @@ import { useWidgetField } from "./WidgetControls";
 
 let names: { narrow: string[]; short: string[]; long: string[] } | undefined;
 
-/** The days' names in the person's own language, Monday first (1 January 2024 was a Monday). */
+/** 1 January 2024 was a Monday. */
 export function widgetDayNames(): { narrow: string[]; short: string[]; long: string[] } {
   if (names) return names;
   const days = WIDGET_WEEKDAYS.map((_, index) => new Date(2024, 0, 1 + index));
@@ -20,7 +15,6 @@ export function widgetDayNames(): { narrow: string[]; short: string[]; long: str
   return names;
 }
 
-/** What is picked, as the person says it: "Every day", "Weekdays", "Weekends", else the days' short names. */
 export function widgetDaysCaption(value: string): string {
   const picked = WIDGET_WEEKDAYS.filter((day) => value.split(",").includes(day));
   const key = picked.join(",");
@@ -31,8 +25,6 @@ export function widgetDaysCaption(value: string): string {
   return picked.map((day) => widgetDayNames().short[WIDGET_WEEKDAYS.indexOf(day)]).join(", ");
 }
 
-/** `labelledBy` is the caption drawn above the toggles from the field's own `label`; `end` lines them up at
- * the row's end, beside a label. */
 export function WidgetDayPicker({ node, labelledBy, end = false }: { node: WidgetNode; labelledBy?: string; end?: boolean }) {
   const field = useWidgetField(node);
   const [stop, setStop] = useState(0);
@@ -71,7 +63,6 @@ export function WidgetDayPicker({ node, labelledBy, end = false }: { node: Widge
               key={name}
               type="button"
               data-day={name}
-              // where a press that found it empty sends the focus
               data-widget-field={index === 0 ? field.name : undefined}
               aria-pressed={on}
               aria-label={day.long[index]}

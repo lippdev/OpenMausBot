@@ -1,17 +1,15 @@
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
 
 import { t } from "@/lib/i18n";
 import { parseRoomTurnTimeoutMinutes } from "@/lib/room-turn-timeout";
 import { useStore, type Group } from "@/state/store";
+import { Select } from "./Select";
 
 const PRESET_TURN_LIMITS = [30, 60, 120] as const;
 
 const isPresetTurnLimit = (minutes: number): minutes is (typeof PRESET_TURN_LIMITS)[number] =>
   (PRESET_TURN_LIMITS as readonly number[]).includes(minutes);
 
-/** Per-conversation ceiling for a group turn. Direct one-to-one chats keep
- * the inactivity watchdog and do not show this. */
 export function ConversationTurnLimit({ group }: { group: Group }) {
   const { state, dispatch } = useStore();
   const globalMinutes = state.config?.rooms.turnTimeoutMinutes ?? 5;
@@ -81,37 +79,33 @@ export function ConversationTurnLimit({ group }: { group: Group }) {
 
   const value = saved == null ? "default" : isPresetTurnLimit(saved) ? String(saved) : "current";
   return (
-    <div className="relative shrink-0" title={t("room.turnLimit.help")}>
-      <select
-        aria-label={t("room.turnLimit.aria")}
-        data-testid="conversation-turn-limit"
-        value={value}
-        onChange={(event) => {
-          const next = event.target.value;
-          if (next === "default") save(null);
-          else if (next === "custom") {
-            setDraft(saved == null ? "30" : String(saved));
-            setCustom(true);
-          } else save(Number(next));
-        }}
-        className="h-8 max-w-[168px] appearance-none truncate rounded-full border border-hairline/40 bg-raised/60 py-1 pl-3 pr-7 text-[12.5px] font-medium text-ink outline-none hover:bg-raised focus:border-accent"
-      >
-        <option value="default">{t("room.turnLimit.default", { minutes: globalMinutes })}</option>
-        {PRESET_TURN_LIMITS.map((minutes) => (
-          <option key={minutes} value={String(minutes)}>
-            {t("room.turnLimit.minutes", { minutes })}
-          </option>
-        ))}
-        {saved != null && !isPresetTurnLimit(saved) ? (
-          <option value="current">{t("room.turnLimit.minutes", { minutes: saved })}</option>
-        ) : null}
-        <option value="custom">{t("room.turnLimit.custom")}</option>
-      </select>
-      <ChevronDown
-        size={13}
-        aria-hidden="true"
-        className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-ink-secondary"
-      />
-    </div>
+    <Select
+      variant="pill"
+      size="sm"
+      className="shrink-0 max-w-[168px]"
+      title={t("room.turnLimit.help")}
+      aria-label={t("room.turnLimit.aria")}
+      data-testid="conversation-turn-limit"
+      value={value}
+      onChange={(event) => {
+        const next = event.target.value;
+        if (next === "default") save(null);
+        else if (next === "custom") {
+          setDraft(saved == null ? "30" : String(saved));
+          setCustom(true);
+        } else save(Number(next));
+      }}
+    >
+      <option value="default">{t("room.turnLimit.default", { minutes: globalMinutes })}</option>
+      {PRESET_TURN_LIMITS.map((minutes) => (
+        <option key={minutes} value={String(minutes)}>
+          {t("room.turnLimit.minutes", { minutes })}
+        </option>
+      ))}
+      {saved != null && !isPresetTurnLimit(saved) ? (
+        <option value="current">{t("room.turnLimit.minutes", { minutes: saved })}</option>
+      ) : null}
+      <option value="custom">{t("room.turnLimit.custom")}</option>
+    </Select>
   );
 }

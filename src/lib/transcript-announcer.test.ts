@@ -19,8 +19,6 @@ const text = (id: string, role: Message["role"], body: string, from?: string): M
   ...(from ? { from: { botId: from.toLowerCase(), name: from, color: "green" as const } } : {}),
 });
 
-// Play a sequence of transcript states through the announcer the way the
-// hook does, and collect what a screen reader would hear.
 function play(states: TranscriptSnapshot[]): string[] {
   let memory = announcerBaseline(states[0]!);
   const heard: string[] = [];
@@ -39,11 +37,9 @@ describe("nextAnnouncement", () => {
     const heard = play([
       { busy: false, reply: reply("old") },
       { busy: true, reply: reply("old") },
-      // an in-between reply while tools still run stays quiet
       { busy: true, reply: reply("mid", "Looking now.") },
       { busy: true, reply: reply("mid", "Looking now.") },
       { busy: false, reply: reply("new") },
-      // re-renders after the turn add nothing
       { busy: false, reply: reply("new") },
       { busy: false, reply: reply("new") },
     ]);

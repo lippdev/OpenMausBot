@@ -9,13 +9,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 import { freePortBlock } from "./testing/ports.ts";
 
-// Two room features through a real server and the fake Claude CLI:
-//  - "stop @Bot" holds one member (its running turn ends, every route skips
-//    it, the hold is saved) until "@Bot …" or Resume brings it back, with
-//    what addressed it meanwhile;
-//  - a member's room reply is its turn's final message: earlier working
-//    notes summon nobody, and a turn that ends without one is re-asked once.
-
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SERVER_DIR, "..");
 const FAKE_CLAUDE = join(SERVER_DIR, "testing", "fake-claude-cli.ts");
@@ -65,8 +58,7 @@ beforeAll(async () => {
   slowGate = join(home, "slow-finish");
   writeFileSync(join(data, "config.json"), JSON.stringify({
     instances: {
-      // holds its turn open until the gate file exists; its closing reply
-      // echoes the prompt it was given
+      // Holds its turn open until the gate file exists; its closing reply echoes the prompt it was given.
       patient: fixture("Patient fixture", { FAKE_CLAUDE_MODE: "slow", FAKE_CLAUDE_SLOW_FINISH_GATE: slowGate }),
       quick: fixture("Quick fixture", { FAKE_CLAUDE_MODE: "happy" }),
       // a working note that names a teammate, then the actual answer
@@ -105,7 +97,6 @@ beforeAll(async () => {
     try {
       if ((await fetch(`${base}/api/health`)).status === 200) break;
     } catch {
-      // Still starting.
     }
     if (Date.now() >= deadline) throw new Error(`server never became healthy: ${stderr}`);
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -160,7 +151,6 @@ describe("stop @Bot holds one room member", { timeout: 60_000 }, () => {
       await send(room.id, "@Bee start the long job");
       await expect.poll(async () => (await snapshot(room.id)).room?.busyBotId, { timeout: 15_000 }).toBe(bee.id);
 
-      // the stop reaches Bee mid-turn; the room is not stopped
       await send(room.id, "stop @Bee");
       await expect.poll(async () => {
         const { room: current, messages } = await snapshot(room.id);
@@ -172,7 +162,6 @@ describe("stop @Bot holds one room member", { timeout: 60_000 }, () => {
         };
       }, { timeout: 15_000 }).toEqual({ held: [bee.id], working: false, heldChips: 1, annSpoke: false });
 
-      // everyone means everyone not held; the held line is written once
       await send(room.id, "Hello team");
       await expect.poll(async () => {
         const { room: current, messages } = await snapshot(room.id);
@@ -181,14 +170,11 @@ describe("stop @Bot holds one room member", { timeout: 60_000 }, () => {
       const beforeResume = await snapshot(room.id);
       const beeTextsWhileHeld = botTexts(beforeResume.messages, bee.id).length;
 
-      // the hold is saved with the room (it survives a restart)
       const saved = JSON.parse(readFileSync(join(data, "groups.json"), "utf8"));
       const savedRoom = saved.find((group: { id: string }) => group.id === room.id);
       expect(Object.keys(savedRoom.holds)).toEqual([bee.id]);
       expect(savedRoom.heldMessages[bee.id]).toHaveLength(1);
 
-      // a direct mention without a stop word releases Bee, whose turn is
-      // shown what addressed it while held (the fixture echoes its prompt)
       writeFileSync(slowGate, "finish");
       await send(room.id, "@Bee resume");
       await expect.poll(async () => {
@@ -215,7 +201,6 @@ describe("stop @Bot holds one room member", { timeout: 60_000 }, () => {
       const held = await api("POST", `/api/groups/${room.id}/holds`, { botId: bee.id, held: true });
       expect(held.status).toBe(200);
       expect(Object.keys(held.body.group.holds)).toEqual([bee.id]);
-      // the lead is held: a plain message reaches nobody, and says why
       await send(room.id, "Anyone there?");
       await expect.poll(async () => chips((await snapshot(room.id)).messages, HELD("Bee")).length, { timeout: 15_000 }).toBe(1);
       const { messages } = await snapshot(room.id);

@@ -43,7 +43,6 @@ describe("decider config", () => {
     try {
       const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ answers: { answer: { type: "noul", noul: 0.9 } } })));
       const decider = createDecider({ config: loadConfig, fetch: fetchImpl });
-      // no own key: the relay, with the included token
       expect(describeDecider(loadConfig())).toMatchObject({ configured: true, included: true, enabled: true });
       await decider.testKey();
       // the desktop hands the saved key over as env: now it is the one in use
@@ -101,8 +100,35 @@ describe("decider config", () => {
       provider: "openrouter", openrouterModel: "openai/gpt-4o-mini", openrouterApi: "chat", openrouterKey: OR_KEY, enabled: true, jobs: { roomRouting: true },
     });
     expect(describeDecider(loadConfig())).toEqual({
-      provider: "openrouter", model: "openai/gpt-4o-mini", api: "chat", configured: true, enabled: true, jobs: { roomRouting: true },
+      provider: "openrouter", model: "openai/gpt-4o-mini", api: "chat", configured: true, keySource: "own", enabled: true, jobs: { roomRouting: true },
     });
+  });
+
+  it("the OpenRouter key under API keys, from the file or the environment, backs the decision model until it has its own", async () => {
+    delete process.env.OMB_OPENROUTER_API_KEY;
+    writeFileSync(join(DATA_DIR, "config.json"), JSON.stringify({ decider: { provider: "openrouter", enabled: true }, openrouter: { key: OR_KEY } }));
+    const described = () => describeDecider(loadConfig());
+    expect(described()).toMatchObject({ provider: "openrouter", configured: true, keySource: "shared", sharedKey: true, enabled: true });
+    expect(JSON.stringify(described())).not.toContain(OR_KEY);
+
+    saveConfig({ decider: { openrouterKey: "sk-or-own" } });
+    expect(described()).toMatchObject({ configured: true, keySource: "own", sharedKey: true });
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answers: { answer: { noul: 0.97 } } }) } }] })));
+    const decider = createDecider({ config: loadConfig, fetch: fetchImpl });
+    await decider.testKey();
+    saveConfig({ decider: { openrouterKey: "" } });
+    await decider.testKey();
+    const bearers = fetchImpl.mock.calls.map(([, init]) => (init!.headers as Record<string, string>).authorization);
+    expect(bearers).toEqual(["Bearer sk-or-own", `Bearer ${OR_KEY}`]);
+
+    saveConfig({ openrouter: { key: "" } });
+    expect(described()).toMatchObject({ configured: false, enabled: false });
+    vi.stubEnv("OMB_OPENROUTER_API_KEY", OR_KEY);
+    try {
+      expect(described()).toMatchObject({ configured: true, keySource: "shared", enabled: true });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("an existing Jev-only config file keeps resolving to Jev, and picking OpenRouter leaves the Jev key in place", () => {
@@ -129,7 +155,6 @@ describe("decider config", () => {
     expect(parseConfigPatch({ decider: { baseUrl: "http://127.0.0.1:9000", enabled: true } }).decider).toEqual({ baseUrl: "http://127.0.0.1:9000", enabled: true });
     expect(() => parseConfigPatch({ decider: { baseUrl: "file:///etc/passwd" } })).toThrow();
     expect(() => parseConfigPatch({ decider: { provider: "someone-else" } })).toThrow();
-    // an older file without the section still loads
     expect(parseStoredConfig({ tts: { voice: "narrator" } }).decider).toBeUndefined();
   });
 });

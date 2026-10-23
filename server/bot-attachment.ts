@@ -1,8 +1,5 @@
-// Lets a bot hand a finished file to the user as a real chat attachment.
-// The source is opened with the same hardened resolver the message-file route
-// uses (realpath containment, O_NOFOLLOW, size cap), then copied into the
-// private attachment store, so the chat never needs to reach into a bot's
-// workspace or VM home afterwards.
+// The source opens through the message-file route's hardened resolver (realpath containment, O_NOFOLLOW, size cap) and is
+// copied into the private store, so the chat never reaches into a bot's workspace or VM home afterwards.
 import { basename, join, posix } from "node:path";
 import {
   extensionForFileMime,
@@ -25,10 +22,7 @@ function statusError(status: number, message: string): Error & { status: number 
   return Object.assign(new Error(message), { status });
 }
 
-/** Map a path inside a VM's durable workspace (for example
- * /home/cua/workspace/report.pdf, optionally as a file:// URL) onto the host
- * directory that is bind-mounted there. Anything outside the guest workspace,
- * including `..` escapes, is not a VM path and returns null. */
+/** Maps a guest workspace path onto its bind-mounted host directory; anything outside it, `..` escapes included, is null. */
 export function guestWorkspaceToHost(input: string, guestRoot: string, hostRoot: string): string | null {
   let value = input.trim();
   if (/^file:\/\//i.test(value)) {
@@ -45,8 +39,7 @@ export function guestWorkspaceToHost(input: string, guestRoot: string, hostRoot:
   return join(hostRoot, ...relative.split("/"));
 }
 
-/** A display name for the chat: the model's suggestion if it gave one, else
- * the file's own name. Directory parts are dropped, never trusted. */
+/** Directory parts are dropped, never trusted. */
 function displayNameFor(requested: string | undefined, fallback: string): string {
   const cleaned = requested?.trim().replace(/\\/g, "/");
   const name = cleaned ? posix.basename(cleaned) : "";
@@ -54,23 +47,16 @@ function displayNameFor(requested: string | undefined, fallback: string): string
 }
 
 export interface SaveBotAttachmentInput {
-  /** What the model passed: a host path, a path relative to a root, or a VM
-   * guest path when `guest` is supplied. */
   path: string;
   name?: string;
   /** Host directories the bot may read from (its working folder, workspace). */
   roots: readonly string[];
-  /** The bot's mounted Local VM, if any. */
   guest?: { root: string; host: string };
-  /** A host engine's turn may also deliver a file it saved this turn outside
-   * the roots, at a place the person named: one copied file, never a folder
-   * or a link grant (openFileSavedSince). Absent: roots only, as before. */
+  /** A file this turn saved outside the roots, at a place the person named: one copied file, never a folder or a link grant. */
   savedThisTurn?: { since: number; refuse: readonly string[] };
 }
 
-/** The roots first. Only their outside_workspace refusal falls through to a
- * file this turn saved elsewhere, so a missing or oversized file in the
- * working folder still says exactly that. */
+/** Only the roots' outside_workspace refusal falls through, so a missing or oversized file in the folder says exactly that. */
 async function openSource(path: string, roots: readonly string[], savedThisTurn: SaveBotAttachmentInput["savedThisTurn"]): Promise<OpenedMessageFile> {
   try {
     return await openMessageFile(path, roots);
@@ -99,7 +85,6 @@ export async function saveBotAttachment(input: SaveBotAttachmentInput): Promise<
     if (extensionForMime(mime)) {
       if (file.bytes > IMAGE_MAX_BYTES) throw statusError(413, `image exceeds ${IMAGE_MAX_BYTES} bytes`);
       const saved = saveImage(await file.handle.readFile(), mime);
-      // The name lets the reply's inline picture of this file show the copy (deliveredCopy).
       return { attachment: { kind: "image", path: saved.path, mime: saved.mime, name }, bytes: saved.bytes };
     }
     if (!extensionForFileMime(mime)) {
@@ -115,14 +100,8 @@ export async function saveBotAttachment(input: SaveBotAttachmentInput): Promise<
   }
 }
 
-/**
- * The copy a bot delivered with attach_file of a file its reply shows or
- * links, by name: the rule a link in the chat follows
- * (src/components/AttachmentGallery.tsx replyAttachmentGroup). attach_file
- * posts its own message, so the reply's turn is searched, from the reply
- * back to the message before it that is not the bot's. Only the reply's
- * author counts, and two deliveries with one name match neither.
- */
+/** The chat's link rule: search from the reply back to the last non-bot message; only the reply's author counts, and a
+ * name delivered twice matches neither. */
 export function deliveredCopy(messages: readonly Message[], reply: Message, name: string): Exclude<BotAttachment, { kind: "audio" }> | null {
   const byId = new Map(messages.map((message) => [message.id, message]));
   const author = reply.from?.botId;
@@ -143,17 +122,8 @@ export type AttachForTurnOutcome<S> =
   | { status: "limit" }
   | { status: "ended" };
 
-/**
- * Attach one file for one provider turn. Two things must hold while the copy
- * is awaited, so both are handled here rather than in the route:
- *
- * - The per-turn count is exact under parallel calls: the slot is reserved
- *   before the await, so simultaneous calls cannot all pass the same check.
- *   A call that fails or is refused gives its slot back.
- * - Nothing is published for a turn that ended (stopped, replaced, deleted, or
- *   moved) while the copy ran. `stillLive` is asked again after the await,
- *   just before `publish`, and the copy is discarded when it says no.
- */
+/** The slot is reserved before the await, so parallel calls cannot all pass the per-turn count; `stillLive` is asked again
+ * just before `publish`, so nothing is published for a turn that ended meanwhile. */
 export async function attachForTurn<S>(
   turn: { attachedFiles?: number },
   max: number,

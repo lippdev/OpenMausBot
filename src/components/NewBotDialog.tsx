@@ -4,10 +4,17 @@ import { api, BotEditorStore, useStore, type Bot, type ModelSelection } from "@/
 import { BotCreationDraft, EMPTY_BOT_DEFAULTS } from "@/lib/bot-creation-draft";
 import { createConfiguredBot, preparedBotTemplate } from "@/lib/create-configured-bot";
 import { BOT_ROLES, roleProfilePatch } from "@/lib/bot-roles";
+import { readyBot, readyBotTemplate } from "@/lib/ready-bots";
 import { chosenPreset, presetDraftPatch, presetGroups, presetPictureFile, presetSummaryLines, type BotPreset } from "@/lib/bot-presets";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
+import { useAdvancedMode } from "@/lib/interface-mode";
+import { botCreated } from "@/lib/product-events";
+import { useShowThreads } from "@/lib/thread-preferences";
+import { teamChats } from "@/state/team-chats";
+import { openBot } from "@/state/thread-navigation";
 import { visibilityFromForm, type VisibilityMode } from "./bot-settings/VisibilitySection";
 import type { NewBotDefaults } from "../../shared/new-bot-defaults";
 import type { Routine } from "@/lib/routines";
@@ -25,12 +32,17 @@ import { RoutineEditor } from "./RoutinesPage";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import { SharePresetDialog } from "./SharePresetDialog";
 import { SettingRow } from "./SettingsPrimitives";
+import { Select } from "./Select";
 
 const SECTIONS = ["Identity", "Soul", "Skills", "Memory", "Routines", "Access", "Model", "Permissions", "Voice & alerts"] as const;
 type Section = typeof SECTIONS[number];
+const SECTION_KEYS: Record<Section, LocaleKey> = {
+  Identity: "botSettings.sections.identity", Soul: "botSettings.sections.soul", Skills: "botSettings.sections.skills",
+  Memory: "botSettings.sections.memory", Routines: "botSettings.sections.routines", Access: "botSettings.sections.access",
+  Model: "botSettings.sections.model", Permissions: "botSettings.sections.permissions", "Voice & alerts": "botSettings.sections.voice",
+};
 
-/** Companion pairing permits creation, but not reading host defaults or
- * patching host settings. Keep its existing single-request creation flow. */
+/** Companion pairing permits creation, but not reading host defaults or patching host settings. */
 export function CompanionNewBotDialog() {
   const { state, dispatch } = useStore();
   const dialog = useRef<HTMLDivElement>(null);
@@ -55,7 +67,7 @@ export function CompanionNewBotDialog() {
       <h2 className="mb-4 text-[17px] font-semibold">{t("newBot.create")}</h2>
       <div className="flex justify-end gap-2">
         <button type="button" onClick={close} className="rounded-lg px-3 py-2">{t("common.cancel")}</button>
-        <button type="button" disabled={state.botCreationPending} onClick={() => dispatch({ type: "newBot", onCreated: close })}
+        <button type="button" disabled={state.botCreationPending} onClick={() => dispatch({ type: "newBot", onCreated: () => { botCreated("blank"); close(); } })}
           className="rounded-lg bg-accent px-4 py-2 text-white disabled:opacity-40">{t("newBot.create")}</button>
       </div>
     </div>
@@ -67,8 +79,10 @@ export function NewBotDialog(props: Parameters<typeof LocalNewBotDialog>[0] = {}
     ? <CompanionNewBotDialog /> : <LocalNewBotDialog {...props} />;
 }
 
-export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCreated, preserveSelection = false }: {
+export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCreated, preserveSelection = false, readyBotId }: {
   defaultsMode?: boolean; onClose?: () => void; section?: string; onCreated?: (bot: Bot) => void | Promise<void>; preserveSelection?: boolean;
+  /** A ready-made bot from the Templates gallery, filled in over the person's New bot defaults. */
+  readyBotId?: string;
 } = {}) {
   const parent = useStore();
   const [, render] = useState(0);
@@ -84,6 +98,8 @@ export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCr
   const [audience, setAudience] = useState<VisibilityMode>("everyone");
   const [people, setPeople] = useState("");
   const ownerOrAdmin = useOwnerOrAdmin();
+  const showThreads = useShowThreads();
+  const sections = useAdvancedMode() ? SECTIONS : SECTIONS.filter((section) => section !== "Model");
   const choosesVisibility = !defaultsMode && typeof window !== "undefined" && !window.ogb && ownerOrAdmin === true;
   const dialog = useRef<HTMLDivElement>(null);
   const closeRef = useRef(() => {});
@@ -103,15 +119,17 @@ export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCr
         }
         if (!defaultsMode) defaults.profile.name = defaults.profile.name?.trim() || result.suggestedName;
         if (section !== undefined) defaults.profile.section = section;
-        setDraft(new BotCreationDraft(defaults, () => render(value => value + 1)));
+        const ready = defaultsMode || !readyBotId ? undefined : readyBot(readyBotId);
+        const next = new BotCreationDraft(ready ? readyBotTemplate(defaults, ready) : defaults, () => render(value => value + 1));
+        if (ready) next.role = ready.id;
+        setDraft(next);
         setReady(true);
       }).catch(cause => { if (!cancelled) setError(String(cause)); });
     return () => { cancelled = true; };
-  }, [defaultsMode, section]);
+  }, [defaultsMode, section, readyBotId]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => () => draft.dispose(), [draft]);
   // Disabling the focused Create button drops focus to the page in Chromium.
-  // Keep keyboard dismissal and focus trapping inside the pending dialog.
   useEffect(() => { if (saving) dialog.current?.focus(); }, [saving]);
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -144,7 +162,9 @@ export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCr
       if (defaultsMode) await api("/api/config", { method: "PATCH", body: JSON.stringify({ newBotDefaults: await preparedBotTemplate(draft) }) });
       else {
         const { bot, warnings } = await createConfiguredBot(draft, undefined, undefined, undefined, visibility?.ok ? visibility.visibility : undefined);
+        botCreated(draft.preset ? "preset" : draft.role ? "template" : "blank", draft.role);
         parent.dispatch({ type: "botAdded", bot, preserveSelection });
+        if (!preserveSelection && teamChats()) openBot(parent.dispatch, bot, showThreads);
         if (warnings.length) parent.dispatch({ type: "error", message: warnings.join("\n") });
         try { await onCreated?.(bot); }
         catch (cause) { parent.dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }); }
@@ -167,13 +187,13 @@ export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCr
       else if (action.type === "setModel" && action.botId === draft.id) {
         draft.setModel(action.selection);
         if (action.resetApprovalToAsk) draft.patch({ approvalMode: "ask" });
-      } else if (action.type === "routinePatched") { /* Applied by the draft transport. */ }
-      else if (action.type === "toggleSettings") { /* Editor links stay inside this dialog. */ }
+      } else if (action.type === "routinePatched") {}
+      else if (action.type === "toggleSettings") {}
       else parent.dispatch(action);
     },
   };
   const title = defaultsMode ? t("newBot.defaults") : t("sidebar.newBot");
-  return <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3 sm:p-5">
+  return <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3 sm:p-5" hidden={!defaultsMode && parent.state.appSettingsOpen}>
     <div ref={dialog} role="dialog" aria-modal="true" aria-label={title} aria-busy={saving} tabIndex={-1}
       className="flex h-[min(760px,94dvh)] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-hairline/50 bg-panel shadow-2xl outline-none">
       <div className="flex shrink-0 items-center justify-between border-b border-hairline/40 px-5 py-4">
@@ -185,16 +205,15 @@ export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCr
           <div className="flex flex-wrap items-center gap-2 px-5 pt-3 text-[13px] text-ink-secondary" data-new-bot-visibility>
             <label className="flex items-center gap-2">
               {t("botSettings.visibility.title")}
-              <select
+              <Select size="sm"
                 value={audience}
                 disabled={saving}
                 onChange={(event) => setAudience(event.target.value as VisibilityMode)}
-                className="rounded-lg border border-hairline/40 bg-inset px-2 py-1.5 text-[13px] text-ink focus:outline-none"
               >
                 <option value="everyone">{t("botSettings.visibility.everyone")}</option>
                 <option value="admins">{t("botSettings.visibility.admins")}</option>
                 <option value="people">{t("botSettings.visibility.people")}</option>
-              </select>
+              </Select>
             </label>
             {audience === "people" && (
               <input
@@ -210,8 +229,8 @@ export function LocalNewBotDialog({ defaultsMode = false, onClose, section, onCr
         )}
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
         <nav aria-label={t("newBot.sections")} className="flex shrink-0 gap-1 overflow-x-auto border-b border-hairline/40 p-2 sm:w-40 sm:flex-col sm:border-b-0 sm:border-r">
-          {SECTIONS.map(label => <button key={label} type="button" onClick={() => setActive(label)} aria-current={active === label ? "page" : undefined}
-            className={cn("shrink-0 rounded-lg px-3 py-2 text-left text-[13px]", active === label ? "bg-control text-ink" : "text-ink-secondary hover:bg-control/50")}>{label}</button>)}
+          {sections.map(label => <button key={label} type="button" onClick={() => setActive(label)} aria-current={active === label ? "page" : undefined}
+            className={cn("shrink-0 rounded-lg px-3 py-2 text-left text-[13px]", active === label ? "bg-control text-ink" : "text-ink-secondary hover:bg-control/50")}>{t(SECTION_KEYS[label])}</button>)}
         </nav>
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
           {!ready && !error && <div role="status" className="flex items-center gap-2 text-[13px] text-ink-secondary"><Loader2 size={16} className="animate-spin" />{t("newBot.loading")}</div>}
@@ -243,10 +262,10 @@ function DraftSection({ active, draft, defaultsMode }: { active: Section; draft:
     <StartingRole draft={draft} defaultsMode={defaultsMode} />
     <IdentitySection bot={bot} patch={derived.patch} activeState={derived.activeState} mascotMotion={null}
       namePlaceholder={defaultsMode ? t("newBot.randomName") : undefined} />
-    <label className="block text-[13px] text-ink-secondary">Team
-      <select className={cn(inputCls, "mt-1.5")} value={bot.section ?? ""} onChange={event => draft.patch({ section: event.target.value })}>
-        <option value="">General</option>{[...new Set([...(state.sections ?? []), ...state.bots.map(bot => bot.section ?? "")])].filter(Boolean).map(name => <option key={name}>{name}</option>)}
-      </select>
+    <label className="block text-[13px] text-ink-secondary">{t("newBot.team")}
+      <Select size="lg" className="mt-1.5 w-full" value={bot.section ?? ""} onChange={event => draft.patch({ section: event.target.value })}>
+        <option value="">{t("teamSettings.general")}</option>{[...new Set([...(state.sections ?? []), ...state.bots.map(bot => bot.section ?? "")])].filter(Boolean).map(name => <option key={name}>{name}</option>)}
+      </Select>
     </label>
   </div>;
   if (active === "Soul") return <SoulSection bot={bot} patch={derived.patch} />;
@@ -259,22 +278,16 @@ function DraftSection({ active, draft, defaultsMode }: { active: Section; draft:
   return <VoiceSection bot={bot} derived={derived} />;
 }
 
-/** Starting role: presets from the organization and imported files first,
- * then the built-in roles. A preset fills name, look and instructions (all
- * still editable); its skills and notes are added when the bot is created. */
 function StartingRole({ draft, defaultsMode }: { draft: BotCreationDraft; defaultsMode: boolean }) {
   const [presets, setPresets] = useState<BotPreset[]>([]);
   const [loads, setLoads] = useState(0);
   const [error, setError] = useState("");
-  // The draft's picture came from a preset (so the next preset may replace it).
   const presetPicture = useRef(false);
   useEffect(() => {
-    // Defaults are the installation's own; presets are for one new bot.
     if (defaultsMode) return;
     let cancelled = false;
     void api<{ presets: BotPreset[] }>("/api/bot-presets")
       .then(result => { if (!cancelled) setPresets(result.presets); })
-      // Members and older servers: the built-in roles only.
       .catch(() => { if (!cancelled) setPresets([]); });
     return () => { cancelled = true; };
   }, [defaultsMode, loads]);
@@ -285,7 +298,9 @@ function StartingRole({ draft, defaultsMode }: { draft: BotCreationDraft; defaul
     if (!preset) {
       draft.choosePreset(undefined);
       const role = BOT_ROLES.find(role => role.id === value);
-      if (role) draft.patch(roleProfilePatch(role));
+      draft.chooseRole(role?.id);
+      const look = role && readyBot(role.id)?.look;
+      if (role) draft.patch({ ...roleProfilePatch(role), ...look });
       return;
     }
     draft.patch(presetDraftPatch(preset));
@@ -316,13 +331,13 @@ function StartingRole({ draft, defaultsMode }: { draft: BotCreationDraft; defaul
   const roles = BOT_ROLES.map(role => <option key={role.id} value={role.id}>{role.title}</option>);
   return <div>
     <label className="block text-[13px] text-ink-secondary">{t("newBot.startingRole")}
-      <select className={cn(inputCls, "mt-1.5")} value={draft.preset ? `preset:${draft.preset.id}` : ""} onChange={event => void choose(event.target.value)}>
+      <Select size="lg" className="mt-1.5 w-full" value={draft.preset ? `preset:${draft.preset.id}` : ""} onChange={event => void choose(event.target.value)}>
         <option value="">{t("newBot.customSettings")}</option>
         {presetGroups(presets).map(group => <optgroup key={group.label} label={group.label}>
           {group.presets.map(preset => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}
         </optgroup>)}
         {presets.length ? <optgroup label={t("newBot.builtInRoles")}>{roles}</optgroup> : roles}
-      </select>
+      </Select>
     </label>
     {chosen && <div className="mt-2 space-y-1 rounded-lg bg-card px-3 py-2.5 text-[12.5px] text-ink-secondary" data-new-bot-preset>
       {presetSummaryLines(chosen).map((line, index) => <p key={index} className="break-words">{line}</p>)}
@@ -337,13 +352,13 @@ function DraftMemory({ draft }: { draft: BotCreationDraft }) {
   const [path, setPath] = useState("MEMORY.md");
   const [name, setName] = useState("");
   return <div className="space-y-3">
-    <select className={inputCls} aria-label="Memory file" value={path} onChange={event => setPath(event.target.value)}>
+    <Select size="lg" className="w-full" aria-label={t("memory.fileLabel", { path })} value={path} onChange={event => setPath(event.target.value)}>
       {[...new Set(["MEMORY.md", ...Object.keys(draft.template.memory)])].map(file => <option key={file}>{file}</option>)}
-    </select>
-    <textarea className={cn(inputCls, "min-h-72 font-mono")} aria-label="Memory contents" value={draft.template.memory[path] ?? ""} onChange={event => draft.setMemory(path, event.target.value)} />
-    <div className="flex gap-2"><input className={inputCls} aria-label="New memory topic" placeholder="Topic name" value={name} onChange={event => setName(event.target.value)} />
-      <button type="button" aria-label="Add memory topic" disabled={!/^[a-zA-Z0-9_-]+$/.test(name)} className="rounded-lg bg-control px-3 disabled:opacity-40" onClick={() => { const next = `memory/${name}.md`; if (!(next in draft.template.memory)) draft.setMemory(next, ""); setPath(next); setName(""); }}><Plus size={16} /></button>
-      {path !== "MEMORY.md" && <button type="button" aria-label="Remove memory topic" className="rounded-lg bg-control px-3" onClick={() => { draft.setMemory(path, null); setPath("MEMORY.md"); }}><Trash2 size={16} /></button>}
+    </Select>
+    <textarea className={cn(inputCls, "min-h-72 font-mono")} aria-label={t("memory.contents")} value={draft.template.memory[path] ?? ""} onChange={event => draft.setMemory(path, event.target.value)} />
+    <div className="flex gap-2"><input className={inputCls} aria-label={t("memory.newTopicLabel")} placeholder={t("memory.newTopicLabel")} value={name} onChange={event => setName(event.target.value)} />
+      <button type="button" aria-label={t("memory.addTopic")} disabled={!/^[a-zA-Z0-9_-]+$/.test(name)} className="rounded-lg bg-control px-3 disabled:opacity-40" onClick={() => { const next = `memory/${name}.md`; if (!(next in draft.template.memory)) draft.setMemory(next, ""); setPath(next); setName(""); }}><Plus size={16} /></button>
+      {path !== "MEMORY.md" && <button type="button" aria-label={t("memory.removeTopic")} className="rounded-lg bg-control px-3" onClick={() => { draft.setMemory(path, null); setPath("MEMORY.md"); }}><Trash2 size={16} /></button>}
     </div>
   </div>;
 }
@@ -354,8 +369,8 @@ function DraftRoutines({ draft }: { draft: BotCreationDraft }) {
     <button type="button" className="rounded-lg bg-accent px-3 py-2 text-[13px] text-white" onClick={() => setEditing("new")}>{t("computer.routines.create")}</button>
     {draft.routines.map(routine => <div key={routine.id} className="flex items-center gap-2 rounded-lg bg-card p-3">
       <button type="button" className="min-w-0 flex-1 text-left text-[13px]" onClick={() => setEditing(routine)}>{routine.name}</button>
-      <label className="flex items-center gap-1.5 text-[12px] text-ink-secondary"><input type="checkbox" checked={routine.enabled} onChange={event => draft.setRoutineEnabled(routine.id, event.target.checked)} />Enabled</label>
-      <button type="button" aria-label={`Remove ${routine.name}`} onClick={() => draft.removeRoutine(routine.id)} className="rounded p-1.5 hover:bg-control"><Trash2 size={15} /></button>
+      <label className="flex items-center gap-1.5 text-[12px] text-ink-secondary"><input type="checkbox" checked={routine.enabled} onChange={event => draft.setRoutineEnabled(routine.id, event.target.checked)} />{t("newBot.enabled")}</label>
+      <button type="button" aria-label={t("newBot.removeRoutine", { name: routine.name })} onClick={() => draft.removeRoutine(routine.id)} className="rounded p-1.5 hover:bg-control"><Trash2 size={15} /></button>
     </div>)}
     {editing && <RoutineEditor routine={editing === "new" ? undefined : editing} bots={[draft.bot]} lockedBotId={draft.id} onClose={() => setEditing(null)} />}
   </div>;

@@ -22,7 +22,6 @@ export function stripLeakedSystemHarnessMessages(text: string | null | undefined
 /** Returns true if the message text consists entirely of leaked system harness messages. */
 export function isPureLeakedSystemHarnessMessage(text: string | null | undefined): boolean {
   if (!text || typeof text !== "string") return false;
-  // If text has system message markers and stripping removes all non-whitespace content:
   const hasMarkers = /<SYSTEM_(?:MESSAGE|NOTIFICATION)>/i.test(text) || /The following is a <SYSTEM_/i.test(text);
   if (!hasMarkers) return false;
   return stripLeakedSystemHarnessMessages(text).length === 0;

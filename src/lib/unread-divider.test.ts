@@ -18,11 +18,9 @@ describe("firstUnreadMessageId", () => {
   });
 
   it("starts after the last read message when the person read without replying", () => {
-    // U1, then A1 read on screen, then A2 arrived while away: only A2 is new
     const rows = [line("u1", "user"), line("a1", "bot"), line("a2", "bot")];
     expect(firstUnreadMessageId(rows, "a1")).toBe("a2");
     expect(firstUnreadMessageId(rows)).toBe("a1");
-    // a conversation the person only ever read still gets one
     expect(firstUnreadMessageId([line("b1", "bot"), line("b2", "bot")], "b1")).toBe("b2");
   });
 
@@ -59,7 +57,6 @@ describe("threadOpensUnread", () => {
     expect(threadOpensUnread({ threadId: "a", unread: true, tasks })).toBe(true);
     expect(threadOpensUnread({ threadId: "b", unread: true, tasks })).toBe(false);
     expect(threadOpensUnread({ threadId: "run", unread: true, tasks })).toBe(false);
-    // bots saved before task lists keep their own flag
     expect(threadOpensUnread({ threadId: "a", unread: true })).toBe(true);
     expect(threadOpensUnread({ threadId: "a", unread: false, tasks: null })).toBe(false);
   });
@@ -102,12 +99,10 @@ describe("the divider in the store", () => {
     const selected = { ...base, selectedId: "pepper", activeView: "chat" as const };
     const switched = reducer(selected, { type: "taskSwitched", bot: bot("pepper", { threadId: "pepper-b", tasks: unreadTasks("pepper", "pepper-b") }) });
     expect(switched.unreadDivider).toEqual({ threadId: "pepper-b", messageId: "b2" });
-    // The flag clears as it does for `select`: that thread is on screen.
     expect(switched.bots.find((b) => b.id === "pepper")!.tasks!.find((task) => task.threadId === "pepper-b")!.unread).toBe(false);
     const background = reducer(switched, { type: "taskSwitched", bot: bot("other", { threadId: "other-b", tasks: unreadTasks("other", "other-b") }) });
     expect(background.unreadDivider).toEqual(switched.unreadDivider);
     expect(background.bots.find((b) => b.id === "other")!.tasks!.find((task) => task.threadId === "other-b")!.unread).toBe(true);
-    // Nor while the person is on another page.
     const away = reducer({ ...selected, activeView: "routines" }, { type: "taskSwitched", bot: bot("pepper", { threadId: "pepper-b", tasks: unreadTasks("pepper", "pepper-b") }) });
     expect(away.bots.find((b) => b.id === "pepper")!.tasks!.find((task) => task.threadId === "pepper-b")!.unread).toBe(true);
   });

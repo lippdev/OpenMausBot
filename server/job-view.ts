@@ -1,27 +1,15 @@
-// What a person reads as "the job" of one conversation (GET
-// /api/threads/:id/job): the conversation's own state and the work it holds
-// on the job runtime (docs/runtime-contract.md), folded into one state with a
-// plain reason. Pure: the route (routes/jobs.ts) gathers the rows and the
-// conversation's state; MCP's wait_for_conversation and the openmausbot CLI
-// read the result, so all three agree on when a job is done.
 import { createHash } from "node:crypto";
 
 import type { Assignment } from "./runtime/types.ts";
 
-/** `job`: the conversation and every teammate it is still waiting on.
- * `turn`: the conversation's own turn only. */
 export type JobScope = "job" | "turn";
 export type JobState = "running" | "needs-input" | "completed" | "failed" | "stalled" | "idle";
-/** Every state but running: a waiter stops (or, on needs-input, may wait on). */
 export const FINAL_JOB_STATES: ReadonlySet<JobState> = new Set(["needs-input", "completed", "failed", "stalled", "idle"]);
 
 export interface ConversationState {
   kind: "bot" | "room";
-  /** A turn runs in this conversation now (a room: a member's, or the room between speakers). */
   busy: boolean;
-  /** The bot's own activity in this thread (a bot's thread only). */
   activity?: string;
-  /** Sends waiting behind the running turn. */
   queued: number;
 }
 
@@ -41,13 +29,11 @@ export interface JobNode {
   question?: string;
   mode: Assignment["mode"];
   reply: Assignment["reply"];
-  /** The conversation still waits on it (a one-way notice, or work whose requester stopped, is nobody's). */
   awaited: boolean;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
   executions: number;
-  /** What it last said or how it ended; clipped unless the read asked for full results. */
   result?: string;
 }
 
@@ -58,16 +44,12 @@ export interface JobView {
   since: number;
   now: number;
   state: JobState;
-  /** One plain sentence on why the state is what it is. */
   reason: string;
   /** Changes whenever anything a waiter would report changes; pass it back to wait for the next change. */
   version: string;
   conversation: ConversationState;
-  /** The rows the job starts from: this conversation's own turns, or the assignment it runs. */
   roots: string[];
-  /** The rows the reader may see, starting rows first in the order they began. */
   nodes: JobNode[];
-  /** Rows the reader may not see (they still count toward the state). */
   hidden: number;
   counts: Record<"queued" | "running" | "waiting" | "needsInput" | "completed" | "failed" | "cancelled", number>;
   needsInput: Array<{ id: string; botId: string; botName: string; threadId: string; question: string }>;
@@ -79,15 +61,12 @@ export interface JobInput {
   since: number;
   now: number;
   scopes: readonly string[];
-  /** Oldest first. */
   rows: readonly Assignment[];
   conversation: ConversationState;
-  /** The activity of the thread a running row works in (its bot's own, in a room). */
   activityOf(row: Assignment): string | undefined;
   nameOf(botId: string): string | undefined;
   titleOf(row: Assignment): string | undefined;
   visible(threadId: string): boolean;
-  /** Results whole (at most the runtime's 12,000 characters) instead of clipped. */
   full?: boolean;
 }
 
@@ -103,16 +82,11 @@ const names = (rows: readonly Assignment[], label: (row: Assignment) => string) 
 
 export function jobView(input: JobInput): JobView {
   const nameOf = (botId: string) => input.nameOf(botId) ?? botId;
-  // The reason never names, or quotes, work in a conversation the reader may
-  // not open: it still counts, as "a teammate".
+  // The reason never names or quotes work in a conversation the reader may not open.
   const shows = (row: Assignment) => input.visible(row.assignee.destination.threadId);
   const label = (row: Assignment) => shows(row) ? nameOf(row.assignee.botId) : "a teammate";
   const byId = new Map(input.rows.map((row) => [row.id, row]));
   const starts = new Set(input.scopes);
-  // A row counts while the conversation still waits on it: a starting row
-  // always; a row under it while it is awaited and every row above it is
-  // still open. A one-way notice, or work under a requester that stopped,
-  // is nobody's: it never holds the job open.
   const awaited = new Map<string, boolean>();
   const counts = (row: Assignment): boolean => {
     const known = awaited.get(row.id);
@@ -167,9 +141,6 @@ export function jobView(input: JobInput): JobView {
   }
 
   const shown = input.rows.filter(shows);
-  // Past the cap the newest rows are listed (rows come oldest first): a long
-  // conversation read from its start shows its latest job whole, teammates
-  // included, rather than its first requests alone.
   const listed = shown.slice(-NODES_SHOWN);
   const ordered = [...listed.filter((row) => starts.has(row.id)), ...listed.filter((row) => !starts.has(row.id))];
   const tally = { queued: 0, running: 0, waiting: 0, needsInput: 0, completed: 0, failed: 0, cancelled: 0 };

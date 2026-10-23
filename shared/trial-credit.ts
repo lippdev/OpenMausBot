@@ -1,7 +1,6 @@
 // The free trial's Claude credit refusing a turn, in the plain English words
-// the server stores in the failed turn's row (server/trial-credit.ts): the
-// phones read those words whole, and the app words them again in the
-// reader's language by telling which refusal a row carries.
+// the server stores in the failed turn's row: the phones read those words
+// whole, and the app words them again in the reader's language.
 
 /** Used up or no longer on this Cloud (both for good, until another token
  * comes), paused for now, or too little left for this one request. */

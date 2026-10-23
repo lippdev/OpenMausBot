@@ -1,6 +1,3 @@
-// What every headless verb is handed, and the two things most of them do
-// first: say which bot or room they mean (by name or id) and read the
-// message they were given.
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -15,21 +12,15 @@ export interface VerbContext {
   env: NodeJS.ProcessEnv;
   io: HeadlessIo;
   output: Output;
-  /** The server connection, opened on first use (a dry run never opens one). */
   client(): Promise<HeadlessClient>;
-  /** Aborted on Ctrl-C. */
   signal: AbortSignal;
-  /** How long wait and run wait when --timeout is not given. */
   defaultWaitMs: number;
 }
 
 export interface VerbOutcome {
-  /** What --json prints. */
   result: unknown;
   exitCode: number;
-  /** What a person reads without --json. */
   human: string[];
-  /** The verb already wrote its output as it went (events): print nothing more. */
   printed?: true;
 }
 
@@ -37,7 +28,6 @@ export interface Target {
   type: "bot" | "channel";
   id: string;
   name?: string;
-  /** A conversation the command named (--thread, --task). */
   taskId?: string;
 }
 
@@ -46,9 +36,6 @@ type Fleet = { bots?: Array<Record<string, any>>; groups?: Array<Record<string, 
 const owns = (record: Record<string, any>, threadId: string) =>
   record.threadId === threadId || (Array.isArray(record.tasks) && record.tasks.some((task: { threadId?: string }) => task.threadId === threadId));
 
-/** The bot or room a command names: a positional name or id, or exactly one
- * of --bot ID, --channel ID, --thread ID. An ambiguous name is a usage error
- * that lists the ids to use instead. */
 export async function resolveTarget(ctx: VerbContext, positional: string | undefined,
   allow: "bot" | "channel" | "any" = "any"): Promise<Target> {
   const bot = flag(ctx.flags, "bot")?.trim();
@@ -95,7 +82,6 @@ export async function resolveTarget(ctx: VerbContext, positional: string | undef
   return withTask({ type, id: record.id, name: record.name });
 }
 
-/** The message a command was given: a positional, --text, --message-file or `-` (stdin). */
 export async function readMessage(ctx: VerbContext, positional: string | undefined): Promise<string> {
   const text = flag(ctx.flags, "text");
   const file = flag(ctx.flags, "message-file");
@@ -123,7 +109,6 @@ export async function readMessage(ctx: VerbContext, positional: string | undefin
 /** A send id this command makes up, so a retried send is never a second message. */
 export const newSendId = () => `cli-${randomBytes(12).toString("base64url")}`;
 
-/** How run and wait wait: `--timeout`, `--on-input`, `--on-timeout`, `--strict`. */
 export const waitPolicy = (ctx: VerbContext) => ({
   onInput: oneOf(flag(ctx.flags, "on-input"), "--on-input", ["exit", "wait", "stop"] as const, "exit"),
   onTimeout: oneOf(flag(ctx.flags, "on-timeout"), "--on-timeout", ["leave", "stop"] as const, "leave"),

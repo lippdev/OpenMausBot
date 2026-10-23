@@ -1,6 +1,3 @@
-// A widget names its icons the way ChatKit does (shared/widget.ts,
-// WIDGET_ICON_NAMES). The desktop draws them from lucide, like every other
-// icon in the app. A name outside this map draws the dot.
 import {
   ArrowRight, Atom, Award, Bell, Book, BookOpen, Bot, Box, Briefcase, Bug, Calendar, ChartColumn, ChartNoAxesCombined, Check,
   ChevronLeft, ChevronRight, Circle, CircleCheck, CircleCheckBig, CircleHelp, CircleUserRound, Clock, Compass, Contact, Dot,
@@ -88,7 +85,6 @@ export const WIDGET_ICONS: Readonly<Record<string, LucideIcon>> = {
   "arrow-right": ArrowRight,
 };
 
-/** The lucide icon for a canonical name; the dot for anything else. */
 export function widgetIcon(name: unknown): LucideIcon {
   return typeof name === "string" && Object.hasOwn(WIDGET_ICONS, name) ? WIDGET_ICONS[name]! : Dot;
 }

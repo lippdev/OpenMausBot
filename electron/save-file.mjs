@@ -48,9 +48,7 @@ function isSameFile(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-// Paths come from model-rendered markdown, so they are untrusted. Resolve the
-// root and target before checking containment, then retain the target identity
-// for the open step below.
+// Paths come from model-rendered markdown, so they are untrusted.
 async function resolveSource(rawPath, { home, fsp, platform }) {
   const target = normalizeSourcePath(rawPath);
   const root = await canonicalPath(
@@ -70,9 +68,6 @@ async function resolveSource(rawPath, { home, fsp, platform }) {
   return { filePath, stats };
 }
 
-// Kept as a narrow validation seam for callers and tests that only need the
-// canonical path. The save flow uses withSavableFile so it cannot forget to
-// close the stable source handle.
 export async function resolveSavablePath(rawPath, { home, fsp = fs.promises, platform = process.platform } = {}) {
   return (await resolveSource(rawPath, { home, fsp, platform })).filePath;
 }
@@ -94,8 +89,6 @@ async function openSavableFile(rawPath, { home, fsp, platform }) {
   }
 }
 
-// The callback owns the save operation while this module owns the source
-// handle. This keeps validation, stable copying, and cleanup at one seam.
 export async function withSavableFile(
   rawPath,
   { home, fsp = fs.promises, platform = process.platform } = {},
@@ -118,12 +111,8 @@ export async function withSavableFile(
   }
 }
 
-// A bot can link a file outside its conversation's workspace, which the server
-// refuses to serve. The person may still ask the file manager to point at it.
-// The path comes from model-written markdown, so it is untrusted: only an
-// absolute local path that exists reaches `reveal`, and nothing here opens,
-// reads or runs it. Network shares and URLs are refused; merely looking up a
-// share can hand this computer's sign-in to whoever runs that server.
+// Untrusted path: nothing here opens, reads or runs it. Network shares are refused, since merely looking one up can hand
+// this computer's sign-in to whoever runs that server.
 export async function revealInFolder(rawPath, { reveal, fsp = fs.promises, pathApi = path }) {
   const local = (value) => !/^[\\/]{2}/.test(value) && pathApi.isAbsolute(value);
   if (typeof rawPath !== "string" || rawPath.includes("\0") || /^[a-z][a-z\d+.-]+:/i.test(rawPath) || !local(rawPath)) {
@@ -142,11 +131,15 @@ export async function revealInFolder(rawPath, { reveal, fsp = fs.promises, pathA
   return "shown";
 }
 
-// The name the save dialog opens on: "report.docx", or "report (2).docx" when
-// that already exists, so accepting the default never quietly replaces an
-// earlier download. Only a suggestion — the user can type over it, and the
-// dialog's own overwrite confirmation covers the final choice. Bounded so a
-// directory full of collisions cannot spin forever.
+/** This app's own logs folder in Explorer or Finder, made first if nothing has been logged yet. The folder is main's
+ * own (app.getPath("logs")), never one a page names; `open` is shell.openPath, which answers "" or why it failed. */
+export async function openLogsFolder(folder, { open, fsp = fs.promises }) {
+  try { await fsp.mkdir(folder, { recursive: true }); } catch {}
+  let error = "";
+  try { error = await open(folder); } catch (failure) { error = failure?.message ?? String(failure); }
+  return { folder, opened: !error, ...(error ? { error: String(error).slice(0, 300) } : {}) };
+}
+
 export async function defaultSaveName(dir, sourcePath, { fsp = fs.promises } = {}) {
   const ext = path.extname(sourcePath);
   const stem = path.basename(sourcePath, ext);

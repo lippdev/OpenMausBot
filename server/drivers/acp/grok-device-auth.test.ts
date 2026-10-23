@@ -1,8 +1,4 @@
-// Grok Build signs in from the app with a one-time code: `grok login
-// --device-auth`, run by the same instance, binary and environment its turns
-// use, through the one device-code controller Codex uses too. Every process
-// here is the offline fake grok in a disposable HOME: no real Grok, no call
-// to xAI, nobody's credentials.
+// Every process here is the offline fake grok in a disposable HOME: no real Grok, no xAI call, no credentials.
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +23,6 @@ describe("Grok device prompt", () => {
   it("reads xAI's page and the code from whole lines only", () => {
     expect(deviceSignInPrompt("grok", printed(PAGE))).toEqual({ authorizationUrl: PAGE, userCode: CODE });
     expect(deviceSignInPrompt("grok", printed("https://auth.x.ai/device"))).toEqual({ authorizationUrl: "https://auth.x.ai/device", userCode: CODE });
-    // a code still arriving is not a code yet
     expect(deviceSignInPrompt("grok", `${PAGE}\nWDJB-MJ`)).toBeNull();
     expect(deviceSignInPrompt("grok", `${PAGE}\n${CODE}\n`)).toEqual({ authorizationUrl: PAGE, userCode: CODE });
   });
@@ -94,7 +89,6 @@ describe.skipIf(process.platform === "win32")("Grok Build sign-in with a device 
       .toEqual({ phase: "succeeded", flowId: start.flowId, authorizationUrl: null, expiresAt: null });
     expect(existsSync(join(home, ".grok", "auth.json"))).toBe(true);
     expect((await instance.snapshot()).authenticated).toBe(true);
-    // One login, run as the turns run: this HOME, no API key riding along.
     const logins = calls().filter((call) => call.args[0] === "login");
     expect(logins).toEqual([{ args: ["login", "--device-auth"], home, grokHome: join(home, ".grok"), xaiKey: null }]);
   });
@@ -133,8 +127,7 @@ describe.skipIf(process.platform === "win32")("Grok Build sign-in with a device 
   });
 
   it("times out an unattended code and stops its process", async () => {
-    // An instance's code lives fifteen minutes; the same controller with a
-    // short lifetime shows what happens when nobody finishes.
+    // A code lives fifteen minutes; a short lifetime shows what happens when nobody finishes.
     const controller = new DeviceAuthController(GROK_DEVICE_SIGN_IN, {
       cli: FAKE_GROK, lifetimeMs: 1_500, terminateTimeoutMs: 50,
       environment: () => ({ ...process.env, HOME: home, OMB_DEVICE_AUTH_FIXTURE: "1", FAKE_GROK_MODE: "waiting" }),

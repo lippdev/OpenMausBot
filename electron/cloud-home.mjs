@@ -1,23 +1,15 @@
-// The person's OMB Cloud Pro machine, as their Cloud session reports it
-// (docs/cloud-pro.md; openmaus-cloud docs/consumer-cloud.md). Pure:
-// cloud-account.mjs validates the Admin's answers with it, main.mjs lists the
-// machine under Servers and connects to it.
-//
-// A pairing code is a single-use window the Admin opens on the machine when
-// the person chooses Connect. It lives in main-process memory for one
-// navigation: never persisted, never sent to a renderer, and carried only in
-// the pairing link's hash.
+// A pairing code lives in main-process memory for one navigation: never persisted, never sent to a renderer, only in a link's hash.
 import environments from "./environments.cjs";
+
+export { createCloudPowerGate, openSleepingCloud } from "./cloud-power.mjs";
 
 export const CLOUD_HOME_NAME = "My Cloud";
 export const CLOUD_MACHINE_STATUSES = Object.freeze(["provisioning", "ready", "stopped", "payment-problem", "failed"]);
-/** Statuses in which the machine answers and may be connected to. */
 export const CLOUD_MACHINE_CONNECTABLE = Object.freeze(["ready"]);
 // The Admin's `cloud.state` words, contract version 1.
 const ADMIN_STATES = Object.freeze({
   setting_up: "provisioning", ready: "ready", stopped: "stopped", payment_problem: "payment-problem", failed: "failed",
 });
-// formatPairingCode: three groups of four from the server's pairing alphabet.
 const CODE = /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/;
 const MAX_GRANT_MS = 10 * 60_000;
 
@@ -32,19 +24,30 @@ function homeOrigin(value) {
   }
 }
 
-/** Setup's steps, in order, as the Cloud page names them. */
 export const CLOUD_SETUP_STEPS = Object.freeze(["reserving", "storage", "starting", "checking"]);
+export const CLOUD_UNREACHABLE_CAUSES = Object.freeze(["host", "no_answer"]);
 const GB = 1024 ** 3;
 const record = value => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const moment = value => Number.isSafeInteger(value) && value > 0;
+const POWER_STATES = Object.freeze(["awake", "asleep", "waking"]);
+/** The Admin sends `cloud.power` only for a Cloud whose plan sleeps when idle. */
+export function parseCloudPower(input) {
+  if (!record(input) || !POWER_STATES.includes(input.state) || !moment(input.since) || input.sleeps !== true) return null;
+  return { state: input.state, since: input.since, sleeps: true };
+}
 const wholeGb = value => Number.isSafeInteger(value) && value >= 1 && value <= 10_000;
 
-/** Validate the session's `cloud` summary. A malformed one means no machine,
- * never a partly trusted one. The state and the address decide; the rest is
- * optional and additive (an Admin may not send it yet), so a malformed extra
- * is dropped, never the machine: `setup` (the step setting up is at, and
- * whether it is slow), `retryAt` (when a failed setup is tried again) and
- * `disk` (the volume now and the most the plan lets it grow to). */
+const DEVICE_NAME_MAX = 100;
+/** A computer's installation id, as one-home-main.mjs `installationOf` derives it and the Admin keeps it. */
+export const INSTALLATION_ID = /^[A-Za-z0-9_-]{22,64}$/u;
+/** An ended My Cloud's `hold.homecoming`: the one computer its things come home to, by installation, and its name. */
+function parseHomecoming(input) {
+  if (!record(input) || typeof input.installationId !== "string" || !INSTALLATION_ID.test(input.installationId) || typeof input.name !== "string") return null;
+  const name = input.name.trim();
+  return name && name.length <= DEVICE_NAME_MAX && !/\p{Cc}/u.test(name) ? { installationId: input.installationId, name } : null;
+}
+
+/** A malformed summary is no machine, never a partly trusted one; a malformed optional extra is dropped. */
 export function parseCloudSummary(input) {
   if (!record(input)) return null;
   const status = Object.hasOwn(ADMIN_STATES, input.state) ? ADMIN_STATES[input.state] : null;
@@ -56,14 +59,29 @@ export function parseCloudSummary(input) {
   const retryAt = status === "failed" && moment(input.retryAt) ? input.retryAt : null;
   const disk = record(input.disk) && wholeGb(input.disk.gb) && wholeGb(input.disk.maxGb) && input.disk.maxGb >= input.disk.gb
     ? { gb: input.disk.gb, maxGb: input.disk.maxGb } : null;
-  return { status, ...(origin ? { origin } : {}), ...(setup ? { setup } : {}), ...(retryAt ? { retryAt } : {}), ...(disk ? { disk } : {}) };
+  const unreachable = status === "ready" && record(input.unreachable) && CLOUD_UNREACHABLE_CAUSES.includes(input.unreachable.cause) && moment(input.unreachable.since)
+    ? { cause: input.unreachable.cause, since: input.unreachable.since } : null;
+  const power = parseCloudPower(input.power);
+  const homecoming = record(input.hold) ? parseHomecoming(input.hold.homecoming) : null;
+  const hold = record(input.hold) && moment(input.hold.until) ? { until: input.hold.until, ...(homecoming ? { homecoming } : {}) } : null;
+  return { status, ...(origin ? { origin } : {}), ...(setup ? { setup } : {}), ...(retryAt ? { retryAt } : {}), ...(disk ? { disk } : {}), ...(unreachable ? { unreachable } : {}), ...(power ? { power } : {}),
+    ...(input.moves === true ? { moves: true } : {}), ...(hold ? { hold } : {}) };
+}
+
+const UNREACHABLE_TEXT = Object.freeze({
+  host: "The server My Cloud runs on is being restarted by our hosting provider. My Cloud and its files are safe, and it comes back on its own, usually within about 20 minutes.",
+  no_answer: "My Cloud hasn't answered for a few minutes. Nothing was lost, and we've been told.",
+});
+/** Why My Cloud can't be reached when the Admin says so, for main's dialogs; with `origin`, only for that server. */
+export function cloudUnreachableText(state, origin = null) {
+  const machine = state?.status === "connected" ? state.machine : null;
+  if (!machine?.unreachable || (origin !== null && machine.origin !== origin)) return null;
+  return UNREACHABLE_TEXT[machine.unreachable.cause] ?? null;
 }
 
 const PURCHASE_STATES = Object.freeze(["confirming", "held"]);
 const TIER = /^[a-z][a-z0-9-]{0,23}$/;
-/** A payment the Admin has received but not yet linked to this account
- * (`cloud.purchase`, additive): while it exists, nobody is asked to pay
- * again. It never activates anything; only the entitlement does. */
+/** It never activates anything; only the entitlement does. */
 export function parseCloudPurchase(input) {
   if (!record(input) || !PURCHASE_STATES.includes(input.state)) return null;
   const tier = typeof input.plan === "string" && TIER.test(input.plan) ? input.plan : null;
@@ -73,27 +91,22 @@ export function parseCloudPurchase(input) {
 export const CLOUD_TRIAL_STATES = Object.freeze(["active", "ending", "processing", "late", "ended"]);
 const TRIAL_KEEP = Object.freeze(["none", "portal", "checkout"]);
 const at = value => moment(value) ? value : null;
-/** The free trial on this account's Cloud (`cloud.trial`, additive): what the
- * trial notice and Settings say, never an entitlement (only `entitlement`
- * grants anything). The Admin's state, the trial's end (when the first
- * charge is due) and what keeps the Cloud decide; a state this app does not
- * know is no trial. The rest is optional: a malformed date or amount is left
- * out, never the trial. `amount` is the first charge before tax, in US cents;
- * `personalAmount` (additive), while it runs on a plan above Personal,
- * Personal's price in US cents: the way down its notice offers. */
+const PLAN_TIERS = Object.freeze(["starter", "personal", "pro", "max"]);
+/** Wording only, never an entitlement. Amounts are US cents before tax. */
 export function parseCloudTrial(input) {
   if (!record(input) || !CLOUD_TRIAL_STATES.includes(input.state) || !moment(input.endsAt) || !TRIAL_KEEP.includes(input.keep)) return null;
   const tier = typeof input.tier === "string" && TIER.test(input.tier) ? input.tier : null;
   const cents = value => Number.isSafeInteger(value) && value >= 0 && value <= 10_000_000 ? value : null;
   const amount = cents(input.amount), personal = cents(input.personalAmount);
+  const switchTo = record(input.switchTo) && PLAN_TIERS.includes(input.switchTo.tier) && cents(input.switchTo.amount)
+    ? { tier: input.switchTo.tier, amount: input.switchTo.amount } : null;
   return { state: input.state, ...(tier ? { tier } : {}), endsAt: input.endsAt, amount,
-    chargeAt: at(input.chargeAt), holdUntil: at(input.holdUntil), deleteAt: at(input.deleteAt), keep: input.keep, ...(personal ? { personalAmount: personal } : {}) };
+    chargeAt: at(input.chargeAt), holdUntil: at(input.holdUntil), deleteAt: at(input.deleteAt), keep: input.keep, ...(personal ? { personalAmount: personal } : {}),
+    ...(switchTo ? { switchTo } : {}) };
 }
 
 const dollars = value => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 10_000;
-/** The trial's AI credit (`cloud.credit`, additive), in US dollars: shown
- * here, spent and metered only by the Admin. Absent when there is none or it
- * ended; a malformed one is none. */
+/** In US dollars; spent and metered only by the Admin. */
 export function parseCloudCredit(input) {
   if (!record(input) || !["active", "used_up"].includes(input.state) || !dollars(input.grantedUsd) || input.grantedUsd <= 0 ||
     !dollars(input.remainingUsd) || input.remainingUsd > input.grantedUsd) return null;
@@ -104,17 +117,13 @@ const days = (value, max) => Number.isSafeInteger(value) && value >= 1 && value 
 const count = value => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000_000;
 // oxlint-disable-next-line no-control-regex
 const label = value => typeof value === "string" && value.trim().length > 0 && value.length <= 40 && !/[\x00-\x1f\x7f<>]/.test(value) ? value.trim() : null;
-/** What a plan includes, as the Admin's catalog says: all of it or none of it. */
 function planAllowances(input) {
   if (!record(input) || !["cpus", "memoryMb", "diskGb", "maxDiskGb", "computers", "computerHours", "voiceCharacters"].every(key => count(input[key]))) return null;
-  return { cpus: input.cpus, memoryMb: input.memoryMb, diskGb: input.diskGb, maxDiskGb: Math.max(input.maxDiskGb, input.diskGb),
-    computers: input.computers, computerHours: input.computerHours, voiceCharacters: input.voiceCharacters };
+  return { cpus: input.cpus, ...(["shared", "performance"].includes(input.cpuKind) ? { cpuKind: input.cpuKind } : {}), memoryMb: input.memoryMb, diskGb: input.diskGb, maxDiskGb: Math.max(input.maxDiskGb, input.diskGb),
+    computers: input.computers, computerHours: input.computerHours, voiceCharacters: input.voiceCharacters, ...(input.sleeps === true ? { sleeps: true } : {}),
+    ...(count(input.swapMb) && input.swapMb > 0 ? { swapMb: input.swapMb } : {}), ...(days(input.snapshotDays, 365) ? { snapshotDays: input.snapshotDays } : {}) };
 }
-/** One plan OpenMausBot Cloud sells (its catalog: the public config's
- * `plans`, the session's `offer.plans`): its tier and name, its monthly price
- * before tax in US cents, what it includes when the Admin says, and its free
- * trial's days when it comes with one. Without a monthly price in US dollars
- * it is not sold here. */
+/** Monthly price before tax in US cents; a plan without one is not sold here. */
 function offerPlan(input) {
   if (!record(input) || typeof input.tier !== "string" || !TIER.test(input.tier) || !record(input.price)) return null;
   const { price } = input;
@@ -123,20 +132,17 @@ function offerPlan(input) {
   return { tier: input.tier, ...(label(input.label) ? { label: label(input.label) } : {}), amount: price.amount,
     ...(allowances ? { allowances } : {}), ...(trial ? { trialDays: trial } : {}) };
 }
-/** The offer's plans, each tier once. A trial the Admin names per plan is
- * that plan's alone; one it names only for all (`allDays`) is every plan's. */
+/** An Admin older than this app may still list these; their subscribers keep them, but nobody new buys them here. */
+const NOT_SOLD = Object.freeze(["personal"]);
 function offerPlans(input, allDays) {
   const plans = [];
   for (const entry of Array.isArray(input) ? input.slice(0, 10) : []) {
     const plan = offerPlan(entry);
-    if (plan && !plans.some(known => known.tier === plan.tier)) plans.push(plan);
+    if (plan && !NOT_SOLD.includes(plan.tier) && !plans.some(known => known.tier === plan.tier)) plans.push(plan);
   }
   if (allDays && !plans.some(plan => plan.trialDays)) return plans.map(plan => ({ ...plan, trialDays: allDays }));
   return plans;
 }
-/** The parts every offer shares: the plans, the one preselected (the
- * Admin's, else Pro, else the first), and the trial's extras only when some
- * plan has a trial. Nothing to sell is no offer. */
 function offerOf(plans, { recommended, creditUsd, reminderDays, refundDays }) {
   if (!plans.length) return null;
   const trial = plans.some(plan => plan.trialDays);
@@ -146,12 +152,6 @@ function offerOf(plans, { recommended, creditUsd, reminderDays, refundDays }) {
   return { plans, recommended: preselected.tier, ...(credit ? { creditUsd: credit } : {}), ...(reminder ? { reminderDays: reminder } : {}), ...(refund ? { refundDays: refund } : {}) };
 }
 
-/** What this account can buy now, as its Cloud session says (`offer`,
- * additive; absent for anyone with a plan, a Cloud or a payment being
- * linked, and from an Admin before it). Its trial, credit and reminder are
- * this account's own: checkout decides, and this only words the offer.
- * `checkout`: a checkout of theirs still open, and until when. A malformed
- * offer is no offer, never a partly trusted one; a malformed extra is left out. */
 export function parseCloudOffer(input) {
   if (!record(input)) return null;
   const offer = offerOf(offerPlans(input.plans, days(input.trialDays, 30)), input);
@@ -161,30 +161,19 @@ export function parseCloudOffer(input) {
   return { ...offer, ...(open ? { checkout: open } : {}) };
 }
 
-/** What OpenMausBot Cloud's public config says it sells to anyone (`plans`,
- * and the additive `trial` and `refundDays`): the offer for someone signed
- * out. Its trial is for new customers; checkout decides who gets it. */
 export function parsePublicOffer(config) {
   if (!record(config)) return null;
   const trial = record(config.trial) ? config.trial : {};
   return offerOf(offerPlans(config.plans, days(trial.days, 30)), { creditUsd: trial.creditUsd, reminderDays: trial.reminderDays, refundDays: config.refundDays });
 }
 
-/** The same offer for an account whose own trial is not known (an Admin
- * that sends no session offer): its plans and money-back, never a trial. */
 export function withoutTrial(offer) {
   if (!offer) return null;
   const { creditUsd: _credit, reminderDays: _reminder, checkout: _checkout, ...rest } = offer;
   return { ...rest, plans: offer.plans.map(({ trialDays: _days, ...plan }) => plan) };
 }
 
-/** The paid plan with the largest disk: nobody on it is pointed at a larger one. */
 const LARGEST_TIER = "max";
-/** The disk a verified paid plan's Cloud has now and may grow to, only as
- * the Admin says it (`cloud.disk`). Without that word the Cloud's own free
- * space is all a move is measured against: an Admin that does not say how
- * far the disk grows cannot grow it for a move either (Pro's disk, for one,
- * is fixed unless the Admin is set to let it grow). `largest`: the top plan. */
 export function cloudPlanDisk(state) {
   if (state?.status !== "connected" || state.entitlement?.plan !== "pro") return null;
   const disk = state.machine?.disk;
@@ -192,29 +181,52 @@ export function cloudPlanDisk(state) {
   return { volumeBytes: disk.gb * GB, maxBytes: disk.maxGb * GB, ...(state.entitlement.tier === LARGEST_TIER ? { largest: true } : {}) };
 }
 
-/** The person's Cloud address, remembered for their account while a check
- * with OpenMausBot Cloud is pending or has failed, or the sign-in has ended,
- * so the Server menu still knows "My Cloud" is theirs. Forgotten on sign-out,
- * another account, or a check that names no machine for this account (a
- * machine named without its address, stopped, keeps it). */
+/** My Cloud's address once the Admin says it is ready, and never before: a name looked up while it is set up does not
+ * exist yet, and resolvers keep that "no such name" for minutes (RFC 2308 negative caching). */
+export function readyCloudOrigin(state) {
+  const machine = state?.status === "connected" ? state.machine : null;
+  return machine?.origin && CLOUD_MACHINE_CONNECTABLE.includes(machine.status) ? machine.origin : null;
+}
+
+/** A machine the Admin is setting up: the step it reports, and whether it is slow. */
+export function machineSetup(machine) {
+  if (machine?.status !== "provisioning") return null;
+  return machine.setup ? { step: machine.setup.step, ...(machine.setup.slow ? { slow: true } : {}) } : {};
+}
+
+/** My Cloud is being set up: the Admin says so, or a payment it is still confirming has no machine yet. */
+export function cloudSetupOf(state) {
+  if (state?.status !== "connected") return null;
+  if (state.machine) return machineSetup(state.machine);
+  return state.purchase?.state === "confirming" ? {} : null;
+}
+
 export function rememberedCloudHome(previous, state) {
   const accountId = state?.account?.id ?? null;
   if (!accountId) return null;
-  if (state.status === "connected" && !state.machine) return null;
+  if (state.status === "connected" && (!state.machine || state.machine.status === "provisioning")) return null;
   const origin = state.status === "connected" ? state.machine.origin ?? null : null;
   if (origin) return { accountId, origin };
   return previous?.accountId === accountId ? previous : null;
 }
 
-/** The one rule for "this page is my Cloud": the Cloud page's own channels
- * (Settings → Plan, its setup checklist) and the microphone for a Live call
- * both ask it. The machine the sign-in verified or, failing that, the one this
- * same account last verified (rememberedCloudHome): while a check is pending
- * or has failed, and after the sign-in has ended or expired, when its Settings
- * → Plan says "sign in again on your computer". None when signed out, for
- * another account, after a check that names no machine, after a restart until
- * a check succeeds (it is kept in memory only), or in companion client mode,
- * where this app has no Cloud of its own.
+/** Signs this app back in to the person's own Cloud when its session there has ended (unused for a month, or signed out
+ * there), so lending resumes by itself: a fresh one-time code from the Admin for the Cloud it verified, redeemed into the
+ * window's own cookie, as opening My Cloud does. Never for any other origin. */
+export async function signInCloudSession({ origin, mine, pair, fetch: fetchImpl }) {
+  if (!origin || origin !== mine) return false;
+  try {
+    const grant = await pair();
+    if (grant?.origin !== origin || typeof grant.code !== "string") return false;
+    const response = await fetchImpl(`${origin}/api/auth/pair`, {
+      method: "POST", credentials: "include", redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15_000),
+      headers: { "content-type": "application/json", origin }, body: JSON.stringify({ code: grant.code, cookie: true, label: "OpenMausBot app (lending)" }),
+    });
+    return response.ok;
+  } catch { return false; }
+}
+
+/** The one rule for "this page is my Cloud".
  *
  * @param {{ account: { homeTarget(): { origin: string } | null, state(): { account?: { id: string } } } | null,
  *   remembered: { accountId: string, origin: string } | null, remoteAccess: unknown }} known
@@ -227,21 +239,38 @@ export function myCloudOrigin({ account, remembered, remoteAccess }) {
   return accountId && remembered?.accountId === accountId ? remembered.origin : null;
 }
 
-/** Whether choosing this Server entry means "open my Cloud", which goes
- * through the Cloud's own connection (no pairing code to type). */
 export function isCloudHomeEntry(entry, { homeOrigin = null, remembered = null } = {}) {
   return Boolean(entry?.origin) && (entry.origin === homeOrigin || entry.origin === remembered?.origin);
 }
 
-/** The saved server listed as "My Cloud" (withCloudHome): all this app knows
- * of the person's Cloud before their saved sign-in has been restored at
- * launch. A hint, never a verified Cloud. */
+/** A hint, never a verified Cloud: the entry this app listed for it (`home`), or one still under the default name. */
 export function savedCloudHomeOrigin(state) {
   const saved = Array.isArray(state?.environments) ? state.environments : [];
-  return saved.find((entry) => entry?.name === CLOUD_HOME_NAME)?.origin ?? null;
+  return (saved.find((entry) => entry?.home === true) ?? saved.find((entry) => entry?.name === CLOUD_HOME_NAME))?.origin ?? null;
 }
 
-/** Validate `POST /api/cloud/desktop/pairing` for the machine it was asked for. */
+/** The Admin's role words on the wire (owner, admin, member), and the three words the app shows for them. */
+export const CLOUD_TEAM_ROLES = environments.TEAM_ROLES;
+export const teamRoleLabel = environments.teamRoleLabel;
+const TEAM_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const MAX_TEAMS = 50;
+/** The teams this account is in, from the verified session only: each with its role and its Cloud as `parseCloudSummary`
+ * reads it (null while the team has no machine). A malformed team is left out, never trusted in part; the same team
+ * twice is read once. */
+export function parseCloudTeams(input) {
+  if (!Array.isArray(input)) return [];
+  const teams = [], seen = new Set();
+  for (const team of input.slice(0, MAX_TEAMS)) {
+    if (!record(team) || typeof team.id !== "string" || !TEAM_ID.test(team.id) || seen.has(team.id) || !CLOUD_TEAM_ROLES.includes(team.role)) continue;
+    const name = typeof team.name === "string" ? team.name.replace(/\s+/g, " ").trim().slice(0, 80) : "";
+    if (!name) continue;
+    const machine = team.machine === null || team.machine === undefined ? null : parseCloudSummary(team.machine);
+    seen.add(team.id);
+    teams.push({ id: team.id, name, role: team.role, machine });
+  }
+  return teams;
+}
+
 export function parsePairingGrant(input, origin, now) {
   if (!input || typeof input !== "object" || input.cloudContractVersion !== 1 || input.origin !== origin) return null;
   if (typeof input.code !== "string" || !CODE.test(input.code)) return null;
@@ -249,21 +278,31 @@ export function parsePairingGrant(input, origin, now) {
   return { origin, code: input.code, expiresAt: input.expiresAt };
 }
 
-/** List the machine under Servers once it has an address. Adds only: an
- * existing entry keeps its name, and nothing becomes active. */
-export function withCloudHome(state, machine, makeId) {
+/** Listed once, under the name and colour its owner chose while it was set up (`look`), else My Cloud; never renamed here after. */
+export function withCloudHome(state, machine, makeId, look = null) {
   if (!machine?.origin || machine.status === "provisioning") return state;
   if (state.environments.some((entry) => entry.origin === machine.origin)) return state;
-  return environments.withEnvironment(state, { origin: machine.origin, name: CLOUD_HOME_NAME }, makeId);
+  const added = environments.withEnvironment(state, { origin: machine.origin, name: look?.name || CLOUD_HOME_NAME }, makeId);
+  const color = environments.ENTRY_COLORS.includes(look?.color) ? look.color : null;
+  return { ...added, environments: added.environments.map((entry) => entry.origin === machine.origin ? { ...entry, ...(color ? { color } : {}), home: true } : entry) };
 }
 
-/** Where "Open My Cloud" opens: the machine's own pairing page with the
- * one-time code in the hash (never a query), or the machine itself when this
- * app is already signed in there. `open` "phone" ("Use your Cloud on your
- * phone") adds the one fixed request `?desktop-settings=phone`: the Cloud
- * opens Settings on its phone pairing, and the pair page carries it on. */
-export function cloudHomeConnectUrl(target, now, open = null) {
-  const query = open === "phone" ? "?desktop-settings=phone" : "";
-  return target.grant && target.grant.origin === target.origin && target.grant.expiresAt > now
-    ? `${target.origin}/pair${query}#code=${target.grant.code}` : query ? `${target.origin}/${query}` : target.origin;
+/** The one-time code goes in the hash, never a query. `route`: a path of the Cloud's own to land on after signing in. */
+export function cloudHomeConnectUrl(target, now, open = null, route = null) {
+  const params = new URLSearchParams(open === "phone" ? { "desktop-settings": "phone" } : {});
+  const back = typeof route === "string" && /^\/(?!\/)/.test(route) ? route : null;
+  if (target.grant && target.grant.origin === target.origin && target.grant.expiresAt > now) {
+    if (back) params.set("next", back);
+    const query = params.size ? `?${params}` : "";
+    return `${target.origin}/pair${query}#code=${target.grant.code}`;
+  }
+  if (back) return `${target.origin}${back}`;
+  return params.size ? `${target.origin}/?${params}` : target.origin;
+}
+
+/** Only the verified Cloud, open as this window's active server, in the main window's main frame. */
+export function cloudPageSenderAllowed(event, { contents, homeOrigin, activeOrigin }) {
+  if (!contents || !homeOrigin || activeOrigin !== homeOrigin) return false;
+  if (event?.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame) return false;
+  try { return new URL(event.senderFrame.url).origin === homeOrigin; } catch { return false; }
 }

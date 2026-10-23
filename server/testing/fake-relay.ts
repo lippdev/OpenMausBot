@@ -1,8 +1,5 @@
-// A stand-in for agent-browser's loopback command relay (browser-relay.ts):
-// an HTTP server on 127.0.0.1 answering `POST /api/command` the way the
-// daemon does for the commands the harness relays, with the session's
-// `.stream` file written where the daemon writes it. Tests set its page and
-// lists directly, and read back every command it got.
+// A stand-in for agent-browser's loopback command relay: `POST /api/command` on 127.0.0.1 and the session's
+// `.stream` file where the daemon writes it. Tests set its page and read back every command.
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -19,7 +16,6 @@ export class FakeRelay {
   readonly session: string;
   server!: Server;
   port = 0;
-  /** Every command the relay got, in order. */
   readonly commands: Array<Record<string, unknown>> = [];
   connected = true;
   sessionName: string;
@@ -47,7 +43,6 @@ export class FakeRelay {
     mkdirSync(join(this.dir, "s"), { recursive: true });
   }
 
-  /** The session's environment, as the runtime builds it. */
   get env(): Record<string, string> { return { AGENT_BROWSER_SESSION: this.session, AGENT_BROWSER_SOCKET_DIR: join(this.dir, "s"), HOME: this.dir }; }
   get target() { return { session: this.session, binaryPath: join(this.dir, "agent-browser"), env: this.env }; }
   get spec() { return { command: join(this.dir, "agent-browser"), args: ["mcp"], env: { AGENT_BROWSER_SESSION: this.session, AGENT_BROWSER_SOCKET_DIR: join(this.dir, "s") } }; }
@@ -63,7 +58,7 @@ export class FakeRelay {
       const command = JSON.parse(raw) as Record<string, unknown>;
       this.commands.push(command);
       await this.onCommand?.(command);
-      if (this.hang.has(String(command.action))) return; // never answers
+      if (this.hang.has(String(command.action))) return;
       const reply = (data: Record<string, unknown> | null, error?: string) => {
         const launched = this.launchNext && !["stream_status", "session_info"].includes(String(command.action));
         if (launched) this.launchNext = false;
@@ -113,7 +108,6 @@ export class FakeRelay {
     return this;
   }
 
-  /** The daemon's `.stream` file, as written at its start. */
   writeStreamFile(port = this.port): void { writeFileSync(join(this.dir, "s", `${this.session}.stream`), String(port)); }
   /** The daemon exited: it removes its `.stream` file. */
   removeStreamFile(): void { rmSync(join(this.dir, "s", `${this.session}.stream`), { force: true }); }

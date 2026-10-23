@@ -114,6 +114,7 @@ process.env = env;
 const children = new Set();
 const clients = [];
 let server;
+let gate;
 let report;
 let failure;
 let fixtureRequests = 0;
@@ -212,9 +213,9 @@ async function failureDiagnostics() {
     if (!daemonAlive) continue;
     try {
       // Failure evidence, not a fallback or prewarm: the MCP test still fails.
-      // Upstream Windows issue #1308/#1407 can leave MCP waiting on inherited
-      // pipe handles after navigation actually succeeded. A read-only command
-      // to the exact existing fixture session distinguishes those two cases.
+      // On Windows vercel-labs/agent-browser#1308 and vercel-labs/agent-browser#1407
+      // can leave MCP waiting on inherited pipe handles after navigation
+      // succeeded; a read-only command to this fixture session tells them apart.
       const response = JSON.parse(await run(integration.command, ["--json", "--no-webmcp", "get", "url"], { ...env, ...integration.env }, 8_000));
       console.error(`[browser-smoke] existing-session URL diagnostic ${JSON.stringify({ session, success: response.success, url: response.data?.url, error: response.error }).slice(0, 2_000)}`);
     } catch (error) {
@@ -287,10 +288,16 @@ try {
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const url = `http://127.0.0.1:${server.address().port}/`;
+  // The bundled Chrome browses through the egress gate, as every bot browser does; desktop rules let it reach this
+  // local page, like a dev server.
+  const { openGate } = await import("../server/browser/egress/gate.ts");
+  const { refusalFor } = await import("../server/browser/egress/policy.ts");
+  const rules = { host: "desktop", ownPort: () => false, botPort: async () => false, localNetwork: true, allowed: () => false };
+  gate = await openGate({ decide: (target, addresses) => refusalFor(target, addresses, rules) });
   for (const name of ["alpha", "beta"]) {
     const integration = agentBrowserIntegration({ binaryPath: status.binaryPath,
       session: `omb-${name[0]}-${randomBytes(4).toString("hex")}`,
-      encryptionKey: randomBytes(32).toString("hex"), persistent: false, env });
+      encryptionKey: randomBytes(32).toString("hex"), persistent: false, env, egressPort: gate.port });
     assert.equal(resolve(integration.env.AGENT_BROWSER_EXECUTABLE_PATH ?? ""), resolve(paths.chrome), "MCP did not receive bundled Chromium");
     assert.equal(integration.env.AGENT_BROWSER_RESTORE_SAVE, "never");
     // Use the production preparation path. Guest preparation creates only
@@ -311,9 +318,8 @@ try {
   await alpha.tool("agent_browser_fill", { selector: "#message", text: "Bundled browser works" });
   await alpha.tool("agent_browser_click", { selector: "#submit" });
   assert.equal((await alpha.tool("agent_browser_get_text", { selector: "#result" })).data.text, "Bundled browser works");
-  // The harness reads, sizes and pictures a bot's browser over the engine's
-  // own loopback relay (server/browser-relay.ts): page health, step
-  // evidence, preview frames and login typing all rely on this contract.
+  // The harness reads, sizes and pictures a bot's browser over the engine's own
+  // loopback relay: page health, step evidence, preview frames and login typing.
   phase = "relay contract";
   const { RelayPorts, relay } = await import("../server/browser-relay.ts");
   const relayTarget = { session: alpha.integration.env.AGENT_BROWSER_SESSION, binaryPath: alpha.integration.command, env: { ...env, ...alpha.integration.env } };
@@ -383,6 +389,7 @@ finally {
     proc.kill("SIGKILL");
   })));
   if (server?.listening) { server.closeAllConnections(); await new Promise((done) => server.close(done)); }
+  await gate?.close();
   process.removeListener("SIGINT", interrupt);
   process.removeListener("SIGTERM", interrupt);
   if (cleanupErrors.length) failure = new Error(`${failure?.message ?? "Browser test passed"}; browser cleanup failed, isolated fixture retained at ${fixture}: ${cleanupErrors.join("; ")}`);

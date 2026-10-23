@@ -1,12 +1,4 @@
 // @vitest-environment happy-dom
-// Screens that open only on request load as their own chunks, off the
-// launch path. Once fetched, a screen renders in the same commit as the
-// click, exactly as when it was part of the entry; React.lazy would suspend
-// on every first render and React then holds that commit for up to 300 ms.
-// A chunk that cannot load never throws into the tree, which has no error
-// boundary. Chromium (so Electron) keeps a failed import for the life of the
-// page and rejects every later import() of it at once, so the screen says it
-// could not load and offers a reload instead of showing nothing.
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +9,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const screens = await import("./lazy-screens");
 const { lazyScreen, preloadScreens } = screens;
-/** Every deferred screen's preload, stubbed so no test fetches a real chunk. */
 const stubPreloads = () => Object.values(screens)
   .filter((value): value is ReturnType<typeof lazyScreen> => typeof value === "function" && "preload" in value)
   .map((screen) => vi.spyOn(screen, "preload").mockResolvedValue(() => null));
@@ -89,8 +80,8 @@ describe("lazyScreen", () => {
     expect(mounts).toBe(1);
   });
 
-  // What Chromium does: the first import() fails, and every later one rejects
-  // straight away from the module map without fetching again.
+  // What Chromium does: the first import() fails, and every later one rejects from the module map without fetching
+  // again.
   it("a chunk that keeps failing shows a reload notice for that screen only, and logs it", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -125,7 +116,7 @@ describe("lazyScreen", () => {
     const load = vi.fn<() => Loaded>()
       .mockRejectedValueOnce(new TypeError("Failed to fetch dynamically imported module"))
       .mockResolvedValue(Label);
-    const Screen = lazyScreen("TriggersPanel", load);
+    const Screen = lazyScreen("TriggersPage", load);
     render(createElement(Screen, { text: "Triggers" }));
     await settle();
     expect(document.querySelector('[role="alert"]')).not.toBeNull();
@@ -209,8 +200,7 @@ describe("preloadScreens", () => {
   });
 });
 
-// The launch path is whatever src/main.tsx reaches through static imports;
-// Rollup splits a module out only when nothing on that path imports it.
+// Rollup splits a module out only when nothing on the launch path imports it.
 describe("launch bundle", () => {
   const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const resolve = (from: string, specifier: string) => {
@@ -235,7 +225,7 @@ describe("launch bundle", () => {
         if (target) queue.push(target);
       }
     }
-    // join() writes backslashes on Windows; name the modules with forward slashes everywhere.
+    // join() writes backslashes on Windows.
     return new Set([...seen].map((file) => file.slice(srcRoot.length + 1).split(sep).join("/")));
   };
 
@@ -246,7 +236,7 @@ describe("launch bundle", () => {
     const deferred = [
       "ActivityPanel", "BotSettingsDialog", "ComputerPanel", "InspectorPanel", "KeyboardShortcutsModal",
       "LocalVmWorkspace", "NewBotDialog", "RemoteAgentSettingsPanel", "remote-desktop-panel", "RoutineCalendarPage",
-      "RoutinesPage", "SettingsModal", "TeamMapPage", "TriggersPanel",
+      "RoutinesPage", "SettingsModal", "TeamMapPage", "TriggersPage", "WebhookTrigger",
     ].map((name) => `components/${name}.tsx`);
     expect(deferred.filter((file) => reached.has(file))).toEqual([]);
   });

@@ -1,21 +1,13 @@
-// What a screen reader hears from a conversation. The transcript itself is
-// not a live region (a polite log re-reads the ticking "Thinking 3s", every
-// activity label and every chip), so this decides the few moments worth one
-// short sentence: a reply that has finished, a turn that failed, and an
-// approval that is waiting. A stop the person asked for is none of those.
+// The transcript is not a live region: a polite log would re-read every ticking timer and chip.
 import { t } from "@/lib/i18n";
 import { failedTurnCause } from "../../shared/failed-turn";
 import type { Message } from "@/state/store";
 import { isCancelledTranscriptRow } from "../../shared/client-cancel";
 
 export interface TranscriptSnapshot {
-  /** A turn is running (for a room: any member is working). */
   busy: boolean;
-  /** The newest bot text in the thread. */
   reply?: { id: string; name: string; text: string };
-  /** The newest failed turn in the thread. */
   failure?: { id: string; name: string; cause: string };
-  /** The first open approval, if any. */
   approval?: { id: string; name: string };
 }
 
@@ -23,12 +15,9 @@ export interface AnnouncerMemory {
   replyId?: string;
   failureId?: string;
   approvalId?: string;
-  /** A turn has run since the last reply was announced. History loading
-   * into an idle thread never sets it, so old replies are never read out. */
   sawBusy: boolean;
 }
 
-/** What is already on screen when a thread opens: nothing to announce. */
 export function announcerBaseline(snapshot: TranscriptSnapshot): AnnouncerMemory {
   return {
     replyId: snapshot.reply?.id,
@@ -52,7 +41,6 @@ export function nextAnnouncement(
   if (snapshot.approval && snapshot.approval.id !== memory.approvalId) {
     said.push(t("chat.announce.approval", { name: snapshot.approval.name }));
   }
-  // Only once the turn is over: a reply between tool calls is not the answer.
   if (!snapshot.busy && next.sawBusy) {
     next.sawBusy = false;
     const reply = snapshot.reply;
@@ -86,8 +74,6 @@ export function latestReply(
   return undefined;
 }
 
-/** The newest failed-turn row. A stop stored as an ordinary activity name
- * has no error cause, so it is not a failure. */
 export function latestFailure(
   messages: readonly Message[],
   nameOf: (message: Message) => string,
@@ -102,8 +88,6 @@ export function latestFailure(
 
 const SUMMARY_LIMIT = 120;
 
-/** A whole message that is only the person stopping the turn. A real error
- * that merely mentions a cancellation still counts as a failure. */
 function isUserStop(text: string): boolean {
   const body = text.trim().replace(/^provider returned a(?: streaming)? completion error:\s*/i, "").trim();
   if (!body) return false;
@@ -116,8 +100,6 @@ function isUserStop(text: string): boolean {
   ].some((pattern) => pattern.test(body));
 }
 
-/** The reply's first sentence as plain words, short enough to hear in one
- * breath. The full reply is one arrow key away in the transcript. */
 export function replySummary(text: string): string {
   const plain = text
     .replace(/```[\s\S]*?(```|$)/g, " ")
@@ -125,8 +107,7 @@ export function replySummary(text: string): string {
     .replace(/[*_`#>~|]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  // ASCII stops need a space so "1.2" stays one sentence. Arabic ؟ and
-  // CJK 。！？ end a sentence even when the next word is not spaced.
+  // ASCII stops need a following space ("1.2" stays whole); Arabic and CJK stops do not.
   const sentence = /^(.+?(?:[.!?](?=\s|$)|[؟。！？]))/u.exec(plain)?.[1] ?? plain;
   if (sentence.length <= SUMMARY_LIMIT) return sentence;
   const cut = sentence.slice(0, SUMMARY_LIMIT);

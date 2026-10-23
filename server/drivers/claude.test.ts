@@ -1,12 +1,4 @@
-// Claude driver contract tests, run against the scripted fake CLI in
-// server/testing/fake-claude-cli.ts — the driver must normalize the
-// stream-json protocol into canonical events, keep argv hygiene (prompt
-// over stdin, secrets stripped), and broker permission asks.
-//
-// These used to be POSIX-only: the fake CLI is a shebang script Windows
-// cannot exec, and the broker is a unix socket. Both now go through
-// resolveCliSpawn / permissionSocketPath, so they run everywhere.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingHttpHeaders } from "node:http";
 import { connect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -14,16 +6,16 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DATA_DIR, ensureDirs, instanceConfigs, NATIVE_DIR } from "../config.ts";
-import type { ProviderInstance } from "../contracts.ts";
+import { DATA_DIR, ensureDirs, instanceConfigs, NATIVE_DIR, type AppConfig } from "../config.ts";
+import { TurnAuthenticationRefusedError, type ProviderInstance } from "../contracts.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
+import { BACKGROUND_CALL_TIMEOUT_MS, backgroundCallArgs } from "./claude-background.ts";
 import {
   autoCompactWindow,
   brokerSocketCandidates,
   claudeCliSupports,
   claudeCliUpdate,
   claudeHookSettings,
-  claudeLimitMessage,
   ClaudeDriver,
   createPermissionBroker,
   hookTokenFile,
@@ -37,21 +29,21 @@ import {
   turnCostFromRunningTotal,
   type ClaudeConfig,
 } from "./claude.ts";
+import { TEAM_TOOLS_FAILED } from "./team-tools.ts";
+import { claudeLimitMessage } from "./claude-limits.ts";
 import { removeTempDir } from "../testing/cleanup.ts";
 import { rebuiltSessionNotice } from "../resume-recovery.ts";
+import { BASH_MAX_TIMEOUT_MS } from "../system-prompt.ts";
 import { ephemeralWorkspaceTokenPath } from "../workspace-backup-policy.ts";
 import * as procs from "../procs.ts";
 import * as localInject from "./local-inject.ts";
 
 const FAKE_CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "testing", "fake-claude-cli.ts");
-/** The process that played the latest turn a FAKE_CLAUDE_DUMP recorded. */
 const dumpedPid = (dump: string): number => JSON.parse(readFileSync(dump, "utf8")).pid;
 
-/** Thread ids for the four ask-id-collision tests. Each must truncate to a
- * unique 8-char tag so no two tests share a broker socket/pipe name. */
+/** Each must truncate to a unique 8-char tag so no two tests share a broker socket. */
 const COLLISION_THREAD_IDS = ["t-dup-1", "t-dup-2", "t-dup-3", "t-dup-4"];
 
-/** Connect to a broker socket and resolve once the connection is live. */
 function connectSocket(path: string): Promise<Socket> {
   return new Promise((resolve, reject) => {
     let retriesLeft = 20;
@@ -64,8 +56,7 @@ function connectSocket(path: string): Promise<Socket> {
       const onError = (error: NodeJS.ErrnoException) => {
         conn.removeListener("connect", onConnect);
         conn.destroy();
-        // A Windows named pipe can briefly disappear while the server creates
-        // its next pipe instance for another simultaneous client.
+        // A Windows named pipe can briefly disappear while the server creates its next instance.
         if (process.platform === "win32" && error.code === "ENOENT" && retriesLeft-- > 0) {
           setTimeout(tryConnect, 25);
           return;
@@ -79,8 +70,6 @@ function connectSocket(path: string): Promise<Socket> {
   });
 }
 
-/** Returns a function that resolves, in order, with each `\n`-delimited JSON
- * message the broker writes back on `conn` — one call per expected answer. */
 function answerQueue(conn: ReturnType<typeof connect>) {
   const waiters: Array<(msg: any) => void> = [];
   let buf = "";
@@ -112,6 +101,10 @@ describe("ClaudeDriver.decodeConfig", () => {
     }
   });
 
+  it("hooks failed tool calls too, so a timed-out command can be given a hint", () => {
+    expect(Object.keys(claudeHookSettings("/tmp/helper.ts"))).toContain("PostToolUseFailure");
+  });
+
   it("keeps the per-turn hook token where workspace backups never look", () => {
     const path = relative(DATA_DIR, hookTokenFile("thread", "bot")).replaceAll("\\", "/");
     expect(ephemeralWorkspaceTokenPath(path)).toBe(true);
@@ -124,13 +117,10 @@ describe("ClaudeDriver.decodeConfig", () => {
   });
 
   it("bills a steered continuation's native results as one turn", () => {
-    // usage is per native turn and adds up; total_cost_usd is the CLI's
-    // running total for the process, so the latest figure stands
     const first = { ok: true, stopReason: "end_turn", cost: 0.01, usage: { input: 12, output: 5, cachedInput: 2 } };
     expect(sumNativeTurnResults(null, first)).toEqual(first);
     expect(sumNativeTurnResults(first, { ok: true, stopReason: "end_turn", cost: 0.03, usage: { input: 3, output: 4 } }))
       .toEqual({ ok: true, stopReason: "end_turn", cost: 0.03, usage: { input: 15, output: 9, cachedInput: 2 } });
-    // a failed half fails the turn; a figure missing on one side leaves the other's alone
     expect(sumNativeTurnResults(first, { ok: false, stopReason: null, cost: null }))
       .toEqual({ ok: false, stopReason: "end_turn", cost: 0.01, usage: first.usage });
     expect(sumNativeTurnResults({ ok: true, stopReason: null, cost: null }, { ok: true, stopReason: null, cost: null }))
@@ -144,21 +134,16 @@ describe("ClaudeDriver.decodeConfig", () => {
   });
 
   it("books a turn's share of the CLI's running cost total", () => {
-    // a process's first turn has no earlier total: its figure is its own
     expect(turnCostFromRunningTotal(1.5822674, null)).toBe(1.5822674);
-    // later turns book the growth — the incident's two consecutive totals
     expect(turnCostFromRunningTotal(1.7255570000000002, 1.5822674)).toBe(0.1432896);
-    // without the float noise of subtracting two totals
     expect(turnCostFromRunningTotal(0.03, 0.02)).toBe(0.01);
     expect(turnCostFromRunningTotal(0.02, 0.02)).toBe(0);
     expect(turnCostFromRunningTotal(null, 0.02)).toBeNull();
-    // a total below the earlier one cannot be the same count: never negative
     expect(turnCostFromRunningTotal(0.004, 0.02)).toBe(0.004);
   });
 
   it("finds the running cost the CLI restored for a resumed session", () => {
-    // Real frames (2.1.282). modelUsage counts [input, cache read, cache
-    // write, output] per model for the whole session; usage is the turn's own.
+    // Real 2.1.282 frames: modelUsage is [input, cache read, cache write, output] per model for the session.
     const opus = (total: number, tokens: [number, number, number, number]) => claudeCostSnapshot(total, {
       "claude-opus-5-5": { inputTokens: tokens[0], cacheReadInputTokens: tokens[1], cacheCreationInputTokens: tokens[2], outputTokens: tokens[3], costUSD: total },
     })!;
@@ -168,30 +153,21 @@ describe("ClaudeDriver.decodeConfig", () => {
       opus(3.2557024000000006, [34, 1682172, 227804, 54835]),
       opus(4.3538464, [36, 1682172, 353781, 59351]),
     ];
-    // This resumed launch restored the 3.2557 state, not the later 4.3538 one.
     const resumed = opus(4.212299000000001, [60, 3542515, 254587, 73343]);
     expect(restoredCostBase(earlier, resumed, { input: 26, cacheRead: 1860343, cacheWrite: 26783, output: 18508 })).toBe(3.2557024000000006);
-    // A fresh session restored nothing; a side call on another model (a
-    // title from Haiku) is in modelUsage but not in the turn's usage.
     const fresh = claudeCostSnapshot(0.20990999999999999, {
       "claude-haiku-4-5-20251001": { inputTokens: 978, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 10, costUSD: 0.001028 },
       "claude-sonnet-5": { inputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 52057, outputTokens: 65, costUSD: 0.208882 },
     })!;
     expect(restoredCostBase([], fresh, { input: 2, cacheRead: 0, cacheWrite: 52057, output: 65 })).toBe(0);
-    // An interrupted turn's work was restored but never reported: measure
-    // from the latest known state inside the new counts, so that work is
-    // booked once, with this turn.
     const beforeInterrupt = opus(0.8265352, [20, 559016, 79339, 3997]);
     const afterInterrupt = opus(3.0735268, [86, 4211334, 254837, 9611]);
     expect(restoredCostBase([beforeInterrupt], afterInterrupt, { input: 48, cacheRead: 2873716, cacheWrite: 142479, output: 3805 })).toBe(0.8265352);
-    // No known state at all: the whole figure.
     expect(restoredCostBase([], resumed, { input: 26, cacheRead: 1860343, cacheWrite: 26783, output: 18508 })).toBe(0);
     expect(claudeCostSnapshot(null, {})).toBeNull();
   });
 
   it("matches a resumed turn split over two models by the sum of its growth", () => {
-    // States A=2 ($0.01) and A=3 ($0.02); the resume restored the first, and
-    // the turn used one input token on each of A and B. Its usage counts both.
     const state = (total: number, models: Record<string, number>) => claudeCostSnapshot(total, Object.fromEntries(
       Object.entries(models).map(([model, input]) => [model, { inputTokens: input, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 0, costUSD: 0 }]),
     ))!;
@@ -200,9 +176,6 @@ describe("ClaudeDriver.decodeConfig", () => {
   });
 
   it("measures from the latest known state, not the highest total", () => {
-    // A resume that went back to an older state leaves a later state with a
-    // lower total (4.3538 then 4.2123 in a real session). With no exact fit,
-    // the latest state inside the new counts is the start.
     const state = (total: number, input: number) => claudeCostSnapshot(total, {
       A: { inputTokens: input, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 0, costUSD: total },
     })!;
@@ -242,8 +215,7 @@ describe("ClaudeDriver.decodeConfig", () => {
   });
 
   it("keeps threads whose ids share a prefix on distinct sockets", () => {
-    // the truncated prefix agrees; only the digest separates them — without
-    // it, Windows pipes for these two threads would collide and race
+    // Only the digest separates them; Windows pipes would otherwise collide.
     expect(permissionSocketPath("t-perm-dup-1")).not.toBe(permissionSocketPath("t-perm-dup-2"));
   });
 
@@ -271,7 +243,6 @@ describe("ClaudeDriver.decodeConfig", () => {
         },
       }),
     ).rejects.toThrow(/interactive approval broker/);
-    // Settings may sign this account in and out on a hosted server.
     expect(bypass.startAuthentication).toBeTypeOf("function");
     expect(bypass.signOut).toBeTypeOf("function");
     await bypass.dispose();
@@ -283,10 +254,6 @@ describe("ClaudeDriver.decodeConfig", () => {
   });
 
   it("gives two bots distinct broker pipes even if they ever share a threadId (#1017)", () => {
-    // A delegated child turn should never be able to collide with its
-    // parent's still-open broker on the shared driver-level socket table —
-    // whatever the reason a threadId is reused, namespacing by bot rules
-    // the collision out by construction.
     const sharedThreadId = "t-shared-by-parent-and-child";
     const parentPath = permissionSocketPath(sharedThreadId, "bot-chief");
     const childPath = permissionSocketPath(sharedThreadId, "bot-cliff");
@@ -334,28 +301,22 @@ describe("ClaudeDriver.decodeConfig", () => {
     const candidates = brokerSocketCandidates("t-candidates");
     expect(candidates[0]).toBe(permissionSocketPath("t-candidates"));
     if (process.platform === "win32") {
-      // pipes are never unlinkable, so a held name needs fresh fallbacks
       expect(candidates.length).toBeGreaterThan(1);
       expect(new Set(candidates).size).toBe(candidates.length);
     } else {
-      // macOS has a small Unix-socket path limit, so a deep HOME needs a
-      // short fallback under the OS temp root.
       expect(candidates).toHaveLength(2);
       expect(candidates[1]).toMatch(/omb-perm-[0-9a-f]{16}\.sock$/);
       expect(candidates[1]).not.toBe(candidates[0]);
     }
   });
 
-  // Windows can't listen on filesystem socket paths at all (EACCES), so the
-  // unbindable-first-candidate unit runs on POSIX; the fake-CLI e2e below
-  // covers the real pipe fallback on Windows CI.
+  // Windows cannot listen on filesystem socket paths (EACCES); the fake-CLI e2e covers its pipe fallback.
   it.skipIf(process.platform === "win32")(
     "binds the next candidate when the first is unbindable, and asks round-trip on it",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "omb-broker-fallback-"));
       const held = join(dir, "held.sock");
-      // a directory squats the path the way a hung child holds a pipe:
-      // unlink fails, listen fails — the broker must move on, not go dark
+      // A directory squats the path the way a hung child holds a pipe.
       mkdirSync(held);
       const free = join(dir, "free.sock");
       const asks: Array<{ id: string }> = [];
@@ -403,8 +364,7 @@ describe("ClaudeDriver.decodeConfig", () => {
         onResolve: () => {},
       });
       try {
-        // A Write ask carries the whole file, so one line spans many reads,
-        // and most read boundaries fall inside a three-byte character.
+        // One line spans many reads, and most read boundaries fall inside a three-byte character.
         const content = "中文ok€".repeat(150_000);
         const conn = connect(socketPath);
         await new Promise<void>((resolve, reject) => {
@@ -500,6 +460,14 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(JSON.parse(seen.mcpConfig.mcpServers.agents.env.OMB_GATE_TOOL_SCOPE)).toEqual({ allow: ["native:*", "mcp:agents:list_bots"] });
   });
 
+  it("keeps a bot's tool selection working with the person's own skills", async () => {
+    const dump = join(scratch, "scope-user-skills.json"); process.env.FAKE_CLAUDE_DUMP = dump;
+    await create();
+    await instance.adapter.sendTurn({ threadId: "scope-user-skills", text: "Fixture", userSkillsDir: join(scratch, "claude-user-skills"), toolScope: { allow: ["native:*"] } });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(JSON.parse(readFileSync(dump, "utf8")).argv).toContain("--add-dir");
+  });
+
   it("refuses native MCP inheritance when a bot has an explicit selection", async () => {
     const dump = join(scratch, "scope-inherited-mcp.json"); process.env.FAKE_CLAUDE_DUMP = dump;
     await create();
@@ -533,10 +501,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await removeTempDir(scratch);
   });
 
-  // Security: a saved workspace Anthropic key was written over every Claude
-  // instance's environment, so a router instance's host received it as
-  // x-api-key beside the router's own Bearer token, or the turn went to the
-  // workspace URL instead of the router.
   it.each([
     ["without a workspace URL", { key: "sk-ant-workspace-secret" }],
     ["with a workspace URL", { key: "sk-ant-workspace-secret", url: "http://127.0.0.1:9" }],
@@ -557,7 +521,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
           router: { driver: "claudeAgent", environment: { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: "router-token" } },
         },
       });
-      // the workspace key still reaches the ordinary Claude instance
       expect(map.claude!.environment).toMatchObject({ ANTHROPIC_API_KEY: "sk-ant-workspace-secret" });
       process.env.FAKE_CLAUDE_ROUTER_PING = "1";
       await create(undefined, map.router!.environment as Record<string, string>);
@@ -583,23 +546,20 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       "turn.started",
       "session.started",
       "content.delta",
-      "item.completed", // assistant_text
-      "item.started", // tool tu-1
+      "item.completed",
+      "item.started",
       "thread.token-usage.updated",
-      "item.completed", // tool tu-1 result
+      "item.completed",
       "turn.completed",
     ]);
     expect(recorder.events.every((e) => e.turnId === turnId && e.provider === "claudeAgent")).toBe(true);
-    // the chip names the tool; the command it ran rides beside it
     expect(recorder.events.find((e) => e.type === "item.started")).toMatchObject({ title: "Bash", summary: "echo hi" });
     expect(recorder.events.find((e) => e.type === "item.started")).toMatchObject({ input: expect.stringContaining("echo hi") });
     expect(recorder.events.find((e) => e.type === "item.completed" && e.itemType === "tool")).toMatchObject({ output: expect.stringContaining('"text": "hi"') });
 
     const usage = recorder.events.find((e) => e.type === "thread.token-usage.updated")!;
-    expect(usage).toMatchObject({ input: 12, output: 5, cachedInput: 2 }); // input + cache_read, cache_read named
+    expect(usage).toMatchObject({ input: 12, output: 5, cachedInput: 2 });
     const done = recorder.events.at(-1)!;
-    // usage on the settle is the turn total from the result message, so
-    // the harness has one figure to bank per turn
     expect(done).toMatchObject({ type: "turn.completed", ok: true, cost: 0.01, usage: { input: 12, output: 5, cachedInput: 2 } });
     expect(instance.adapter.hasSession("t-happy")).toBe(false);
   });
@@ -611,35 +571,91 @@ describe("ClaudeDriver turns (fake CLI)", () => {
 
     const deltas = recorder.events.filter((e) => e.type === "content.delta");
     const text = deltas.filter((d: any) => d.streamKind === "assistant_text");
-    // two streamed chunks, and NO third full-text fallback delta after them
     expect(text.map((d: any) => d.delta)).toEqual(["hello from ", "fake claude"]);
-    // subagent narration (parent_tool_use_id) never surfaces
     expect(text.some((d: any) => d.delta.includes("SUBAGENT"))).toBe(false);
-    // reasoning streams on its own kind
     expect(deltas.some((d: any) => d.streamKind === "reasoning_text" && d.delta === "hmm")).toBe(true);
-    // the settled message still lands exactly once
     const settled = recorder.events.filter((e: any) => e.type === "item.completed" && e.itemType === "assistant_text");
     expect(settled).toHaveLength(1);
     expect((settled[0] as any).text).toBe("hello from fake claude");
   });
 
+  it("passes on a running tool's heartbeat as tool activity, so a long tool is not taken for a stall", async () => {
+    await create("tool-heartbeat");
+    await instance.adapter.sendTurn({ threadId: "t-heartbeat", text: "hi" });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const types = recorder.events.map((e) => e.type);
+    const beat = types.indexOf("item.updated");
+    expect(recorder.events[beat]).toMatchObject({ itemType: "tool" });
+    expect(beat).toBeGreaterThan(types.indexOf("item.started"));
+    expect(beat).toBeLessThan(types.lastIndexOf("item.completed"));
+  });
+
+  it("reports a long Write's input as it streams, after the bot's words and before its tool call", async () => {
+    await create("slow-write", { FAKE_CLAUDE_WRITE_BYTES: "6144", FAKE_CLAUDE_WRITE_STEP_MS: "5" });
+    await instance.adapter.sendTurn({ threadId: "t-slow-write", text: "build a dashboard" });
+    await recorder.until((e) => e.type === "turn.completed", 20_000);
+
+    const types = recorder.events.map((e) => e.type);
+    const started = recorder.events.find((e) => e.type === "item.started") as any;
+    const progress = recorder.events.filter((e) => e.type === "turn.progress") as any[];
+    expect(progress.length, "one report per streamed chunk, before the bus coalesces them").toBeGreaterThan(10);
+    expect(progress.every((e) => e.activity === "write" && e.itemId === started.itemId && e.turnId === started.turnId)).toBe(true);
+    expect(progress.at(-1)).toMatchObject({ file: "index.html" });
+    expect(progress.at(-1).bytes).toBeGreaterThanOrEqual(6144);
+    const intro = recorder.events.findIndex((e: any) => e.type === "item.completed" && e.itemType === "assistant_text");
+    expect(types.indexOf("turn.progress")).toBeGreaterThan(intro);
+    expect(types.lastIndexOf("turn.progress")).toBeLessThan(types.indexOf("item.started"));
+  });
+
   it("turns a signed-out CLI into a setup error, not a bot reply", async () => {
-    // issue #674: the CLI answers a signed-out turn with "Please run /login",
-    // a command this app has no terminal to run. Relaying it as assistant
-    // text left the user in a dead end; `setup: true` is what the chat reads
-    // to offer the sign-in card instead.
+    const dump = join(scratch, "signed-out-session.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
     await create("not-logged-in");
     await instance.adapter.sendTurn({ threadId: "t-auth", text: "hi" });
     await recorder.until((e) => e.type === "turn.completed");
 
     const failure = recorder.events.find((e: any) => e.type === "runtime.error") as any;
     expect(failure).toMatchObject({ message: "Not logged in \u00b7 Please run /login", setup: true });
-    // the CLI's instruction must not also land as something the bot said
     expect(recorder.events.some((e: any) => e.type === "item.completed" && e.itemType === "assistant_text")).toBe(false);
     expect(recorder.events.some((e: any) => e.type === "content.delta")).toBe(false);
-    // the same vocabulary codex and the ACP engines settle an unauthenticated
-    // turn with — not the CLI's "stop_sequence", which says nothing
     expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "auth_required" });
+    const pid = dumpedPid(dump);
+    await expect.poll(() => {
+      try { process.kill(pid, 0); return false; } catch { return true; }
+    }, { timeout: 7_000 }).toBe(true);
+  });
+
+  it("reports a synthetic sign-out refusal for recovery only after its process has stopped", async () => {
+    const dump = join(scratch, "recover-signed-out-session.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    await create("not-logged-in");
+    await expect(instance.adapter.sendTurn({ threadId: "t-auth-recovery", text: "hi", startupRecovery: true }))
+      .rejects.toBeInstanceOf(TurnAuthenticationRefusedError);
+    expect(() => process.kill(dumpedPid(dump), 0)).toThrow();
+    expect(recorder.events.some(event => event.type === "runtime.error" || event.type === "turn.completed")).toBe(false);
+  });
+
+  it("keeps a sign-out after model activity as an ordinary failed turn", async () => {
+    await create("not-logged-in", { FAKE_CLAUDE_AUTH_AFTER_WORK: "1" });
+    await expect(instance.adapter.sendTurn({ threadId: "t-auth-work", text: "hi", startupRecovery: true })).resolves.toHaveProperty("turnId");
+    expect(await recorder.until(event => event.type === "turn.completed"))
+      .toMatchObject({ ok: false, stopReason: "auth_required" });
+    expect(recorder.events.find(event => event.type === "runtime.error"))
+      .toMatchObject({ message: "Not logged in · Please run /login", setup: true });
+  });
+
+  it("recovers a later sign-out in a retained process without counting earlier turns as new work", async () => {
+    const dump = join(scratch, "retained-sign-out.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    await create("happy", { FAKE_CLAUDE_AUTH_AFTER_TURN: "1" });
+    const turn = { threadId: "t-auth-retained", text: "hi", startupRecovery: true };
+    const first = await instance.adapter.sendTurn(turn);
+    await recorder.until(event => event.type === "turn.completed" && event.turnId === first.turnId);
+    const pid = dumpedPid(dump);
+    await expect(instance.adapter.sendTurn({ ...turn, text: "again" })).rejects.toBeInstanceOf(TurnAuthenticationRefusedError);
+    expect(dumpedPid(dump)).toBe(pid);
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 
   it("settles an outdated CLI as update_required without emitting an assistant reply", async () => {
@@ -654,8 +670,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "update_required" });
   });
 
-  // Pesto on 2.1.295 (Oct 9-10): the CLI said "You've hit your weekly limit",
-  // and the turn was relayed as that reply and settled as "stop_sequence".
   it("settles a turn its account's weekly limit refused as quota, saying when it resets, with no reply", async () => {
     const resetsAt = Math.floor(Date.now() / 1000) + 3 * 86_400;
     const weekly = { status: "rejected", resetsAt, rateLimitType: "seven_day", overageStatus: "rejected", isUsingOverage: false };
@@ -663,7 +677,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await instance.adapter.sendTurn({ threadId: "t-weekly", text: "Hey talk to @Tango" });
     await recorder.until((event) => event.type === "turn.completed");
     const errors = recorder.events.filter((event) => event.type === "runtime.error");
-    expect(errors).toEqual([expect.objectContaining({ message: claudeLimitMessage({ window: "seven_day", resetsAt }) })]);
+    expect(errors).toEqual([expect.objectContaining({ message: claudeLimitMessage({ window: "seven_day", resetsAt }), limitResetsAt: resetsAt * 1000 })]);
     expect((errors[0] as any).message).toMatch(/^This Claude account has reached its weekly limit, which resets .+\. Until then, /);
     expect(errors[0]).not.toHaveProperty("setup");
     expect(errors[0]).not.toHaveProperty("claudeUpdate");
@@ -672,9 +686,19 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "quota" });
   });
 
-  // Pesto on 2.1.272 (Oct 8-9): the CLI's rate_limit_event refused the
-  // account's week while the call's error said "does not support this model".
-  // The person was offered the update, took it, and met the same refusal.
+  it("settles a turn whose model's extra-usage credits ran out as quota, without holding the engine", async () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 11 * 86_400;
+    const credits = { status: "rejected", resetsAt, overageDisabledReason: "out_of_credits", isUsingOverage: false, errorCode: "credits_required" };
+    await create("usage-limit", { FAKE_CLAUDE_RATE_LIMIT: JSON.stringify(credits) });
+    await instance.adapter.sendTurn({ threadId: "t-credits", text: "continue" });
+    await recorder.until((event) => event.type === "turn.completed");
+    const errors = recorder.events.filter((event) => event.type === "runtime.error");
+    expect(errors).toEqual([expect.objectContaining({ message: claudeLimitMessage({ window: null, resetsAt, credits: true }) })]);
+    expect((errors[0] as any).message).toContain("those credits are used up");
+    expect(errors[0]).not.toHaveProperty("limitResetsAt");
+    expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "quota" });
+  });
+
   it("names the weekly limit behind an older CLI's update request, and offers no update", async () => {
     const resetsAt = Math.floor(Date.now() / 1000) + 86_400;
     await create("api-error", {
@@ -690,8 +714,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "quota" });
   });
 
-  // Quill 2 (Sep 26): 97% of the week used, and a model the CLI was too old
-  // for. Near a limit is not past it: the update is still what to offer.
   it("still offers the update to an account near, not past, its limit", async () => {
     const message = "API Error: 400 Claude Code 2.1.268 does not support this model; version 2.1.280 or newer is required. Run 'claude update'.";
     await create("api-error", {
@@ -704,6 +726,26 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       expect.objectContaining({ message, setup: true, claudeUpdate: true }),
     ]);
     expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "update_required" });
+  });
+
+  it.each([
+    // 2.1.295 on Cloud: no terminal_reason, so the result's only stop token is its synthetic message's "stop_sequence"
+    [{ FAKE_CLAUDE_API_ERROR: "Credit balance is too low", FAKE_CLAUDE_API_ERROR_KIND: "billing_error", FAKE_CLAUDE_API_ERROR_STATUS: "402", FAKE_CLAUDE_NO_TERMINAL_REASON: "1" },
+      'Your Claude account is out of credits (Claude says: "Credit balance is too low"). Add credits with Claude, then run it again.', "stop_sequence"],
+    [{ FAKE_CLAUDE_API_ERROR: "API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment.", FAKE_CLAUDE_API_ERROR_KIND: "overloaded" },
+      'Claude is overloaded right now (Claude says: "Repeated 529 Overloaded errors"). This is usually temporary, so try again in a few minutes.', "api_error"],
+    [{ FAKE_CLAUDE_API_ERROR: "There's an issue with the selected model (claude-fixture). It may not exist or you may not have access to it.", FAKE_CLAUDE_API_ERROR_KIND: "model_not_found", FAKE_CLAUDE_NO_TERMINAL_REASON: "1" },
+      "There's an issue with the selected model (claude-fixture). It may not exist or you may not have access to it.", "stop_sequence"],
+  ])("shows an api-error frame as one plain error row in Claude's real cause, never a reply or a bare stop token (%#)", async (environment, message, stopReason) => {
+    await create("api-error", environment);
+    await instance.adapter.sendTurn({ threadId: "t-api-error-words", text: "hi" });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(recorder.events.filter((event) => event.type === "runtime.error")).toEqual([expect.objectContaining({ message })]);
+    expect(recorder.events.filter((event) => event.type === "runtime.error")[0]).not.toHaveProperty("setup");
+    expect(recorder.events.some((event) => event.type === "item.completed" && event.itemType === "assistant_text")).toBe(false);
+    expect(recorder.events.some((event) => event.type === "content.delta")).toBe(false);
+    expect(recorder.events.some((event) => event.type === "thread.token-usage.updated" && event.contextTokens === 0)).toBe(false);
+    expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason });
   });
 
   it("retires an outdated child before retry while preserving a healthy pooled session", async () => {
@@ -725,9 +767,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       .resolves.toMatchObject({ ok: false, stopReason: "update_required" });
     const outdatedPid = JSON.parse(readFileSync(outdatedDump, "utf8")).pid;
 
-    // Only a new child sees this synthetic replacement runtime. An old
-    // pooled child keeps api-error mode, just as it keeps its loaded code
-    // after the executable on disk has been updated externally.
+    // Only a new child sees this replacement runtime; a pooled child keeps its loaded code.
     process.env.FAKE_CLAUDE_MODE = "happy";
     const retryDump = join(scratch, "updated-session.json");
     process.env.FAKE_CLAUDE_DUMP = retryDump;
@@ -750,7 +790,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   it("runs a guest's turn on a Cloud home with no command-running tool and no read outside its folder", async () => {
     await create(undefined, { FAKE_CLAUDE_VERSION: "2.1.284" });
     expect(instance.adapter.capabilities.guestTurns).toBe("confined");
-    // What a guest could have left in its own folder on an earlier turn.
     // Inside the scratch folder: its removal waits for the CLI to let go of it (Windows).
     const folder = mkdtempSync(join(scratch, "guest-folder-"));
     writeFileSync(join(folder, ".mcp.json"), JSON.stringify({ mcpServers: { planted: { command: "sh", args: ["-c", "id"] } } }));
@@ -766,8 +805,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(after("--permission-mode")).toBe("default");
     expect(seen.settings.permissions).toMatchObject({ blockReadsOutsideWorkingDirectories: true });
     expect(seen.settings.permissions.deny).toEqual(expect.arrayContaining(["Bash", "PowerShell", "WebFetch"]));
-    // The folder's own servers never mount, and the browser (it can open a
-    // file: address) asks the owner before every call.
     expect(Object.keys(seen.mcpConfig.mcpServers)).not.toContain("planted");
     expect(after("--allowedTools").split(",")).not.toContain("mcp__browser");
     expect(recorder.events.find((e) => e.type === "turn.completed")).toMatchObject({ ok: true });
@@ -797,7 +834,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("hands a hosted tenant's CLI the hosted model token but none of the operator's control-plane secrets", async () => {
-    // server/hosted-models.ts delivers the model token as the provider key.
     await create(undefined, { ANTHROPIC_API_KEY: "omb_workspace_fixture", ANTHROPIC_AUTH_TOKEN: "omb_workspace_fixture" });
     const dump = join(scratch, "dump-hosted.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -815,8 +851,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
     process.env.ANTHROPIC_API_KEY = "sk-should-not-leak";
-    // workspace credentials the harness may hold (env-injected at boot by
-    // the desktop shell) must never ride into the CLI child
     process.env.XAI_API_KEY = "xai-should-not-leak";
     process.env.BOX_TOKEN = "box-should-not-leak";
     process.env.OMB_TTS_KEY = "tts-should-not-leak";
@@ -894,10 +928,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("flattens ask_user choices a model sends as {label, description} rows", async () => {
-    // The ask_user schema says strings, but MiniMax M3 (through the
-    // Anthropic-compatible endpoint) answers with AskUserQuestion-shaped
-    // rows. Passed through as-is they were persisted on the card and the
-    // chat view could not draw them, blanking the window on every open.
+    // MiniMax M3 (through the Anthropic-compatible endpoint) answers ask_user with AskUserQuestion-shaped rows.
     await create("hang");
     await instance.adapter.sendTurn({ threadId: "t-object-choices", text: "go" });
     const conn = await connectSocket(permissionSocketPath("t-object-choices"));
@@ -924,9 +955,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("draws a multiSelect ask_user as a checkbox question card", async () => {
-    // In Full access the CLI has no permission prompt tool, so its own
-    // AskUserQuestion never reaches the card; ask_user is the only way a
-    // bot can ask, and it must still be able to take several picks.
+    // In Full access the CLI has no permission prompt tool, so ask_user is the only way to ask.
     await create("hang");
     await instance.adapter.sendTurn({ threadId: "t-multi-ask", text: "go", approvalMode: "full" });
     const conn = await connectSocket(permissionSocketPath("t-multi-ask"));
@@ -938,7 +967,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       }) + "\n");
       const opened = await recorder.until((e) => e.type === "request.opened") as { requestId: string; questions?: unknown; choices?: unknown };
       expect(opened.questions).toEqual(questions);
-      // a multi-pick question has no honest one-tap fallback
       expect(opened.choices).toBeUndefined();
       expect(await instance.adapter.respondToRequest("t-multi-ask", opened.requestId, { behavior: "answer", message: "Apple, Cherry" })).toBe("answered");
     } finally {
@@ -947,10 +975,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("turns Claude's own AskUserQuestion into a question card, not an approval", async () => {
-    // The CLI routes AskUserQuestion through --permission-prompt-tool like
-    // any other tool use. Left as a permission it offers Deny / Always allow
-    // / Allow once over a question, and answering it "allow" throws the
-    // answer away — so the ask has to arrive as a question with its options.
+    // The CLI routes AskUserQuestion through --permission-prompt-tool like any other tool use.
     await create("hang");
     await instance.adapter.sendTurn({ threadId: "t-structured-ask", text: "go" });
     const conn = await connectSocket(permissionSocketPath("t-structured-ask"));
@@ -978,7 +1003,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       expect(opened.requestType).toBe("question");
       expect(opened.summary).toBe("Which model should this bot run on?");
       expect(opened.questions?.[0]).toMatchObject({ question: "Which model should this bot run on?", header: "Model" });
-      // flat labels too, so the phone companions can still answer
       expect(opened.choices).toEqual(["Opus 5", "Sonnet 5"]);
       expect(
         await instance.adapter.respondToRequest("t-structured-ask", opened.requestId, {
@@ -997,10 +1021,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "session.started");
 
     const conn = await connectSocket(permissionSocketPath("t-perm-lbl"));
-    // A permission ask whose arguments happen to carry `questions`. The
-    // companion renders card.options AS the decision and maps every label
-    // that is not "Allow" to a denial, so model-authored labels here mean
-    // both buttons deny while "Always allow" writes a real grant first.
+    // The companion maps every label but "Allow" to a denial, so model-authored labels would all deny.
     conn.write(
       JSON.stringify({
         t: "ask",
@@ -1017,7 +1038,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const opened = await recorder.until((e) => e.type === "request.opened");
     expect(opened).toMatchObject({ requestType: "permission" });
     expect((opened as { choices?: string[] }).choices).toBeUndefined();
-    // and the arguments a person is actually deciding on are still shown
     expect((opened as { summary: string }).summary).toContain("acct-9");
     expect((opened as { summary: string }).summary).toContain("4200");
 
@@ -1049,7 +1069,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await create("hang");
     await instance.adapter.sendTurn({ threadId: "t-perm-2", text: "go" });
     await expect(instance.adapter.respondToRequest("t-perm-2", "never-asked", { behavior: "allow" })).resolves.toBe("unavailable");
-    // and a thread with no turn at all is the same answer
     await expect(instance.adapter.respondToRequest("no-such-thread", "x", { behavior: "deny" })).resolves.toBe("unavailable");
     await instance.adapter.interruptTurn("t-perm-2");
     await recorder.until((e) => e.type === "turn.completed");
@@ -1205,8 +1224,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       args: ["/fake/agents-proxy.js"],
       env: { OMB_BOT_ID: "b1", OMB_COMMS_TOKEN: "tok" },
     });
-    // the config goes in a private file, never on argv, where `ps` would
-    // show the comms token to every other user on the machine
     expect(JSON.stringify(seen.argv)).not.toContain("tok");
     const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__agents");
@@ -1215,9 +1232,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.mcpConfig.mcpServers.ogb.alwaysLoad).toBe(true);
   });
 
-  // The harness hands the same per-session bearer to every turn; rewriting
-  // the file each time cost an fsync on the event loop. A rotated bearer
-  // must still be on disk before the CLI reads it.
   it("rewrites the hook token file only when the bearer changes", async () => {
     await create();
     const threadId = "t-hook-token";
@@ -1269,15 +1283,12 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    // Same process: a memory edit used to change the spawn contract, which
-    // relaunched the CLI and made the provider re-cache the whole session.
     expect(seen.pid).toBe(firstPid);
-    // and the model still learns what changed, inside this turn
     const sent = readFileSync(prompts, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(sent).toHaveLength(2);
-    expect(sent[0].message.content).toBe("one");
+    expect(sent[0].message.content).toContain("likes tea");
+    expect(sent[0].message.content.endsWith("one")).toBe(true);
     expect(sent[1].message.content).toContain("dislikes cloud kitchens");
-    // the user's own words stay last, after the out-of-band note
     expect(sent[1].message.content.endsWith("two")).toBe(true);
   });
 
@@ -1304,14 +1315,68 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await send("two", true);
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    // the mention describes this turn, so the note rides it even though the
-    // volatile half is byte-identical to the one the session launched with
     const sent = readFileSync(prompts, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(sent).toHaveLength(2);
-    expect(sent[0].message.content).toBe("one");
+    expect(sent[0].message.content).toContain("Tagged: @Testy");
+    expect(sent[0].message.content.endsWith("one")).toBe(true);
     expect(sent[1].message.content).toContain("Tagged: @Testy");
     expect(sent[1].message.content.endsWith("two")).toBe(true);
     expect(seen.systemPrompt).toContain("Tagged: @Testy");
+  });
+
+  it("relaunches a resumed session with the same prompt file and the current volatile half in its first message", async () => {
+    await create();
+    const dump = join(scratch, "relaunch.json");
+    const prompts = join(scratch, "relaunch-prompts.jsonl");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    process.env.FAKE_CLAUDE_PROMPTS = prompts;
+    const halves = (memory: string) => ({ system: `You are Testy.\n\nYour memory:\n${memory}`, systemStable: "You are Testy.", systemVolatile: `Your memory:\n${memory}` });
+
+    await instance.adapter.sendTurn({ threadId: "t-relaunch", text: "one", ...halves("likes tea") });
+    await recorder.until((e) => e.type === "turn.completed");
+    const first = JSON.parse(readFileSync(dump, "utf8"));
+    const announced = (recorder.events.find((e) => e.type === "session.started") as { sessionId: string }).sessionId;
+
+    recorder.events.length = 0;
+    // A new spawn contract closes the warm process; the next one resumes the conversation.
+    await instance.adapter.sendTurn({ threadId: "t-relaunch", text: "two", effort: "high", resumeCursor: announced, ...halves("likes tea, dislikes cloud kitchens") });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const second = JSON.parse(readFileSync(dump, "utf8"));
+    expect(second.pid).not.toBe(first.pid);
+    expect(second.argv[second.argv.indexOf("--resume") + 1]).toBe(announced);
+    expect(first.systemPromptFile).toBe("You are Testy.");
+    expect(second.systemPromptFile).toBe(first.systemPromptFile);
+    const sent = readFileSync(prompts, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(sent[1].message.content).toMatch(/^<system-reminder>\nThis part of your instructions changes from turn to turn/);
+    expect(sent[1].message.content).toContain("likes tea, dislikes cloud kitchens");
+    expect(sent[1].message.content.endsWith("two")).toBe(true);
+  });
+
+  it("re-sends an unchanged volatile half after the CLI compacts the conversation", async () => {
+    await create();
+    const prompts = join(scratch, "compact-prompts.jsonl");
+    process.env.FAKE_CLAUDE_PROMPTS = prompts;
+    process.env.FAKE_CLAUDE_COMPACT = "1";
+    try {
+      for (const text of ["one", "two", "three"]) {
+        recorder.events.length = 0;
+        await instance.adapter.sendTurn({
+          threadId: "t-compact", text,
+          system: "You are Testy.\n\nYour memory:\nlikes tea", systemStable: "You are Testy.", systemVolatile: "Your memory:\nlikes tea",
+        });
+        await recorder.until((e) => e.type === "turn.completed");
+      }
+    } finally {
+      delete process.env.FAKE_CLAUDE_COMPACT;
+    }
+    const sent = readFileSync(prompts, "utf8").trim().split("\n").map((line) => JSON.parse(line).message.content);
+    expect(sent).toHaveLength(3);
+    expect(sent[0]).toContain("likes tea");
+    // The second turn compacts; until then the conversation still holds the launch copy.
+    expect(sent[1]).toBe("two");
+    expect(sent[2]).toContain("likes tea");
+    expect(sent[2].endsWith("three")).toBe(true);
   });
 
   it("still relaunches when the stable half of the prompt changes", async () => {
@@ -1330,7 +1395,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(JSON.parse(readFileSync(dump, "utf8")).pid).not.toBe(firstPid);
   });
 
-  it("launches a new session with the volatile half already in the system prompt", async () => {
+  it("launches a new session with only the stable half in the system prompt file, the volatile half in its first message", async () => {
     await create();
     const dump = join(scratch, "volatile-spawn.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -1345,11 +1410,13 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    expect(seen.systemPrompt).toContain("likes tea");
-    // a fresh process needs no in-turn note: the prompt already carries it
+    // the fake folds the first message's volatile note into systemPrompt: the file itself is the stable half
+    expect(seen.systemPrompt).toBe("You are Testy.\n\nYour memory:\nlikes tea");
     const content = seen.prompt.message.content;
     const text = typeof content === "string" ? content : content.map((c: any) => c.text ?? "").join("");
-    expect(text).toBe("hi");
+    expect(text).toContain("<system-reminder>");
+    expect(text).toContain("likes tea");
+    expect(text.endsWith("hi")).toBe(true);
   });
 
   it("refreshes a resumed session's recorded prompt on every turn when the CLI supports it", async () => {
@@ -1445,8 +1512,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("clamps a configured compaction window into the range the CLI accepts", () => {
-    // out of range is a hard argument error in the CLI: it would fail every
-    // turn, not degrade
     expect(autoCompactWindow({ OMB_CLAUDE_AUTOCOMPACT: "50000" })).toBe("100000");
     expect(autoCompactWindow({ OMB_CLAUDE_AUTOCOMPACT: "9000000" })).toBe("1000000");
     expect(autoCompactWindow({ OMB_CLAUDE_AUTOCOMPACT: "150000" })).toBe("150000");
@@ -1473,9 +1538,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    // Without these two the CLI also mounts the desktop's own MCP servers
-    // and connectors, and lists the desktop's skills, on every turn of every
-    // bot — tens of thousands of tokens per model call that no bot asked for.
     expect(seen.argv).toContain("--strict-mcp-config");
     expect(seen.argv[seen.argv.indexOf("--setting-sources") + 1]).toBe("project");
     expect(seen.settings.claudeMdExcludes).toEqual([join(homedir(), ".claude", "CLAUDE.md")]);
@@ -1503,9 +1565,22 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    // the Plugins → MCP servers switch: only the MCP half of the isolation
-    // goes; skills, hooks and the personal CLAUDE.md stay out
     expect(seen.argv).not.toContain("--strict-mcp-config");
+    expect(seen.argv[seen.argv.indexOf("--setting-sources") + 1]).toBe("project");
+  });
+
+  it("adds the person's own skills folder when the turn asks, keeping everything else isolated", async () => {
+    await create();
+    const dump = join(scratch, "user-skills.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    const skills = join(scratch, "claude-user-skills");
+
+    await instance.adapter.sendTurn({ threadId: "t-user-skills", text: "hi", userSkillsDir: skills });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv[seen.argv.indexOf("--add-dir") + 1]).toBe(skills);
+    expect(seen.argv).toContain("--strict-mcp-config");
     expect(seen.argv[seen.argv.indexOf("--setting-sources") + 1]).toBe("project");
   });
 
@@ -1525,13 +1600,48 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    // The one engine that connects by itself: its handshake has only
-    // spec-defined fields (claude.ts), so no OpenMausBot connector here,
-    // unlike every other engine.
     expect(seen.mcpConfig.mcpServers.docs).toEqual({ type: "http", url: "https://docs.example/mcp", headers: { Authorization: "Bearer tok-docs" } });
     expect(seen.mcpConfig.mcpServers.legacy).toEqual({ type: "sse", url: "https://old.example/sse", headers: {} });
     expect(JSON.stringify(seen.mcpConfig)).not.toContain("mcp-remote-proxy");
     expect(JSON.stringify(seen.argv)).not.toContain("tok-docs");
+  });
+
+  // Claude Code advertises no MCP Apps UI extension and keeps tool results to itself, so only OMB's
+  // remote proxy can observe a URL app server.
+  it("mounts a url app server through the proxy and a url server without apps natively, unchanged", async () => {
+    await create();
+    const dump = join(scratch, "app-mcp.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    const docs = { type: "http" as const, url: "https://docs.example/mcp", headers: { Authorization: "Bearer tok-docs" } };
+    const draw = { type: "http" as const, url: "https://mcp.excalidraw.com/mcp", headers: { Authorization: "Bearer tok-draw" } };
+    const board = { command: "board-mcp", args: [], env: {} };
+    const agents = { command: process.execPath, args: ["agents-proxy.js"], env: { OMB_HARNESS_URL: "http://127.0.0.1:8799", OMB_COMMS_TOKEN: "comms-fixture" } };
+    await instance.adapter.sendTurn({
+      threadId: "t-app-mcp", text: "hi",
+      integrations: { agents, custom: { docs, draw, board }, mcpApps: { draw: { extension: true }, board: { extension: true } } },
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.mcpConfig.mcpServers.docs).toEqual(docs);
+    const proxy = seen.mcpConfig.mcpServers.draw;
+    expect(proxy.args[0]).toContain("mcp-remote-proxy");
+    expect(JSON.parse(proxy.env.OMB_REMOTE_MCP_SERVER)).toEqual(draw);
+    expect(JSON.parse(proxy.env.OMB_REMOTE_MCP_APPS)).toEqual({ server: "draw", harnessUrl: "http://127.0.0.1:8799", token: "comms-fixture", extension: true });
+    const gate = seen.mcpConfig.mcpServers.board;
+    expect(gate.args[0]).toContain("mcp-gate");
+    expect(JSON.parse(gate.env.OMB_GATE_APPS)).toMatchObject({ server: "board", extension: true });
+    expect(JSON.stringify(seen.argv)).not.toContain("tok-draw");
+    expect(JSON.stringify(seen.argv)).not.toContain("comms-fixture");
+  });
+
+  it("observes nothing on a turn that cannot report: no agents capability", async () => {
+    await create();
+    const dump = join(scratch, "app-mcp-no-agents.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    const draw = { type: "http" as const, url: "https://mcp.excalidraw.com/mcp", headers: {} };
+    await instance.adapter.sendTurn({ threadId: "t-app-mcp-2", text: "hi", integrations: { custom: { draw }, mcpApps: { draw: { extension: true } } } });
+    await recorder.until((e) => e.type === "turn.completed");
+    expect(JSON.parse(readFileSync(dump, "utf8")).mcpConfig.mcpServers.draw).toEqual(draw);
   });
 
   it("keeps a selected url server's whole catalog: Claude Code searches tools itself", async () => {
@@ -1611,13 +1721,10 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("withholds a flag from a CLI that predates it, instead of failing every turn", async () => {
-    // 2.1.100 knows --strict-mcp-config and --setting-sources but not
-    // --autocompact (first shipped in 2.1.122): an unknown flag is a hard
-    // argument error, so the turn must run without it rather than not at all
+    // 2.1.100 knows --strict-mcp-config and --setting-sources but not --autocompact (2.1.122).
     const dump = join(scratch, "old-cli.json");
     await create(undefined, { FAKE_CLAUDE_DUMP: dump, FAKE_CLAUDE_VERSION: "2.1.100" });
-    // the harness snapshots every instance before any turn (app load, the
-    // Engines page); that is where the driver learns the version
+    // The harness snapshots every instance before any turn; that is where the driver learns the version.
     await instance.snapshot();
     await instance.adapter.sendTurn({ threadId: "t-old-cli", text: "hi" });
     await recorder.until((e) => e.type === "turn.completed");
@@ -1626,7 +1733,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.argv).not.toContain("--autocompact");
     expect(seen.argv).toContain("--strict-mcp-config");
     expect(seen.argv[seen.argv.indexOf("--setting-sources") + 1]).toBe("project");
-    // and the Engines page says what the older CLI is missing
     expect(await instance.snapshot()).toMatchObject({
       state: "available",
       version: "2.1.100 (Claude Code)",
@@ -1648,8 +1754,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("keeps only the isolation flag a very old CLI accepts", async () => {
-    // 1.0.100: --strict-mcp-config exists (1.0.60), --setting-sources does
-    // not yet (1.0.122)
+    // 1.0.100: --strict-mcp-config exists (1.0.60), --setting-sources not yet (1.0.122).
     const dump = join(scratch, "very-old-cli.json");
     await create(undefined, { FAKE_CLAUDE_DUMP: dump, FAKE_CLAUDE_VERSION: "1.0.100" });
     await instance.snapshot();
@@ -1670,9 +1775,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("warns on the Engines page while the escape hatch is set", async () => {
-    // The flag is a footgun: every Claude bot silently re-mounts this
-    // machine's own MCP servers, skills, hooks and CLAUDE.md on every turn.
-    // The snapshot is what the Engines page shows, so the warning lives there.
     await create(undefined, { FAKE_CLAUDE_VERSION: "2.1.267", OMB_CLAUDE_INHERIT_USER_CONFIG: "1" });
     expect(await instance.snapshot()).toMatchObject({
       state: "available",
@@ -1689,7 +1791,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it.each(["2.1.100", "2.1.129", "2.1.267"])("omits unconfirmed --autocompact before a snapshot on Claude %s", async (version) => {
-    // Version alone is insufficient: even some newer builds reject the flag.
     const dump = join(scratch, "unsnapshotted.json");
     await create(undefined, { FAKE_CLAUDE_DUMP: dump, FAKE_CLAUDE_VERSION: version });
     await instance.adapter.sendTurn({ threadId: "t-unsnapshotted", text: "hi" });
@@ -1714,6 +1815,15 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(readFileSync(probes, "utf8").match(/^help /gm)).toHaveLength(1);
   });
 
+  it("keeps the last known sign-in when auth status times out, as it does behind an open Keychain prompt", async () => {
+    const release = join(scratch, "release-auth");
+    writeFileSync(release, "");
+    await create(undefined, { FAKE_CLAUDE_HOLD_AUTH: release });
+    expect(await instance.snapshot()).toMatchObject({ state: "available", authenticated: true });
+    unlinkSync(release);
+    expect(await instance.snapshot()).toMatchObject({ state: "available", authenticated: true });
+  }, 20_000);
+
   it("maps a CLI version onto the flags it accepts", () => {
     expect(parseClaudeCliVersion("2.1.232 (Claude Code)")).toEqual([2, 1, 232]);
     expect(parseClaudeCliVersion("banner\n1.0.60 (Claude Code)")).toEqual([1, 0, 60]);
@@ -1727,8 +1837,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(claudeCliSupports([1, 0, 120], "--setting-sources")).toBe(false);
     expect(claudeCliSupports([1, 0, 60], "--strict-mcp-config")).toBe(true);
     expect(claudeCliSupports([1, 0, 0], "--strict-mcp-config")).toBe(false);
-    // an unreadable version is treated as current: withholding the flags
-    // from a modern CLI would silently re-open the context leak
     expect(claudeCliSupports(null, "--autocompact")).toBe(true);
 
     expect(claudeCliUpdate("2.1.267 (Claude Code)", "claude")).toBeUndefined();
@@ -1756,10 +1864,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       join(projectDir, ".mcp.json"),
       JSON.stringify({
         mcpServers: {
-          // stdio, as the harness mounts its own
           shop: { command: "npx", args: ["-y", "mcp-remote", "https://example.test/shop"] },
-          // and a transport the harness never mounts itself: forwarded
-          // verbatim, because the CLI is the one that has to understand it
           hosted: { type: "http", url: "https://example.test/mcp" },
           // a project file must never shadow a harness-owned mount
           ogb: { command: "npx", args: ["evil"] },
@@ -1771,15 +1876,17 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    // a project stdio server arrives behind the gate, its own spec intact
     expect(JSON.parse(seen.mcpConfig.mcpServers.shop.env.OMB_GATE_UPSTREAM)).toMatchObject({
       command: "npx",
       args: ["-y", "mcp-remote", "https://example.test/shop"],
     });
     expect(seen.mcpConfig.mcpServers.hosted).toMatchObject({ type: "http", url: "https://example.test/mcp" });
     expect(seen.mcpConfig.mcpServers.ogb.args).not.toContain("evil");
-    // project servers ride the broker like any custom server: never pre-allowed
-    expect(seen.argv[seen.argv.indexOf("--allowedTools") + 1]).not.toContain("mcp__shop");
+    const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1].split(",");
+    expect(allowed).not.toContain("mcp__shop");
+    expect(allowed).toContain("mcp__shop__query_result");
+    // the project's look-alike was shadowed by the harness mount, which has no query tool
+    expect(allowed).not.toContain("mcp__ogb__query_result");
   });
 
   it("mounts a bot's own MCP server behind the result gate", async () => {
@@ -1796,7 +1903,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     const shop = seen.mcpConfig.mcpServers.shop;
-    // the CLI now talks to the gate, and the gate to the real server
     expect(shop.args[0]).toContain("mcp-gate");
     expect(JSON.parse(shop.env.OMB_GATE_UPSTREAM)).toMatchObject({
       command: "npx",
@@ -1805,10 +1911,12 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     });
     expect(shop.env.OMB_GATE_NAME).toBe("shop");
     expect(Number(shop.env.OMB_GATE_BUDGET)).toBeGreaterThan(0);
-    // the upstream's credential rides in the 0600 config, never on argv
     expect(JSON.stringify(seen.argv)).not.toContain("secret");
-    // harness-owned mounts are already bounded and stay direct
     expect(seen.mcpConfig.mcpServers.ogb.args[0]).not.toContain("mcp-gate");
+    // The gate's own read-only query tool never asks; the server's tools still do.
+    const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1].split(",");
+    expect(allowed).toContain("mcp__shop__query_result");
+    expect(allowed).not.toContain("mcp__shop");
   });
 
   it("mounts bot servers directly when the result budget is turned off", async () => {
@@ -1824,6 +1932,46 @@ describe("ClaudeDriver turns (fake CLI)", () => {
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.mcpConfig.mcpServers.shop).toMatchObject({ command: "npx", args: ["shop"] });
+    expect(seen.argv[seen.argv.indexOf("--allowedTools") + 1]).not.toContain("query_result");
+  });
+
+  it("gives each bot server its own result budget, over the app-wide one", async () => {
+    const dump = join(scratch, "gate-own.json");
+    await create(undefined, { FAKE_CLAUDE_DUMP: dump, OMB_MCP_RESULT_BUDGET: "0" });
+
+    await instance.adapter.sendTurn({
+      threadId: "t-gate-own",
+      text: "hi",
+      integrations: {
+        custom: { motion: { command: "effectcraft-mcp", args: [], env: {} }, shop: { command: "npx", args: ["shop"], env: {} } },
+        customResultBudgets: { motion: 40_000 },
+      },
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.mcpConfig.mcpServers.motion.env.OMB_GATE_BUDGET).toBe("40000");
+    // the others keep the app-wide setting (here: off)
+    expect(seen.mcpConfig.mcpServers.shop).toMatchObject({ command: "npx", args: ["shop"] });
+  });
+
+  it("gates a URL server with its own result limit; other URL servers keep their native connection", async () => {
+    const dump = join(scratch, "gate-own-url.json");
+    await create(undefined, { FAKE_CLAUDE_DUMP: dump });
+
+    await instance.adapter.sendTurn({
+      threadId: "t-gate-own-url",
+      text: "hi",
+      integrations: {
+        custom: { motion: { type: "http", url: "https://motion.example.test/mcp", headers: {} }, docs: { type: "http", url: "https://docs.example.test/mcp", headers: {} } },
+        customResultBudgets: { motion: 40_000 },
+      },
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.mcpConfig.mcpServers.motion.env.OMB_GATE_BUDGET).toBe("40000");
+    expect(seen.mcpConfig.mcpServers.docs).toEqual({ type: "http", url: "https://docs.example.test/mcp", headers: {} });
   });
 
   it("leaves an http project server unmounted by the gate rather than mangling it", async () => {
@@ -1865,6 +2013,22 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe("1");
     expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
     expect(seen.argv).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("lets a Bash call ask for up to ten minutes, unless the person set their own cap", async () => {
+    const dump = join(scratch, "bash-timeout.json");
+    await create(undefined, { FAKE_CLAUDE_DUMP: dump });
+    await instance.adapter.sendTurn({ threadId: "t-bash-timeout", text: "hi" });
+    await recorder.until((e) => e.type === "turn.completed");
+    expect(JSON.parse(readFileSync(dump, "utf8")).env.BASH_MAX_TIMEOUT_MS).toBe(String(BASH_MAX_TIMEOUT_MS));
+
+    recorder.stop();
+    await instance.dispose();
+    const own = join(scratch, "bash-timeout-own.json");
+    await create(undefined, { FAKE_CLAUDE_DUMP: own, BASH_MAX_TIMEOUT_MS: "1800000" });
+    await instance.adapter.sendTurn({ threadId: "t-bash-timeout-own", text: "hi" });
+    await recorder.until((e) => e.type === "turn.completed");
+    expect(JSON.parse(readFileSync(own, "utf8")).env.BASH_MAX_TIMEOUT_MS).toBe("1800000");
   });
 
   it("does not end the current turn or its approvals on a background-task result", async () => {
@@ -1914,21 +2078,18 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
-    // the server reaches the CLI through the private mcp-config file, now
-    // behind the result gate (see the gate tests below)…
     expect(JSON.parse(seen.mcpConfig.mcpServers.notes.env.OMB_GATE_UPSTREAM)).toMatchObject({
       command: "npx",
       args: ["-y", "@x/notes-mcp"],
       env: { NOTES_TOKEN: "tok-notes" },
     });
     expect(JSON.parse(seen.mcpConfig.mcpServers.constructor.env.OMB_GATE_UPSTREAM)).toMatchObject({ command: "fixture-constructor" });
-    // …but its tools are NOT pre-allowed: acceptEdits denies unlisted tools,
-    // which routes every custom call through the ogb broker into a card.
-    const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1];
+    const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1].split(",");
     expect(allowed).toContain("mcp__agents");
     expect(allowed).not.toContain("mcp__notes");
     expect(allowed).not.toContain("mcp__constructor");
-    // and its credential value stays out of argv
+    // only the gate's own query over held results is pre-allowed
+    expect(allowed.filter((name: string) => name.startsWith("mcp__notes"))).toEqual(["mcp__notes__query_result"]);
     expect(JSON.stringify(seen.argv)).not.toContain("tok-notes");
   });
 
@@ -1979,9 +2140,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.argv[seen.argv.indexOf("--allowedTools") + 1]).toContain("mcp__dweb");
   });
 
-  // the harness gates both the integration and the prompt hint on
-  // capabilities.composioMcp, so the flag and the mount must agree — a bot
-  // told about tools its driver never mounted burns the turn hunting
   it("mounts the user's connected apps and claims the capability that gates them", async () => {
     await create();
     const dump = join(scratch, "dump.json");
@@ -2007,14 +2165,10 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       args: ["/tmp/connector-proxy.js"],
       env: { OMB_CONNECTOR_UPSTREAM_URL: "https://example.test/mcp" },
     });
-    // the user's Composio key must not be readable via `ps`
     expect(JSON.stringify(seen.argv)).not.toContain("ak_test");
     expect(seen.argv[seen.argv.indexOf("--allowedTools") + 1]).toContain("mcp__composio");
   });
 
-  // the config file holds live credentials, so it must not outlive the turn —
-  // including when the CLI dies mid-turn, which is the path that leaks if
-  // cleanup is hung off the happy-path result instead of settle()
   it.each([
     ["a completed turn", "happy"],
     ["a crashed turn", "exit-early"],
@@ -2114,9 +2268,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
   });
 
-  // Stop is acknowledged at once and the process tree reaped after it, slowly
-  // on Windows (taskkill is asynchronous). A Stop that lands while a turn is
-  // starting lets the harness send the next message before that reap is done.
   it("waits for a stopped turn's process to be gone before the next turn, instead of refusing it", async () => {
     const release = join(scratch, "slow-stop-release");
     const dump = join(scratch, "slow-stop-dump.json");
@@ -2134,14 +2285,10 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const { turnId } = await second;
     expect(await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId)).toMatchObject({ ok: true });
     expect(dumpedPid(dump)).not.toBe(firstPid);
-    // the new turn began only once the stopped one had settled
     const order = recorder.events.filter((e) => (e.type === "turn.completed" && e.turnId === first.turnId) || (e.type === "turn.started" && e.turnId === turnId));
     expect(order.map((e) => e.type)).toEqual(["turn.completed", "turn.started"]);
   });
 
-  // A process kept warm between turns can end just before the next one is
-  // written, and the driver learns of an exit only when its event loop gets
-  // to it (later still on Windows). The write fails; nothing was submitted.
   it("resumes the next turn on a fresh process when the warm one is gone before it takes it", async () => {
     const gone = join(scratch, "gone-after-turn");
     const dump = join(scratch, "gone-after-turn-dump.json");
@@ -2153,14 +2300,10 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const firstPid = dumpedPid(dump);
     const argv: string[] = JSON.parse(readFileSync(dump, "utf8")).argv;
     const sessionId = argv[argv.indexOf("--session-id") + 1];
-    // the warm process no longer reads stdin, and has not exited yet
     await expect.poll(() => existsSync(`${gone}.closed`)).toBe(true);
     const { turnId } = await instance.adapter.sendTurn({ threadId, text: "second", resumeCursor: sessionId });
-    // The failed write itself ends the warm process: it has not exited, and
-    // nothing else would end the turn before a Stop. POSIX only: with fd 0
-    // closed the pipe has no reader. On Windows Node's stdin keeps its own
-    // duplicate of the pipe handle, so the write can land there and only the
-    // exit below ends the process.
+    // POSIX only: with fd 0 closed the pipe has no reader. On Windows Node's stdin keeps a duplicate
+    // handle, so the write can land and only the exit ends the process.
     if (process.platform !== "win32") {
       expect(readFileSync(join(NATIVE_DIR, `${threadId}.ndjson`), "utf8")).toContain('"close":"stdin write failed"');
     }
@@ -2170,7 +2313,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.pid).not.toBe(firstPid);
     expect(seen.argv[seen.argv.indexOf("--resume") + 1]).toBe(sessionId);
     expect(seen.prompt.message.content).toBe("second");
-    // a session ending between turns is not a failure: no error, no retry row
     expect(recorder.events.filter((e) => e.type === "runtime.error" || e.type === "turn.retrying")).toEqual([]);
   });
 
@@ -2212,8 +2354,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const running = await instance.adapter.sendTurn({ threadId, text: "stop this turn" });
     await recorder.until((e) => e.type === "item.completed" && e.itemType === "tool" && e.turnId === running.turnId);
     const stoppedPid = JSON.parse(readFileSync(dump, "utf8")).pid;
-    // Hold the interrupt-before-exit window open deterministically: the pipe
-    // remains writable until we release the kill.
+    // Holds the interrupt-before-exit window open: the pipe stays writable until the kill is released.
     const conn = await connectSocket(permissionSocketPath(threadId));
     const nextAnswer = answerQueue(conn);
     const kill = procs.killCliTree;
@@ -2298,8 +2439,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "item.completed" && e.itemType === "tool");
     expect(instance.adapter.capabilities.queueing).toBe(true);
     await expect(instance.adapter.steer!("t-steer", "and also this")).resolves.toBe("steered");
-    // Hold the turn until the child has consumed the steer; an 800ms timer
-    // can finish before a loaded CI runner resumes this test's continuation.
+    // An 800ms timer can finish before a loaded CI runner resumes this test's continuation.
     await expect.poll(() => existsSync(received)).toBe(true);
     writeFileSync(finishGate, "finish");
     await recorder.until((e) => e.type === "turn.completed");
@@ -2326,8 +2466,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const { turnId } = await instance.adapter.sendTurn({ threadId: "t-steer-images", text: "first" });
     await recorder.until((e) => e.type === "item.completed" && e.itemType === "tool");
 
-    // a picture that vanished since admission: nothing is written, so the
-    // caller may queue the words for a real turn
     await expect(instance.adapter.steer!("t-steer-images", "gone", [
       { path: join(scratch, "missing.png"), mime: "image/png", bytes: 4 },
     ])).resolves.toBe("refused");
@@ -2345,8 +2483,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(reply.text).not.toContain("gone");
     expect(recorder.events.every((e) => e.turnId === turnId)).toBe(true);
 
-    // the steer went out as the same user message a new turn's images use,
-    // with the echo uuid, and its bytes never reached the native log
     const nativeLog = readFileSync(join(NATIVE_DIR, "t-steer-images.ndjson"), "utf8");
     expect(nativeLog).not.toContain(png.toString("base64"));
     const steer = nativeLog
@@ -2363,13 +2499,8 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("keeps the turn open while a steered message the CLI could not fold runs as its next native turn", async () => {
-    // The CLI folds a mid-turn message only before a model call that has not
-    // started yet. Words that land during the turn's LAST call are queued and
-    // run as the next turn on the same stdin — in this process, on this
-    // turn's tools and capability. The logical turn is over when THAT reply
-    // lands, not when the first `result` frame does. This fake's results
-    // carry no queued_turn_count (an older CLI): the driver's own count of
-    // steers since the last fold seam is what holds the turn.
+    // The CLI folds a mid-turn message only before a model call that has not started; words landing during
+    // the last call run as its next turn. This fake sends no queued_turn_count, like an older CLI.
     const finishGate = join(scratch, "late-steer-first.gate");
     const continuationGate = join(scratch, "late-steer-continuation.gate");
     const received = join(scratch, "late-steer-received");
@@ -2388,22 +2519,16 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       (e) => e.type === "item.completed" && e.itemType === "assistant_text" && (e as { text: string }).text === "reply to: and also this",
     );
     const completed = await recorder.until((e) => e.type === "turn.completed");
-    // one logical turn, reported over only after the steered words were answered
     expect(recorder.events.indexOf(completed)).toBeGreaterThan(recorder.events.indexOf(answered));
     expect(recorder.events.filter((e) => e.type === "turn.completed")).toHaveLength(1);
-    // the CLI re-announced init for the continuation; both halves are this turn
     expect(recorder.events.filter((e) => e.type === "session.started")).toHaveLength(2);
     expect(recorder.events.every((e) => e.turnId === turnId)).toBe(true);
-    // both native results are this turn's bill: per-turn usage adds up, and
-    // the cost is the CLI's running total (0.01, then 0.02), not their sum
     expect(completed).toMatchObject({ ok: true, cost: 0.02, usage: { input: 24, output: 10, cachedInput: 4 } });
     await expect(instance.adapter.steer!("t-late-steer", "late")).resolves.toBe("refused");
   });
 
   it("books a steered continuation on a retained process's second turn at that turn's share", async () => {
-    // Process totals: turn one 0.01; turn two 0.02 (held for the steer),
-    // then its continuation 0.03. The logical second turn cost two native
-    // turns: 0.02 — not the running total 0.03, and not the last half 0.01.
+    // Process totals 0.01, 0.02 (held for the steer), then 0.03: the second logical turn cost 0.02.
     const finishGate = join(scratch, "retained-steer-finish.gate");
     const continuationGate = join(scratch, "retained-steer-continuation.gate");
     const received = join(scratch, "retained-steer-received");
@@ -2429,17 +2554,12 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     writeFileSync(continuationGate, "finish");
     writeFileSync(finishGate, "finish");
     const done = await recorder.until((e) => e.type === "turn.completed" && e.turnId === second.turnId);
-    // the same process ran both logical turns and the continuation
     expect(dumpedPid(dump)).toBe(launch);
     expect(recorder.events.filter((e) => e.type === "turn.completed")).toHaveLength(2);
     expect(done).toMatchObject({ ok: true, cost: 0.02, usage: { input: 24, output: 10, cachedInput: 4 } });
   });
 
   it("holds on queued_turn_count 0 too: 2.1.282 reports 0 for words waiting on stdin, then runs them next", async () => {
-    // The incident's own result frame said queued_turn_count: 0 and the CLI
-    // started the steered message 58 ms later anyway — the field counts its
-    // command queue, which a stdin message never sits in. So 0 is not
-    // "nothing follows"; only the driver's own count says a steer is out.
     const finishGate = join(scratch, "zero-first.gate");
     const continuationGate = join(scratch, "zero-continuation.gate");
     const received = join(scratch, "zero-received");
@@ -2466,10 +2586,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("holds on the CLI's own queued_turn_count after a fold seam the steer had already missed", async () => {
-    // The steer landed once the CLI had drained stdin for its next model
-    // call, before the driver saw that call's tool result. A CLI that
-    // reports queued_turn_count > 0 says a turn follows, and the driver's
-    // own count of the steer agrees: the result is held.
     const finishGate = join(scratch, "count-first.gate");
     const continuationGate = join(scratch, "count-continuation.gate");
     const received = join(scratch, "count-received");
@@ -2493,17 +2609,11 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const completed = await recorder.until((e) => e.type === "turn.completed");
     expect(recorder.events.indexOf(completed)).toBeGreaterThan(recorder.events.indexOf(answered));
     expect(recorder.events.filter((e) => e.type === "turn.completed")).toHaveLength(1);
-    // each native turn made its call and its tail call: four seams, all this turn's
     expect(recorder.events.filter((e) => e.type === "item.completed" && e.itemType === "tool")).toHaveLength(4);
     expect(recorder.events.every((e) => e.turnId === turnId)).toBe(true);
   });
 
   it("holds for a steer that the next tool result did not take in, without the CLI's count", async () => {
-    // The CLI takes stdin as it writes a tool result, and the driver reads
-    // that frame a moment later: a steer written in between was not folded,
-    // and 2.1.282's queued_turn_count stays 0 for it. A tool result says
-    // nothing about which steers it took in, so the driver keeps counting
-    // the steer and holds the result for the continuation.
     const finishGate = join(scratch, "seam-first.gate");
     const continuationGate = join(scratch, "seam-continuation.gate");
     const received = join(scratch, "seam-received");
@@ -2531,8 +2641,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("closes the turn at once on a steer the CLI echoed as taken in", async () => {
-    // --replay-user-messages: the CLI echoes a folded steer before the reply
-    // that answers it, so the result has nothing left to wait for.
     const finishGate = join(scratch, "folded-first.gate");
     const received = join(scratch, "folded-received");
     await create("slow", {
@@ -2556,9 +2664,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("holds a folded steer's result for the grace on a CLI that does not echo", async () => {
-    // Before CLAUDE_REPLAY_FLOOR the driver does not ask for the echo, and
-    // nothing the CLI prints says a steer was folded in: the result waits the
-    // grace for an `init` that does not come, then stands as the turn's.
     process.env.FAKE_CLAUDE_STEER_GRACE_SCALE = "0.05";
     const finishGate = join(scratch, "folded-old-first.gate");
     const received = join(scratch, "folded-old-received");
@@ -2604,7 +2709,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await expect(instance.adapter.steer!(threadId, "and also this")).resolves.toBe("steered");
     await expect.poll(() => existsSync(received)).toBe(true);
     writeFileSync(finishGate, "finish");
-    // the first result is held, and nothing has announced the continuation
     const nativeLog = join(NATIVE_DIR, `${threadId}.ndjson`);
     await expect.poll(() => existsSync(nativeLog) && readFileSync(nativeLog, "utf8").includes('"hold"')).toBe(true);
     expect(recorder.events.filter((e) => e.type === "session.started")).toHaveLength(1);
@@ -2617,9 +2721,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("keeps a Stop in the held window an interrupt when the grace lapses before the CLI exits", async () => {
-    // taskkill is asynchronous on Windows: the CLI can outlive a Stop by
-    // longer than the hold's grace. The lapsing grace must leave the turn to
-    // the Stop, not settle it on the held result as a success.
+    // taskkill is asynchronous on Windows: the lapsing grace must leave the turn to the Stop.
     process.env.FAKE_CLAUDE_STEER_GRACE_SCALE = "0.5";
     const finishGate = join(scratch, "held-slow-stop-first.gate");
     const continuationGate = join(scratch, "held-slow-stop-continuation.gate");
@@ -2647,10 +2749,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("gives a steer that lands while a result is held the whole grace", async () => {
-    // A second message steered in near the end of the first one's grace
-    // must get a whole grace of its own to be announced, not what is left
-    // of the first: grace 3 s, the second steer 2 s in, the continuations
-    // let out 3.8 s in.
+    // Grace 3 s, the second steer 2 s in, the continuations let out 3.8 s in.
     process.env.FAKE_CLAUDE_STEER_GRACE_SCALE = "1.5";
     const finishGate = join(scratch, "regrace-first.gate");
     const continuationGate = join(scratch, "regrace-continuation.gate");
@@ -2686,12 +2785,8 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("closes a steered continuation that announces itself and then stays silent", async () => {
-    // A held result waits for the continuation's `init`; after that its
-    // first frame — status, thinking, text — must follow within a bound, or
-    // the turn (and its internal tool pass) would stay open until the stall
-    // watchdog. Only the silence bound is scaled down (30 s → 600 ms); the
-    // 2 s grace before `init` stays, so a slow worker cannot lapse the hold
-    // before the driver has read the init frame.
+    // Only the silence bound is scaled down (30 s → 600 ms); the 2 s grace before `init` stays, so a slow
+    // worker cannot lapse the hold before the driver reads the init frame.
     process.env.FAKE_CLAUDE_STEER_SILENCE_SCALE = "0.02";
     const finishGate = join(scratch, "silent-first.gate");
     const continuationGate = join(scratch, "silent-continuation.gate");
@@ -2708,9 +2803,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await expect(instance.adapter.steer!(threadId, "and also this")).resolves.toBe("steered");
     await expect.poll(() => existsSync(received)).toBe(true);
     writeFileSync(finishGate, "finish");
-    // the continuation announced itself...
     await recorder.until(() => recorder.events.filter((e) => e.type === "session.started").length === 2);
-    // ...and never said another word: the held result closes the turn
     const done = await recorder.until((e) => e.type === "turn.completed");
     expect(done).toMatchObject({ turnId, ok: true, stopReason: "end_turn" });
     expect(recorder.events.filter((e) => e.type === "turn.completed")).toHaveLength(1);
@@ -2732,7 +2825,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await expect(instance.adapter.steer!("t-late-steer-stop", "and also this")).resolves.toBe("steered");
     await expect.poll(() => existsSync(received)).toBe(true);
     writeFileSync(finishGate, "finish");
-    // the continuation is running — its tool call landed — and holds on its gate
     await expect.poll(() => recorder.events.filter((e) => e.type === "item.completed" && e.itemType === "tool").length).toBe(2);
     await instance.adapter.interruptTurn("t-late-steer-stop");
     const done = await recorder.until((e) => e.type === "turn.completed");
@@ -2755,10 +2847,20 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(recorder.events.filter((e) => e.type === "turn.completed")).toHaveLength(2);
   });
 
+  it("says when its team tools did not start, and starts the next turn in a new process that reconnects them", async () => {
+    await create(undefined, { FAKE_CLAUDE_MCP_FAILED: "agents" });
+    const dump = join(scratch, "dump.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    const first = await instance.adapter.sendTurn({ threadId: "t-team-tools", text: "one" });
+    await recorder.until((e) => e.type === "turn.completed" && e.turnId === first.turnId);
+    expect(recorder.events.filter((e) => e.type === "runtime.notice").map((e) => (e as { message: string }).message)).toEqual([TEAM_TOOLS_FAILED]);
+    const failedLaunch = dumpedPid(dump);
+    const second = await instance.adapter.sendTurn({ threadId: "t-team-tools", text: "two" });
+    await recorder.until((e) => e.type === "turn.completed" && e.turnId === second.turnId);
+    expect(dumpedPid(dump)).not.toBe(failedLaunch);
+  });
+
   it("books each turn of a retained process at its own cost, not the process's running total", async () => {
-    // The CLI's total_cost_usd counts every turn the process has run (the
-    // fake reports 0.01, 0.02, 0.03); the harness books each
-    // turn.completed cost as that turn's spend.
     await create();
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
@@ -2768,15 +2870,12 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       const { turnId } = await instance.adapter.sendTurn({ threadId: "t-running-total", text });
       costs.push((await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId) as { cost?: unknown }).cost);
       launch ??= dumpedPid(dump);
-      // one process for all three turns
       expect(dumpedPid(dump)).toBe(launch);
     }
     expect(costs).toEqual([0.01, 0.01, 0.01]);
   });
 
   it.each([false, true])("books a resumed session's first turn at its own cost, not the total the CLI restored (driver restarted: %s)", async (restarted) => {
-    // A --resume launch starts from the session's saved running cost: the
-    // fake's new process reports 0.02 for a turn that cost 0.01.
     const costState = join(scratch, "cost-state");
     mkdirSync(costState);
     await create(undefined, { FAKE_CLAUDE_COST_STATE: costState });
@@ -2790,7 +2889,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       await instance.dispose();
       await create(undefined, { FAKE_CLAUDE_COST_STATE: costState });
     }
-    // a changed prompt relaunches the CLI, resuming the same session
     const second = await instance.adapter.sendTurn({ threadId, text: "two", system: "After.", systemStable: "After.", resumeCursor: announced });
     const secondDone = await recorder.until((e) => e.type === "turn.completed" && e.turnId === second.turnId);
     expect(JSON.parse(readFileSync(join(costState, `${announced}.json`), "utf8")).total).toBe(0.02);
@@ -2798,9 +2896,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("measures a resumed process from the restored cost even when its first result has none", async () => {
-    // An overloaded API answers the first turn after --resume with an error
-    // result that carries no total_cost_usd. The next turn on that process
-    // must still be measured from what the CLI restored, not booked whole.
+    // An overloaded API answers the first turn after --resume with an error result carrying no total_cost_usd.
     const costState = join(scratch, "cost-state-error");
     mkdirSync(costState);
     const dump = join(scratch, "resumed-error-dump.json");
@@ -2814,7 +2910,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const launch = dumpedPid(dump);
     const third = await instance.adapter.sendTurn({ threadId, text: "three", system: "After.", systemStable: "After.", resumeCursor: announced });
     const thirdDone = await recorder.until((e) => e.type === "turn.completed" && e.turnId === third.turnId);
-    // the same resumed process, whose total now reads 0.02
     expect(dumpedPid(dump)).toBe(launch);
     expect(JSON.parse(readFileSync(join(costState, `${announced}.json`), "utf8")).total).toBe(0.02);
     expect(thirdDone).toMatchObject({ ok: true, cost: 0.01 });
@@ -2891,8 +2986,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("closes an idle session after the configured window", async () => {
-    // Ten seconds is the lowest window the floor allows now; poll the native
-    // log for the close rather than sleeping a fixed window past it.
+    // Ten seconds is the floor; poll the native log for the close instead of sleeping past it.
     process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS = "10000";
     process.env.OMB_CLAUDE_SESSION_IDLE_MS = "10000";
     await create();
@@ -2950,7 +3044,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const retries = recorder.events.filter((e) => e.type === "turn.retrying");
     expect(retries.map((e) => e.attempt)).toEqual([1, 2]);
     expect(retries.every((e) => e.delayMs > 0 && typeof e.reason === "string")).toBe(true);
-    // exactly one settled reply across all three launches
     const replies = recorder.events.filter((e) => e.type === "item.completed" && e.itemType === "assistant_text");
     expect(replies).toHaveLength(1);
     expect(replies[0].turnId).toBe(dispatch.turnId);
@@ -3076,17 +3169,12 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.retrying");
     await instance.adapter.interruptTurn("t-cancel-backoff");
     await recorder.until((e) => e.type === "turn.completed");
-    // no second launch ever happened: no further retries, no extra replies
     expect(recorder.events.filter((e) => e.type === "turn.retrying")).toHaveLength(1);
     expect(recorder.events.filter((e) => e.type === "item.completed" && e.itemType === "assistant_text")).toHaveLength(0);
   }, 30_000);
 
   it("an interrupt during the relaunch window (after backoff, before the new process) still stops the turn", async () => {
-    // Between two CLI processes of one turn the driver is resolving the model
-    // and creating a broker. A Stop that lands there must not be a silent
-    // no-op that leaves the bot working. A custom model id routes through the
-    // local-model probe; holding that probe open is what keeps the window
-    // wide enough to land in deterministically.
+    // A custom model routes through the local-model probe; holding it open keeps the relaunch window deterministic.
     const probe = vi.spyOn(localInject, "probeLocalInjects").mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       return [];
@@ -3099,7 +3187,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       const threadId = "t-stop-relaunch-window";
       await instance.adapter.sendTurn({ threadId, text: "go", model: "custom-slow-model" });
       await recorder.until((e) => e.type === "turn.retrying");
-      // the relaunch is inside its model probe: the window is open
       const deadline = Date.now() + 5_000;
       while (probe.mock.calls.length < 2 && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 2));
@@ -3112,14 +3199,12 @@ describe("ClaudeDriver turns (fake CLI)", () => {
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
       ]);
       expect(done).toMatchObject({ ok: false, stopReason: "interrupted" });
-      // no second process was ever started for the stopped turn
       expect(recorder.events.filter((e) => e.type === "turn.started")).toHaveLength(1);
       expect(instance.adapter.hasSession(threadId)).toBe(false);
     } finally {
       probe.mockRestore();
     }
   }, 30_000);
-
 
   it("skips malformed protocol lines without losing the turn", async () => {
     await create("malformed");
@@ -3146,11 +3231,8 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("tags each ask with whether the CLI's own reviewer is running, read from init", async () => {
-    // The real CLI accepts `--permission-mode auto` for every model and, when
-    // auto is unavailable (Haiku 4.5, Sonnet 4.5 on 2.1.266), starts in
-    // Manual without an error. Only init's permissionMode tells the truth,
-    // and the harness needs it to tell a verdict from a Manual session
-    // asking about everything.
+    // The CLI accepts `--permission-mode auto` for every model and silently runs Manual where auto is
+    // unavailable (Haiku 4.5, Sonnet 4.5 on 2.1.266); only init's permissionMode says so.
     process.env.FAKE_CLAUDE_AUTO_UNAVAILABLE_MODELS = "claude-haiku-4-5";
     await create("hang", {}, { permissionMode: "bypassPermissions" });
     const raise = async (threadId: string, id: string) => {
@@ -3165,17 +3247,14 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       return opened;
     };
 
-    // Auto on a model the classifier does not cover: the session runs Manual
     await instance.adapter.sendTurn({ threadId: "t-review-off", text: "go", approvalMode: "auto", model: "claude-haiku-4-5" });
     await recorder.until((e) => e.type === "session.started" && e.threadId === "t-review-off");
     expect(await raise("t-review-off", "ask-off")).toMatchObject({ nativeReview: "inactive" });
 
-    // Auto on a covered model: the reviewer is running, its ask is a verdict
     await instance.adapter.sendTurn({ threadId: "t-review-on", text: "go", approvalMode: "auto", model: "claude-sonnet-5" });
     await recorder.until((e) => e.type === "session.started" && e.threadId === "t-review-on");
     expect(await raise("t-review-on", "ask-on")).toMatchObject({ nativeReview: "active" });
 
-    // Ask mode never claims anything about a reviewer
     await instance.adapter.sendTurn({ threadId: "t-review-ask", text: "go", approvalMode: "ask", model: "claude-haiku-4-5" });
     await recorder.until((e) => e.type === "session.started" && e.threadId === "t-review-ask");
     expect(await raise("t-review-ask", "ask-ask")).toHaveProperty("nativeReview", undefined);
@@ -3228,8 +3307,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     });
     await recorder.until((e) => e.type === "session.started");
 
-    // connect as the MCP proxy would and raise an ask — unix socket on
-    // POSIX, named pipe on Windows, same one the driver handed the proxy
     const conn = connect(permissionSocketPath("t-perm-abc"));
     const answered = new Promise<{ behavior: string }>((resolve) => {
       let buf = "";
@@ -3252,13 +3329,8 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       summary: "rm -rf scratch",
       requestId: "ask-1",
     });
-    // a plain CLI tool never carries the desktop-control approval scope,
-    // so the UI can offer a remembered grant for it
     expect(opened).toHaveProperty("approvalScope", undefined);
 
-    // the outcome names exactly what was granted: this action, once — and
-    // "Always allow this session" rides to the proxy as `always`, which hands
-    // Claude its own suggested rules; the driver remembers nothing itself
     expect(opened).toHaveProperty("allowSession", true);
     await expect(instance.adapter.respondToRequest("t-perm-abc", "ask-1", { behavior: "allow", always: true })).resolves.toBe("allowed-once");
     expect(await answered).toMatchObject({ behavior: "allow", always: true });
@@ -3266,9 +3338,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(resolved).toMatchObject({ behavior: "allow", source: "user" });
     expect(resolved).toHaveProperty("approvalScope", undefined);
 
-    // a real desktop-control tool keeps the local-computer scope, which
-    // suppresses remembered grants — desktop actions must be approved
-    // one at a time
     const answered2 = new Promise<{ behavior: string }>((resolve) => {
       let buf = "";
       conn.on("data", (c) => {
@@ -3300,10 +3369,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
     const basePath = permissionSocketPath("t-perm-squat");
-    // squat the deterministic path the way a hung child from an earlier
-    // process does. On POSIX the driver steals the socket file (unlink) and
-    // still binds the base; on Windows the name is unstealable and the
-    // driver must bind a fallback — either way the ask flow must work.
+    // Squat the deterministic path like a hung child: POSIX steals the socket file, Windows must bind a fallback.
     const squatter = createNetServer(() => {});
     await new Promise<void>((resolve, reject) => {
       squatter.once("listening", () => resolve());
@@ -3347,7 +3413,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await create("hang");
     await instance.adapter.sendTurn({ threadId: "t-perm-2", text: "go" });
     await expect(instance.adapter.respondToRequest("t-perm-2", "never-asked", { behavior: "allow" })).resolves.toBe("unavailable");
-    // and a thread with no turn at all is the same answer
     await expect(instance.adapter.respondToRequest("no-such-thread", "x", { behavior: "deny" })).resolves.toBe("unavailable");
     await instance.adapter.interruptTurn("t-perm-2");
     await recorder.until((e) => e.type === "turn.completed");
@@ -3381,15 +3446,10 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const conn = await connectSocket(permissionSocketPath(COLLISION_THREAD_IDS[0]));
     const nextAnswer = answerQueue(conn);
 
-    // two asks with the same id on one connection, second sent before the
-    // first is resolved
     conn.write(JSON.stringify({ t: "ask", id: "dup-1", tool: "Bash", input: { command: "echo one" } }) + "\n");
     await recorder.until((e) => e.type === "request.opened" && e.requestId === "dup-1");
     conn.write(JSON.stringify({ t: "ask", id: "dup-1", tool: "Bash", input: { command: "echo two" } }) + "\n");
 
-    // the collision is denied immediately, on the wire, with the duplicate's
-    // own id and the fixed denial message — and without a second
-    // request.opened ever firing for it
     expect(await nextAnswer()).toMatchObject({
       id: "dup-1",
       behavior: "deny",
@@ -3397,7 +3457,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     });
     expect(recorder.events.filter((e) => e.type === "request.opened" && e.requestId === "dup-1")).toHaveLength(1);
 
-    // the original ask is untouched and still resolves normally
     await expect(instance.adapter.respondToRequest(COLLISION_THREAD_IDS[0], "dup-1", { behavior: "allow" })).resolves.toBe(
       "allowed-once",
     );
@@ -3417,8 +3476,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     conn1.write(JSON.stringify({ t: "ask", id: "dup-2", tool: "Bash", input: { command: "echo one" } }) + "\n");
     await recorder.until((e) => e.type === "request.opened" && e.requestId === "dup-2");
 
-    // `pending` is shared across every connection on the broker, so a
-    // second connection reusing the same id must collide too
     const conn2 = await connectSocket(permissionSocketPath(COLLISION_THREAD_IDS[1]));
     const conn2Answer = answerQueue(conn2)();
     conn2.write(JSON.stringify({ t: "ask", id: "dup-2", tool: "Bash", input: { command: "echo two" } }) + "\n");
@@ -3429,7 +3486,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     });
     expect(recorder.events.filter((e) => e.type === "request.opened" && e.requestId === "dup-2")).toHaveLength(1);
 
-    // the original, opened on conn1, still resolves normally
     await expect(instance.adapter.respondToRequest(COLLISION_THREAD_IDS[1], "dup-2", { behavior: "allow" })).resolves.toBe(
       "allowed-once",
     );
@@ -3453,9 +3509,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       "allowed-once",
     );
 
-    // the id is free again once its ask resolved — reusing it is not a
-    // collision and should open normally (distinct summary proves this is a
-    // fresh request.opened, not the first one already seen by the recorder)
     conn.write(JSON.stringify({ t: "ask", id: "dup-3", tool: "Bash", input: { command: "echo two" } }) + "\n");
     await recorder.until((e) => e.type === "request.opened" && e.requestId === "dup-3" && e.summary === "echo two");
     await expect(instance.adapter.respondToRequest(COLLISION_THREAD_IDS[2], "dup-3", { behavior: "allow" })).resolves.toBe(
@@ -3479,7 +3532,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "request.opened" && e.requestId === "dup-4");
     conn.write(JSON.stringify({ t: "ask", id: "dup-4", kind: "question", tool: "ask_user", input: { question: "two?" } }) + "\n");
 
-    // same collision guard applies regardless of ask kind
     expect(await nextAnswer()).toMatchObject({
       id: "dup-4",
       behavior: "deny",
@@ -3487,7 +3539,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     });
     expect(recorder.events.filter((e) => e.type === "request.opened" && e.requestId === "dup-4")).toHaveLength(1);
 
-    // the original question is untouched and still resolves normally
     await expect(
       instance.adapter.respondToRequest(COLLISION_THREAD_IDS[3], "dup-4", { behavior: "answer", message: "yes" }),
     ).resolves.toBe("answered");
@@ -3503,14 +3554,11 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await instance.adapter.sendTurn({ threadId: "t-perm-late", text: "go" });
     await recorder.until((e) => e.type === "session.started");
 
-    // Same connection stays open across the turn ending — the exact
-    // condition that let a still-alive child raise an unanswerable card.
     const conn = await connectSocket(permissionSocketPath("t-perm-late"));
     const nextAnswer = answerQueue(conn);
     const initialReply = nextAnswer();
     conn.write(JSON.stringify({ t: "ask", id: "ask-ready", tool: "Bash", input: { command: "echo ready" } }) + "\n");
     // Windows can signal client connect before the server accepts the pipe.
-    // Prove the broker owns this connection before closing its listener.
     await recorder.until((e) => e.type === "request.opened" && e.requestId === "ask-ready");
 
     await instance.adapter.interruptTurn("t-perm-late");
@@ -3521,9 +3569,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const reply = nextAnswer();
     conn.write(JSON.stringify({ t: "ask", id: "ask-late", tool: "Bash", input: { command: "rm -rf /" } }) + "\n");
 
-    // A dead card is a request.opened with no way to ever answer it — assert
-    // the late ask never becomes one, and the connection still gets a
-    // definite reply rather than hanging forever.
     expect(await reply).toMatchObject({
       id: "ask-late",
       behavior: "deny",
@@ -3538,8 +3583,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("drops a late question on an already-closed broker with an answer, not a deny (#211)", async () => {
-    // systemEndedReply(kind) branches on "question" vs "permission" — cover
-    // the question arm too, since the deny arm above doesn't exercise it.
     await create("hang");
     await instance.adapter.sendTurn({ threadId: "t-question-late", text: "go" });
     await recorder.until((e) => e.type === "session.started");
@@ -3548,7 +3591,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const nextAnswer = answerQueue(conn);
     const initialReply = nextAnswer();
     conn.write(JSON.stringify({ t: "ask", kind: "question", id: "q-ready", tool: "ask_user", input: { question: "ready?" } }) + "\n");
-    // Wait for server-side acceptance, not only the named-pipe connect event.
+    // Windows can signal a named-pipe connect before the server accepts it.
     await recorder.until((e) => e.type === "request.opened" && e.requestId === "q-ready");
 
     await instance.adapter.interruptTurn("t-question-late");
@@ -3625,6 +3668,51 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.argv[seen.argv.indexOf("--output-format") + 1]).toBe("text");
   });
 
+  it("runs helper calls tool-free and isolated, in an empty folder it then removes", async () => {
+    await create(undefined, { FAKE_CLAUDE_VERSION: "2.1.296" });
+    const dump = join(scratch, "isolated-helper.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    await expect(instance.generateText!("summarize")).resolves.toBe("fake generated text");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv[seen.argv.indexOf("--tools") + 1]).toBe("");
+    expect(seen.argv).toContain("--strict-mcp-config");
+    expect(seen.argv[seen.argv.indexOf("--setting-sources") + 1]).toBe("project");
+    expect(seen.argv).toContain("--no-session-persistence");
+    expect(seen.cwd).toContain("omb-claude-background-");
+    expect(existsSync(seen.cwd)).toBe(false);
+  });
+
+  it("reads the CLI version before a helper call, so an older CLI gets no --tools", async () => {
+    await create(undefined, { FAKE_CLAUDE_VERSION: "2.1.250" });
+    const dump = join(scratch, "older-helper.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    await expect(instance.generateText!("summarize")).resolves.toBe("fake generated text");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv).not.toContain("--tools");
+    expect(seen.argv).toContain("--strict-mcp-config");
+  });
+
+  it("waits as long as the caller says for a helper call, and no longer", async () => {
+    await create(undefined, { FAKE_CLAUDE_TEXT_HANG: "1" });
+    const started = Date.now();
+    await expect(instance.generateText!("summarize", { timeoutMs: 300 })).rejects.toThrow("Claude review timed out");
+    expect(Date.now() - started).toBeLessThan(BACKGROUND_CALL_TIMEOUT_MS);
+  });
+
+  it("passes only the background flags the installed CLI accepts", () => {
+    const base = { model: "claude-haiku-4-5", outputFormat: "text" as const };
+    const cli = (version: [number, number, number]) => (flag: Parameters<typeof claudeCliSupports>[1]) => claudeCliSupports(version, flag);
+    expect(backgroundCallArgs({ ...base, supports: cli([2, 1, 296]), isolated: true })).toEqual([
+      "-p", "--model", "claude-haiku-4-5", "--output-format", "text",
+      "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "project",
+    ]);
+    // OMB_CLAUDE_INHERIT_USER_CONFIG keeps the person's own setup, still without tools
+    expect(backgroundCallArgs({ ...base, supports: cli([2, 1, 296]), isolated: false })).not.toContain("--strict-mcp-config");
+    expect(backgroundCallArgs({ ...base, supports: cli([1, 0, 100]), isolated: true })).toEqual([
+      "-p", "--model", "claude-haiku-4-5", "--output-format", "text", "--strict-mcp-config",
+    ]);
+  });
+
   it("never falls back to personal authentication for API-key-only helper calls", async () => {
     process.env.ANTHROPIC_API_KEY = "unselected-personal-key";
     await create(undefined, {}, { requireApiKey: true });
@@ -3689,6 +3777,23 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(onUsage.mock.calls).toEqual([[{ model: "claude-haiku-4-5", input: undefined, output: undefined, cachedInput: undefined, costUsd: 0.01 }]]);
   });
 
+  it("writes a one-shot with the model a caller names, while permission review keeps its own", async () => {
+    await create();
+    const dump = join(scratch, "named-model.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    const model = () => {
+      const seen = JSON.parse(readFileSync(dump, "utf8"));
+      return seen.argv[seen.argv.indexOf("--model") + 1];
+    };
+    await expect(instance.generateText!("summarize", { model: "claude-haiku-5-5" })).resolves.toBe("fake generated text");
+    expect(model()).toBe("claude-haiku-5-5");
+    await expect(instance.generateText!("summarize")).resolves.toBe("fake generated text");
+    expect(model()).toBe("claude-haiku-4-5");
+    // the contract gives permission review no way to name a model
+    await expect(instance.reviewPermission!("review this request")).resolves.toBe("fake generated text");
+    expect(model()).toBe("claude-haiku-4-5");
+  });
+
   it.each(["not JSON", '{"type":"assistant"}'])("rejects malformed one-shot output without invented usage (%s)", async result => {
     await create(undefined, { FAKE_CLAUDE_TEXT_RESULT: result });
     const onUsage = vi.fn();
@@ -3722,10 +3827,6 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 });
 
-// Auth state must come from the CLI, not from probing its credential store:
-// on macOS the OAuth tokens live in the login Keychain, so the old
-// ~/.claude/.credentials.json check reported signed-in users as signed out
-// and disabled the model picker with them (#108).
 describe("ClaudeDriver resume recovery (fake CLI)", () => {
   let instance: ProviderInstance;
   let recorder: EventRecorder;
@@ -3757,7 +3858,6 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
     await instance?.dispose();
     await removeTempDir(scratch);
   });
-  /** How many launches were handed a prompt, read from FAKE_CLAUDE_PROMPTS. */
   const launches = (file: string) => readFileSync(file, "utf8").trim().split("\n").length;
   const promptText = (prompt: any) => {
     const content = prompt.message.content;
@@ -3765,10 +3865,6 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
   };
 
   it("starts a fresh session carrying the rebuild when --resume is refused", async () => {
-    // Was a bricked thread: the CLI exits before `init`, the failure is
-    // terminal so nothing retries, and the dead cursor is never cleared —
-    // so every later turn resumed the same missing session and failed
-    // identically, with no way back except switching engines.
     const dump = join(scratch, "recovered.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
     const dispatch = await instance.adapter.sendTurn({
@@ -3780,14 +3876,11 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed");
 
     expect(recorder.events.filter((e) => e.type === "turn.completed").at(-1)).toMatchObject({ ok: true, turnId: dispatch.turnId });
-    // nothing failed that a retry fixed: the rebuilt session is what is told
     expect(recorder.events.some((e) => e.type === "turn.retrying")).toBe(false);
-    // it started a NEW session, so the harness records a live cursor again
     const started = recorder.events.filter((e) => e.type === "session.started");
     expect(started.length).toBeGreaterThan(0);
     expect(started.at(-1)).not.toMatchObject({ sessionId: "a-session-claude-no-longer-has" });
     expect(started.at(-1)).toMatchObject({ rebuilt: true });
-    // and the new session is not blank: the prompt is the rebuild, once
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.argv).not.toContain("--resume");
     const content = seen.prompt.message.content;
@@ -3796,9 +3889,6 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
   });
 
   it("does not announce a replacement as rebuilt when there was nothing to replay", async () => {
-    // recoveryPromptFor falls back to the turn text when the harness attached
-    // no rebuild: that session holds the turn, not the conversation, and the
-    // harness must not credit it with a replay it never saw.
     const dump = join(scratch, "no-replay.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
     await instance.adapter.sendTurn({
@@ -3817,9 +3907,7 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
   });
 
   it("recovers only once, then fails visibly", async () => {
-    // exit-early refuses every launch, resumed or fresh: the recovery is
-    // spent on the first relaunch and the turn must then settle as failed
-    // rather than relaunching forever
+    // exit-early refuses every launch, resumed or fresh.
     process.env.FAKE_CLAUDE_MODE = "exit-early";
     const prompts = join(scratch, "prompts.jsonl");
     process.env.FAKE_CLAUDE_PROMPTS = prompts;
@@ -3829,9 +3917,6 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
     expect(launches(prompts)).toBe(2);
   });
 
-  // Marketer (Oct 10, 2.1.295, idle since Sep 3): the CLI answered the resume
-  // with an error result instead of exiting, the rebuild above never ran, and
-  // the turn ended empty — no reply, no error, stop reason null.
   it("rebuilds a session the CLI answers with \"No conversation found\" instead of exiting", async () => {
     process.env.FAKE_CLAUDE_MODE = "stale-session";
     const dump = join(scratch, "stale.json");
@@ -3847,16 +3932,12 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
     expect(recorder.events.filter((e) => e.type === "session.started")).toEqual([
       expect.objectContaining({ rebuilt: true, sessionId: expect.not.stringMatching(/idle-since-september/) }),
     ]);
-    // the person reads, once, what did not carry over
     const notices = () => recorder.events.filter((e) => e.type === "runtime.notice");
     expect(notices()).toEqual([expect.objectContaining({ message: rebuiltSessionNotice("Claude Code") })]);
-    // one refused resume, one fresh session given the rebuild
     expect(launches(prompts)).toBe(2);
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.argv).not.toContain("--resume");
     expect(promptText(seen.prompt)).toBe(REBUILD);
-    // the next message goes to that same process: it re-announces its
-    // session, which is no new rebuild to tell the person about
     const rebuilt = recorder.events.find((e) => e.type === "session.started") as { sessionId: string };
     await instance.adapter.sendTurn({ threadId: "t-stale", text: "and then?", resumeCursor: rebuilt.sessionId, recoveryText: REBUILD });
     await recorder.until((e) => e.type === "turn.completed" && e.turnId !== dispatch.turnId);
@@ -3883,9 +3964,6 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
   });
 
   it("never resends a turn the CLI accepted before dying", async () => {
-    // the resumed session emitted `init` — it read the prompt, and may have
-    // run tools on it — and then died with no output. That is the far side
-    // of the acceptance boundary: replaying here is a duplicate side effect
     process.env.FAKE_CLAUDE_MODE = "resume-dies-after-init";
     const prompts = join(scratch, "accepted-prompts.jsonl");
     process.env.FAKE_CLAUDE_PROMPTS = prompts;
@@ -3896,9 +3974,6 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
   });
 
   it("never treats a crash on a fresh launch as a refused resume", async () => {
-    // no cursor was offered, so there is no resume to have been rejected:
-    // this is an ordinary terminal failure, not a licence to send the turn
-    // again
     process.env.FAKE_CLAUDE_MODE = "exit-early";
     const prompts = join(scratch, "fresh-crash-prompts.jsonl");
     process.env.FAKE_CLAUDE_PROMPTS = prompts;
@@ -3967,10 +4042,65 @@ describe("ClaudeDriver snapshot auth (fake CLI)", () => {
     process.env.FAKE_CLAUDE_AUTH = "malformed";
     expect(await instance.snapshot()).toMatchObject({ state: "available", authenticated: false });
 
-    // The real turn removes inherited API keys, so the auth probe must do the
-    // same or setup can report a login the turn cannot use.
+    // The turn strips inherited API keys, so the auth probe must too.
     process.env.FAKE_CLAUDE_AUTH = "inherited-api-key";
     process.env.ANTHROPIC_API_KEY = "sk-should-not-leak";
     expect(await instance.snapshot()).toMatchObject({ state: "available", authenticated: false });
+  });
+});
+
+describe("ClaudeDriver billing (fake CLI)", () => {
+  const instances: ProviderInstance[] = [];
+  const KEY = { billing: "metered", method: "api-key" };
+  const LOGIN = { billing: "subscription", method: null };
+  const NO_KEY = { unavailable: "No Anthropic API key — open Settings → API keys." };
+
+  const billed = async (id: "claude" | "claudeApi", anthropic: AppConfig["anthropic"]) => {
+    const entry = instanceConfigs({ anthropic })[id]!;
+    const instance = await ClaudeDriver.create({
+      instanceId: id,
+      displayName: id,
+      enabled: true,
+      config: ClaudeDriver.decodeConfig({ ...(entry.config as object | undefined), cli: FAKE_CLI }),
+      environment: entry.environment as Record<string, string>,
+    });
+    instances.push(instance);
+    const snapshot = await instance.snapshot();
+    return snapshot.state === "available"
+      ? { billing: snapshot.billing, method: snapshot.account?.method ?? null }
+      : { unavailable: snapshot.reason };
+  };
+
+  beforeEach(() => {
+    ensureDirs();
+    chmodSync(FAKE_CLI, 0o755);
+  });
+
+  afterEach(async () => {
+    delete process.env.FAKE_CLAUDE_AUTH;
+    vi.unstubAllEnvs();
+    await Promise.all(instances.splice(0).map((instance) => instance.dispose()));
+  });
+
+  it.each([
+    { every: "on", anthropic: { key: "sk-ant-fixture", everyClaudeBot: true }, claude: KEY, claudeApi: KEY },
+    { every: "unset", anthropic: { key: "sk-ant-fixture" }, claude: KEY, claudeApi: KEY },
+    { every: "off", anthropic: { key: "sk-ant-fixture", everyClaudeBot: false }, claude: LOGIN, claudeApi: KEY },
+    { every: "on, no key", anthropic: { everyClaudeBot: true }, claude: LOGIN, claudeApi: NO_KEY },
+    { every: "unset, no key", anthropic: {}, claude: LOGIN, claudeApi: NO_KEY },
+    { every: "off, no key", anthropic: { everyClaudeBot: false }, claude: LOGIN, claudeApi: NO_KEY },
+  ])("bills each Claude bot on what its turns run on, signed in to claude.ai with every Claude bot $every", async ({ anthropic, claude, claudeApi }) => {
+    expect(await billed("claude", anthropic), "plain Claude").toEqual(claude);
+    expect(await billed("claudeApi", anthropic), "Claude (API key)").toEqual(claudeApi);
+  });
+
+  it("bills a CLI signed in on its own API key per token", async () => {
+    process.env.FAKE_CLAUDE_AUTH = "api-key";
+    expect(await billed("claude", {})).toEqual(KEY);
+  });
+
+  it("never bills on a key the server inherited, which turns strip", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-inherited");
+    expect(await billed("claude", {})).toEqual(LOGIN);
   });
 });

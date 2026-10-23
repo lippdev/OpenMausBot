@@ -1,8 +1,4 @@
-// Learn from group chats: with the switch on, a member bot's room turn feeds
-// its memory capture like a 1:1 turn, read under room rules and sourced to
-// the room. Off by default. Pinned against the real server because the
-// room's eligibility (switch, membership, who can see the room) and the
-// turn it reads are assembled in server/index.ts.
+// Against the real server: the room's eligibility and the turn it reads are assembled in server/index.ts.
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,8 +26,7 @@ it("captures a member bot's room turn into its memory, sourced to the room, once
     expect(response.ok, `${method} ${path}: ${JSON.stringify(result)}`).toBe(true);
     return result;
   };
-  // The CAPTURE step's prompt: memory upkeep (ORGANIZE, TIDY) can run after
-  // it, so the test reads every one-shot prompt, not just the last.
+  // Memory upkeep can run after the CAPTURE step, so read every one-shot prompt, not just the last.
   const capturePrompt = () => {
     try {
       return readFileSync(textLog, "utf8").split("\n").filter(Boolean)
@@ -68,9 +63,7 @@ it("captures a member bot's room turn into its memory, sourced to the room, once
   }
 }, 120_000);
 
-// Codex (OMB's default engine) has no generateText: its background call is
-// generateMemoryText, a tool-free `codex exec` (drivers/codex-background-text.ts).
-// The same room turn, on a Codex member bot, must reach MEMORY.md through it.
+// Codex has no generateText: its background call is generateMemoryText, a tool-free `codex exec`.
 it("captures a Codex member bot's room turn through Codex's own background call", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "omb-room-capture-codex-"));
   const routes = join(scratch, "routes.json");
@@ -100,7 +93,6 @@ it("captures a Codex member bot's room turn through Codex's own background call"
     expect(codex.capabilities.backgroundText).toBe(true);
     const { bot: lead } = await api<{ bot: WireBot }>("/api/bots", "POST", { name: "Lead", modelSelection: { instanceId: "codex", model: codex.models.default } });
     const { bot: helper } = await api<{ bot: WireBot }>("/api/bots", "POST", { name: "Helper" });
-    // Settings no longer says this bot's engine cannot make the model steps.
     expect(await api(`/api/bots/${lead.id}/memory/upkeep`)).toMatchObject({ enabled: true, modelSteps: true });
     await api("/api/config", "PUT", { memory: { captureQuietMs: 1_000 } });
     await api("/api/config", "PATCH", { features: { roomMemoryCapture: true } });
@@ -118,8 +110,6 @@ it("captures a Codex member bot's room turn through Codex's own background call"
     expect(capture?.prompt).toContain("Person: Lead, the orchard tour moved to Monday.");
     expect(capture?.argv).toEqual(expect.arrayContaining(["exec", "--ignore-user-config", "--ephemeral"]));
 
-    // The line the room turn left in Lead's daily log is Lead's turn in that
-    // room, never an edit the person made outside the app.
     await expect.poll(async () => (await api<{ entries: Array<{ path: string; actor: string; via: string; threadId?: string }> }>(`/api/bots/${lead.id}/memory/journal`)).entries
       .filter((entry) => entry.path.startsWith("memory/log/")), { timeout: 10_000 })
       .toEqual([expect.objectContaining({ actor: "bot", via: "turn", threadId: group.threadId })]);

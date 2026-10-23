@@ -1,6 +1,4 @@
-// The desktop owns one child, including while its health probe is pending.
-// Startup port selection stays with the caller; runtime recovery retries the
-// established port so existing renderer and Companion connections can recover.
+// Owns one child, including while its health probe is pending; recovery retries the established port.
 export function createServerSupervisor({
   restart,
   stop,
@@ -45,8 +43,7 @@ export function createServerSupervisor({
         result = await restart();
       } catch (error) {
         log(`server recovery failed: ${error?.message ?? error}`);
-        // A thrown start with a still-owned child is not permission to fork
-        // a sibling. The caller must reap failed probes before returning.
+        // A thrown start with a still-owned child is not permission to fork a sibling.
         result = { abort: current !== null };
       }
       if (stopped || paused) return;
@@ -72,9 +69,7 @@ export function createServerSupervisor({
     });
   }
 
-  // A deliberate child stop (an environment switch) is not an outage: pause
-  // drops any queued retry and holds recovery off until resume(). Exits and
-  // onUnavailable still publish while paused; only scheduling is gated.
+  // Pause drops any queued retry and holds recovery until resume(); exits and onUnavailable still publish.
   function pause() {
     if (stopped) return;
     paused = true;

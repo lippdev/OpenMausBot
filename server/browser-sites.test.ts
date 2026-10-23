@@ -1,6 +1,4 @@
-// Signed-in sites: read from the state file agent-browser saves, signed out
-// of in that file and, for a running browser, over a fake Chrome's DevTools
-// socket. No real engine, Chrome or user profile is involved.
+// No real engine, Chrome or user profile: the state file agent-browser saves, and a fake Chrome DevTools socket.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
 
 import { browserRestoreKey } from "./browser-engine.ts";
-import { decryptBrowserState, encryptBrowserState, listSignedInSites, signOutOfSites, signedInSites, type BrowserSitesTarget } from "./browser-sites.ts";
+import { connectCdp, decryptBrowserState, encryptBrowserState, listSignedInSites, signOutOfSites, signedInSites, type BrowserSitesTarget, type CdpEvent } from "./browser-sites.ts";
 import { removeTempDir } from "./testing/cleanup.ts";
 
 const KEY = "a".repeat(64);
@@ -102,10 +100,8 @@ describe("signing a stopped browser out", () => {
       const state = saved(path);
       expect(state.cookies.map((cookie: { domain: string }) => cookie.domain)).toEqual(["www.example.com"]);
       expect(state.origins.map((origin: { origin: string }) => origin.origin)).toEqual(["https://example.com"]);
-      // Everything else about the kept cookie survives the rewrite.
       expect(state.cookies[0]).toMatchObject({ name: "sid", value: "s1", path: "/", httpOnly: true, secure: true });
     }
-    // The mid-save backup held the old logins.
     expect(existsSync(`${current}.previous`)).toBe(false);
   });
 
@@ -187,7 +183,6 @@ describe("signing a running browser out", () => {
       running: true,
       sites: [{ site: "google.com", cookies: 1, storage: 1 }, { site: "www.example.com", cookies: 1, storage: 0 }],
     });
-    // Reading never touches the browser's DevTools socket.
     expect(chrome.calls).toEqual([]);
   });
 
@@ -208,9 +203,7 @@ describe("signing a running browser out", () => {
     expect(cleared).toEqual(expect.arrayContaining(["https://wikipedia.org", "https://en.wikipedia.org"]));
     expect(cleared.some((origin) => origin.includes("example.com"))).toBe(false);
     expect([...chrome.stored.keys()]).toEqual(["https://example.com"]);
-    // Only the Wikipedia tab's sessionStorage is cleared.
     expect(chrome.calls.filter((call) => call.method === "Runtime.evaluate").map((call) => call.sessionId)).toEqual(["on-page-1"]);
-    // The saved file no longer brings Wikipedia back at the next launch.
     expect(saved().cookies.map((entry: { domain: string }) => entry.domain)).toEqual(["www.example.com"]);
   });
 
@@ -225,6 +218,30 @@ describe("signing a running browser out", () => {
     expect(saved()).toEqual({ cookies: [], origins: [] });
   });
 
+  it("starts a stopped browser with a kept profile to sign it out there too, then stops it again", async () => {
+    const { home, current, target, saved } = profile();
+    writeFileSync(current, SAVED_BY_ENGINE);
+    const kept = join(home, "agent-browser-profiles", "work");
+    mkdirSync(kept, { recursive: true });
+    const chrome = await fakeChrome([cookie("sid", ".wikipedia.org"), cookie("sid", "www.example.com")]);
+    let running = false;
+    const lifecycle: string[] = [];
+    const deps = {
+      engine: async (given: BrowserSitesTarget, args: string[]) => running ? chrome.engine(given, args) : null,
+      start: async () => { lifecycle.push("start"); running = true; return true; },
+      stop: async () => { lifecycle.push("stop"); running = false; return true; },
+    };
+    const withProfile = { ...target, env: { ...target.env, AGENT_BROWSER_PROFILE: kept } };
+    expect(await listSignedInSites(withProfile, deps)).toMatchObject({ running: false });
+    expect(lifecycle).toEqual([]);
+    expect(await signOutOfSites(withProfile, "wikipedia.org", deps)).toEqual({ running: false, sites: [{ site: "www.example.com", cookies: 1, storage: 0 }] });
+    expect(lifecycle).toEqual(["start", "stop"]);
+    expect(chrome.jar.map((entry) => entry.domain)).toEqual(["www.example.com"]);
+    expect(saved().cookies.map((entry: { domain: string }) => entry.domain)).toEqual(["www.example.com"]);
+    await signOutOfSites(target, "example.com", deps);
+    expect(lifecycle).toEqual(["start", "stop"]);
+  });
+
   it("only ever connects to the engine's own Chrome on this machine", async () => {
     const { target } = profile();
     const chrome = await fakeChrome([cookie("sid", "www.example.com")]);
@@ -232,5 +249,27 @@ describe("signing a running browser out", () => {
       args[0] === "get" ? { cdpUrl: "ws://browser.example.net:9222/devtools/browser/x" } : chrome.engine(_target, args);
     await expect(signOutOfSites(target, null, { engine })).rejects.toThrow("DevTools address");
     expect(chrome.calls).toEqual([]);
+  });
+});
+
+describe("the DevTools connection", () => {
+  it("hands events to its listener, answers to their callers, and says when the browser closes it", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    servers.push(server);
+    server.on("connection", (socket) => socket.on("message", (data) => {
+      const { id, sessionId } = JSON.parse(String(data));
+      socket.send(JSON.stringify({ method: "Target.attachedToTarget", params: { sessionId: "child", targetInfo: { type: "iframe" } }, sessionId }));
+      socket.send(JSON.stringify({ id, result: { ok: true } }));
+      setTimeout(() => socket.close(), 10);
+    }));
+    await new Promise((ready) => server.on("listening", ready));
+    const events: CdpEvent[] = [];
+    let closed!: () => void;
+    const gone = new Promise<void>((resolve) => { closed = resolve; });
+    const cdp = await connectCdp(`ws://127.0.0.1:${(server.address() as { port: number }).port}/devtools/browser/x`, 2_000, { event: (event) => events.push(event), closed });
+    await expect(cdp.send("Target.setAutoAttach", {}, "page")).resolves.toEqual({ ok: true });
+    await gone;
+    expect(events).toEqual([{ method: "Target.attachedToTarget", params: { sessionId: "child", targetInfo: { type: "iframe" } }, sessionId: "page" }]);
+    await expect(cdp.send("Browser.getVersion")).rejects.toThrow();
   });
 });

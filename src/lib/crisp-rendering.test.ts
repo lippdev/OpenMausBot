@@ -9,8 +9,7 @@ const body = css.match(/body\s*\{([^}]*)\}/)?.[1] ?? "";
 
 describe("crisp rendering", () => {
   it("does not force greyscale font smoothing", () => {
-    // `antialiased` is greyscale smoothing. On a Retina Mac it draws stems
-    // lighter than the system UI, which reads as washed out.
+    // `antialiased` greyscale smoothing draws stems lighter than the system UI on a Retina Mac.
     expect(body).not.toMatch(/-webkit-font-smoothing:\s*antialiased/);
     expect(body).toMatch(/-webkit-font-smoothing:\s*auto/);
     expect(body).toMatch(/-moz-osx-font-smoothing:\s*auto/);

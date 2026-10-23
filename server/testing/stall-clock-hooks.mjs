@@ -1,11 +1,6 @@
-// Explicit --import in isolated fixtures only: the verification launcher adds
-// it when OMB_TEST_STALL_CLOCK=1 reaches it. The stall watchdog's window (its
-// production twenty minutes of silence) elapses for every turn that is silent
-// at that moment once the fixture writes <data dir>/stall-turns, and the
-// watchdog sweeps every 50 ms instead of every minute, so a test can follow a
-// stalled turn through its real course. A turn that speaks afterwards counts
-// from then, as it would in production. It changes no authorization or
-// dispatch decision.
+// Loaded with --import in isolated fixtures when OMB_TEST_STALL_CLOCK=1: once the fixture writes
+// <data dir>/stall-turns, every then-silent turn has spent the stall window, and the watchdog sweeps
+// every 50 ms. No authorization or dispatch decision changes.
 import { registerHooks } from 'node:module';
 import { join } from 'node:path';
 const dataDir = process.env.OMB_DATA_DIR;

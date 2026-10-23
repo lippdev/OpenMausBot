@@ -1,6 +1,4 @@
 // @vitest-environment happy-dom
-// The New chat panel: a To: filter over the bots, arrows and Enter to start a
-// chat, the two create actions on top, and Escape or a press outside to close.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -91,7 +89,6 @@ describe("SidebarNewChatPanel", () => {
     expect(text).toContain("Create new bot");
     expect(text).toContain("Create group chat");
     expect(text).toContain("Scout");
-    // one line per bot: the subtitle moves to the accessible name
     expect(text).not.toContain("Writes the newsletter");
     expect(container!.querySelector("[aria-label^='Quill, Writes the newsletter']")).not.toBeNull();
     expect(text).not.toContain("Ghost");

@@ -1,11 +1,5 @@
 // @vitest-environment happy-dom
-// Sidebar rows re-render only when their own bot or thread changes. A store
-// event for one bot renders that bot's row and no other; a renamed thread
-// renders that thread's row; the list's 30-second clock renders only the
-// thread rows whose stamp reads relative ("5 min ago"), not the ones that
-// show a fixed date. Counted through a leaf each row draws, which is not
-// memoized here, so it renders exactly when its row does: the bot name
-// (RenameTitle) for a bot row, the delete confirmation for a thread row.
+// Counted through a leaf each row draws, which is not memoized here, so it renders exactly when its row does.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -21,15 +15,13 @@ vi.mock("./RenameTitle", () => ({
 }));
 vi.mock("./ConfirmDialog", async (importOriginal) => ({
   ...await importOriginal<typeof import("./ConfirmDialog")>(),
-  // every thread row keeps its (closed) delete confirmation mounted; its
-  // body names the thread
+  // Every thread row keeps its closed delete confirmation mounted, and its body names the thread.
   ConfirmDialog: ({ body }: { body?: unknown }) => {
     if (typeof body === "string") renders.threads.push(body);
     return null;
   },
 }));
-// Threads are an Advanced-mode surface: Simple mode keeps one conversation
-// per bot (useShowThreads), so these render as Advanced.
+// Threads are an Advanced-mode surface (Simple keeps one conversation per bot), so these render as Advanced.
 vi.mock("@/lib/interface-mode", async (original) => ({
   ...await original<typeof import("@/lib/interface-mode")>(),
   useAdvancedMode: () => true,
@@ -68,7 +60,6 @@ let state: AppState = {
     profile("atlas", "Atlas", [
       thread("atlas-now", "Report draft", NOW - HOUR),
       thread("atlas-earlier", "Budget check", NOW - 2 * HOUR),
-      // a month old: its stamp is a date, so the clock has nothing to change
       thread("atlas-old", "Old notes", NOW - 30 * 24 * HOUR),
     ], { messages: atlasMessages, activeLeafId: "a2" }),
     profile("scout", "Scout", [thread("scout-now", "Scout plan", NOW - HOUR), thread("scout-earlier", "Scout list", NOW - 3 * HOUR)]),
@@ -117,7 +108,6 @@ beforeAll(async () => {
   document.body.append(container);
   root = createRoot(container);
   await draw();
-  // open Atlas's thread list, as a person would
   const toggle = document.querySelector<HTMLButtonElement>(`button[aria-label="${t("task.expandNamed", { name: "Atlas" })}"]`);
   toggle!.click();
   await settle();

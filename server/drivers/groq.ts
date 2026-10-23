@@ -50,8 +50,7 @@ export const GroqDriver: ProviderDriver<GroqConfig> = {
   defaultConfig: () => decodeConfig({}),
   async create(input) {
     const { config } = input;
-    // An instance with a custom host must bring its own credential. The
-    // workspace injects its key only for its explicitly configured endpoint.
+      // A custom host must bring its own credential; the workspace key goes only to its configured endpoint.
     const apiKey = (input.environment.GROQ_API_KEY ??
       (config.url === DEFAULT_URL ? process.env.GROQ_API_KEY : undefined) ?? "").trim();
     const known = new Map(DEFAULT_MODELS.options.map(option => [option.id, option]));
@@ -82,9 +81,7 @@ export const GroqDriver: ProviderDriver<GroqConfig> = {
           options.push({ ...(known.get(id) ?? { id, label: id }), ...(context_window ? { contextWindow: context_window } : {}) });
         }
         if (options.length) catalog = withConfiguredModel(options);
-      } catch {
-        // A failed or malformed refresh keeps the last usable catalog.
-      }
+      } catch {}
     };
     if (apiKey) void refreshModels();
     return createOpenAIChatRuntime({

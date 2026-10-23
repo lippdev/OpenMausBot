@@ -1,9 +1,4 @@
 // @vitest-environment happy-dom
-// Choosing Cloud computer, or opening the Computer panel, creates and wakes
-// nothing: the bot's first computer call starts its cloud computer. The
-// panel says so, and starting it now is the person's own button. A
-// conversation that select_computer moved to an existing cloud computer
-// still shows that computer's screen.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -13,7 +8,6 @@ import type { AppState, Bot, InstanceInfo } from "@/state/store";
 const fixture = vi.hoisted(() => ({
   boatState: null as string | null,
   posts: [] as string[],
-  /** Looks at this conversation's computer (GET), each a relay call. */
   looks: 0,
   advanced: true,
 }));
@@ -32,8 +26,7 @@ vi.mock("./DesktopCapabilities", async (importOriginal) => ({
   }),
 }));
 vi.mock("@/lib/interface-mode", () => ({ useAdvancedMode: () => fixture.advanced, setAdvancedMode: () => {} }));
-// The owner: starting it early is an Admin's shortcut (shared/place-view.ts);
-// a User's own message starts it when a task needs it.
+// The owner: starting a cloud computer early is an Admin's shortcut.
 vi.mock("@/lib/use-owner-or-admin", () => ({ useOwnerOrAdmin: () => true }));
 vi.mock("./CloudScreenPreview", () => ({
   CloudScreenPreview: () => createElement("div", { "data-live-screen": "" }),
@@ -119,7 +112,7 @@ afterEach(() => {
 describe("Computer panel on Cloud computer", () => {
   it("opening it before the bot has a cloud computer creates nothing and says when it starts", async () => {
     await open(makeBot({ computer: "cloud" }));
-    expect(text()).toContain("Scout gets its own cloud computer the first time a task needs one. The first start takes about a minute.");
+    expect(text()).toContain("Scout gets its own cloud desktop the first time a task needs one. The first start takes about a minute.");
     expect(button("Start it now")).toBeDefined();
     expect(fixture.posts).toEqual([]);
   });
@@ -127,7 +120,7 @@ describe("Computer panel on Cloud computer", () => {
   it("opening it while the cloud computer sleeps wakes nothing", async () => {
     fixture.boatState = "archived";
     await open(makeBot({ computer: "cloud" }));
-    expect(text()).toContain("Scout's cloud computer is asleep. It wakes in a few seconds when Scout needs it.");
+    expect(text()).toContain("Scout's cloud desktop is asleep. It wakes in a few seconds when Scout needs it.");
     expect(button("Wake it now")).toBeDefined();
     expect(fixture.posts).toEqual([]);
   });
@@ -141,7 +134,7 @@ describe("Computer panel on Cloud computer", () => {
 
   it("while the bot only chats, says its cloud computer starts when a task needs it", async () => {
     await open(makeBot({ computer: "cloud", busy: true }));
-    expect(text()).toContain("Scout gets its own cloud computer the first time a task needs one.");
+    expect(text()).toContain("Scout gets its own cloud desktop the first time a task needs one.");
     expect(button("Start it now")).toBeUndefined();
     expect(fixture.posts).toEqual([]);
   });
@@ -150,17 +143,15 @@ describe("Computer panel on Cloud computer", () => {
     await open(makeBot({ computer: "cloud" }));
     flushSync(() => button("Start it now")!.click());
     await settle();
-    // One start, then the screen it shows (screenshots never wake anything).
     expect(fixture.posts.filter((path) => !path.endsWith("/screenshot"))).toEqual(["/api/bots/scout/computer/provision"]);
     expect(document.querySelector("[data-live-screen]")).not.toBeNull();
   });
 
   it("says the same about a cloud computer this conversation was moved to, without a start button", async () => {
-    // The bot works on Auto; select_computer moved this one conversation.
     const moved = { tasks: [{ threadId: "thread", title: "Thread", createdAt: 1, approvalMode: "ask", surface: "cloud", surfaceAuto: true }] } as Partial<Bot>;
     fixture.boatState = "archived";
     await open(makeBot(moved));
-    expect(text()).toContain("Scout's cloud computer is asleep. It wakes in a few seconds when Scout needs it.");
+    expect(text()).toContain("Scout's cloud desktop is asleep. It wakes in a few seconds when Scout needs it.");
     expect(button("Wake it now")).toBeUndefined();
     expect(fixture.posts).toEqual([]);
   });
@@ -168,7 +159,7 @@ describe("Computer panel on Cloud computer", () => {
   it("in Simple mode too: opening it creates nothing, and starting it now is the person's button", async () => {
     fixture.advanced = false;
     await open(makeBot({ computer: "cloud" }));
-    expect(text()).toContain("Scout gets its own cloud computer the first time a task needs one. The first start takes about a minute.");
+    expect(text()).toContain("Scout gets its own cloud desktop the first time a task needs one. The first start takes about a minute.");
     expect(fixture.posts).toEqual([]);
     flushSync(() => button("Start it now")!.click());
     await settle();
@@ -180,16 +171,14 @@ describe("Computer panel on Cloud computer", () => {
     const moved = (busy: boolean) => makeBot({ busy, tasks: [{ threadId: "thread", title: "Thread", createdAt: 1, approvalMode: "ask", surface: "cloud", surfaceAuto: true }] } as Partial<Bot>);
     fixture.boatState = "archived";
     await open(moved(true));
-    // The turn has not used the computer, so nothing is starting.
-    expect(text()).toContain("Scout's cloud computer is asleep. It wakes in a few seconds when Scout needs it.");
+    expect(text()).toContain("Scout's cloud desktop is asleep. It wakes in a few seconds when Scout needs it.");
     expect(text()).not.toContain("Your bot is using this computer right now");
     expect(spinning()).toBe(false);
 
-    // The turn ends: the panel settles on what it found and stops looking.
     await open(moved(false));
     await vi.advanceTimersByTimeAsync(5_000);
     await settle();
-    expect(text()).toContain("Scout's cloud computer is asleep.");
+    expect(text()).toContain("Scout's cloud desktop is asleep.");
     const looks = fixture.looks;
     await vi.advanceTimersByTimeAsync(30_000);
     await settle();

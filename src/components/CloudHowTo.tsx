@@ -1,10 +1,3 @@
-// Show me how (docs/cloud-pro.md, "Add a Cloud"): one step that lights the
-// menu at the top of the sidebar, the one that says This computer, where Add
-// a Cloud… lives for good. The person clicks the real menu (the switcher opens
-// it as reached from here) and the tip ends when it closes, whatever was
-// chosen; Skip or Escape end it too. There is never a second hint. With the
-// menu off screen (a closed drawer, a narrow window), the dialog opens instead
-// and a line says where the menu is for next time.
 import { useEffect, useState } from "react";
 import { track } from "@/lib/analytics";
 import { t } from "@/lib/i18n";
@@ -14,12 +7,10 @@ import { Spotlight } from "./onboarding/Spotlight";
 
 export const SWITCHER_ANCHOR = "server-switcher";
 
-/** The menu button on screen, if any, and where the tip fits beside it. */
 export function switcherPlacement(doc: Pick<Document, "querySelectorAll"> = document, width = window.innerWidth, height = window.innerHeight): "below" | "right" | null {
   const shown = Array.from(doc.querySelectorAll<HTMLElement>(`[data-tour="${SWITCHER_ANCHOR}"]`)).map(element => element.getBoundingClientRect())
     .find(rect => rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.left < width && rect.bottom > 0 && rect.top < height);
   if (!shown) return null;
-  // The icons-only sidebar: beside the button; otherwise below it.
   return shown.width < 80 ? "right" : "below";
 }
 

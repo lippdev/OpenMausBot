@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// The round update button shows only while an update is on its way or
-// waiting, and opens a centred card: version, highlights, one primary action,
-// Later. The card keeps focus inside, closes on Escape and gives focus back.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -110,7 +107,6 @@ describe("the update card", () => {
     expect(bar.getAttribute("aria-valuenow")).toBe("45");
     const primary = [...card()!.querySelectorAll("button")].find((node) => node.textContent?.includes("Downloading 45%"))!;
     expect(primary.disabled).toBe(true);
-    // the card follows the download and offers the restart once it lands
     await emit({ status: "downloaded", version: "0.2.0", percent: 100 });
     expect(card()!.textContent).toContain("Restart to update");
     expect(card()!.querySelector('[role="progressbar"]')).toBeNull();
@@ -147,7 +143,6 @@ describe("the update card", () => {
     await act(async () => button()!.click());
     await emit({ status: "handed-off", version: "0.2.0", installMode: "handoff", command: "sudo apt install ./x.deb" });
     expect(card()).toBeNull();
-    // the next update does not reopen it by itself
     await emit({ status: "downloaded", version: "0.2.1" });
     expect(card()).toBeNull();
 

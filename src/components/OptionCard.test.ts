@@ -89,6 +89,17 @@ describe("OptionCard", () => {
     expect(markup).toContain("eu-west-1");
   });
 
+  it("offers a closed set of choices with no free-text box", () => {
+    const offer = { title: "Claude is out of quota", subtitle: "Continue this conversation with another AI?", options: ["Codex", "Not now"], requestId: "r1" };
+    // an open question keeps its box; the same card marked fixedOptions drops it
+    expect(render(offer)).toContain("<input");
+    const markup = render({ ...offer, fixedOptions: true });
+    expect(markup).toContain('data-ask-card="pending"');
+    expect(markup).toContain("Codex");
+    expect(markup).toContain("Not now");
+    expect(markup).not.toContain("<input");
+  });
+
   it("folds an answered live ask into one line with what was picked", () => {
     const markup = render({ title: "Pick a region", subtitle: "Where?", options: ["us-east-1", "eu-west-1"], requestId: "r1", answered: "eu-west-1" });
     expect(markup).toContain('data-ask-card="settled"');

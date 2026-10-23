@@ -1,8 +1,3 @@
-// App settings → Activity, for admins on a workspace served to a browser:
-// who changed settings, people, sessions, webhooks, MCP servers, engines,
-// bots, budgets and bot visibility, beside who answered approval cards —
-// filtered by who, what and when, and exported as CSV. Read-only: the log is
-// GET /api/admin-activity (server/admin-activity.ts), kept on this server.
 import { useCallback, useEffect, useState } from "react";
 import { ChevronRight, Download, Loader2, RefreshCw } from "lucide-react";
 
@@ -11,11 +6,11 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { ACTIVITY_WHATS, activityQuery, describeEntry, formatValue, whoLabel, type ActivityEntry, type ActivityFilters, type ActivityWhat } from "@/lib/activity";
 import type { LocaleKey } from "@/locales";
+import { Select } from "./Select";
 import { Card } from "./SettingsPrimitives";
 
 const inputClass = "rounded-lg border border-hairline/40 bg-inset px-3 py-2 text-[13px] text-ink placeholder:text-ink-secondary focus:outline-none [color-scheme:dark]";
 
-/** One row: when, who, what happened; a changed setting opens to its values. */
 export function ActivityRow({ entry }: { entry: ActivityEntry }) {
   const [open, setOpen] = useState(false);
   const detail = entry.type === "admin" && (entry.changed?.length || entry.before || entry.after);
@@ -79,7 +74,6 @@ export function ActivitySection() {
     }
   }, [query]);
 
-  // Typing in "who" should not fire a request per key.
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 250);
     return () => window.clearTimeout(timer);
@@ -95,9 +89,9 @@ export function ActivitySection() {
         </label>
         <label className="flex flex-col gap-1 text-[12px] text-ink-secondary">
           {t("activity.what")}
-          <select value={filters.what} onChange={(e) => set({ what: e.target.value as ActivityWhat })} className={inputClass}>
+          <Select value={filters.what} onChange={(e) => set({ what: e.target.value as ActivityWhat })}>
             {ACTIVITY_WHATS.map((what) => <option key={what} value={what}>{t(`activity.what.${what}` as LocaleKey)}</option>)}
-          </select>
+          </Select>
         </label>
         <label className="flex flex-col gap-1 text-[12px] text-ink-secondary">
           {t("activity.from")}

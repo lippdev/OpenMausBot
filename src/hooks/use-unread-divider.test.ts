@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// When the New divider goes: not while the person sits at the end it opened
-// on, but once they leave it and read their way back down. Reduced motion
-// skips the fade and drops it at once.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

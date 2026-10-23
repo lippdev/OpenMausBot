@@ -1,10 +1,5 @@
-// Signing an engine's CLI in on the machine running OpenMausBot with a
-// one-time code, from the app: the desktop, a self-hosted server and My Cloud
-// alike. The CLI's own device-code login runs here (`codex login
-// --device-auth`, `grok login --device-auth`), its page and code go to the
-// person, and the sign-in is confirmed the way the engine's turns will see it.
-// What differs between CLIs is a DeviceSignIn; everything else is this one
-// controller.
+// Device-code CLI sign-in from the app (`codex login --device-auth`, `grok login --device-auth`),
+// confirmed the way turns will see it; a DeviceSignIn holds the per-CLI parts.
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -16,12 +11,9 @@ import type { ProviderAuthenticationStart, ProviderAuthenticationStatus } from "
 import { killCliTree, spawnCli } from "../procs.ts";
 
 const MAX_OUTPUT = 16_384;
-// Two configured instances can use the same on-disk login. Only the auth
-// operation is exclusive: normal turns are not blocked by this lock.
+// Only the auth operation on a shared credential home is exclusive, never normal turns.
 const authenticatingHomes = new Set<string>();
 
-/** The real path of a credential home, so two spellings of one home share
- * one sign-in lock. A missing tail keeps its name under its real parent. */
 export function canonicalPath(path: string): string {
   try { return realpathSync(path); } catch {
     const parent = dirname(path);
@@ -31,34 +23,24 @@ export function canonicalPath(path: string): string {
 
 type Env = Record<string, string | undefined>;
 
-/** What a status command says about the CLI's stored sign-in. `other` is a
- * sign-in by some other method, never replaced from here. */
+/** `other` is a sign-in by another method, never replaced from here. */
 export type DeviceSignInState = "signed-in" | "signed-out" | "other" | "unknown";
 
-/** Everything that differs between CLIs that sign in with a device code. */
 export interface DeviceSignIn {
-  /** Whose page and code format the CLI prints (shared/device-sign-in.ts). */
   provider: DeviceSignInProvider;
-  /** The CLI, as messages name it: "Codex". */
   product: string;
-  /** What the person signs in to, as messages name it: "ChatGPT". */
   account: string;
-  /** Where the CLI keeps its sign-in: `$homeEnv`, else `~/homeDir`. One
-   * sign-in at a time runs per home. */
+  /** Where the CLI keeps its sign-in: `$homeEnv`, else `~/homeDir`; one sign-in per home at a time. */
   homeEnv: string;
   homeDir: string;
   loginArgs: readonly string[];
-  /** How to install the CLI, said after "<product> is not installed on this server." */
   install: string;
-  /** One safe, actionable sentence for a login command that failed; never
-   * the CLI's own words, which may carry tokens. */
+  /** One safe sentence for a failed login command; never the CLI's own words, which may carry tokens. */
   failure(output: string): string;
-  /** A status command, when the CLI has one: checked before a sign-in, so a
-   * working one is never replaced, and after it, to confirm. */
+  /** Checked before a sign-in, so a working one is never replaced, and after it to confirm. */
   status?: { args: readonly string[]; read(code: number | null, output: string): DeviceSignInState };
   /** Without a status command: whether the sign-in a turn uses is now there. */
   signedIn?(env: Env): boolean;
-  /** With a status command: removes the stored sign-in (Settings' sign-out). */
   logoutArgs?: readonly string[];
 }
 
@@ -79,19 +61,18 @@ export interface DeviceAuthOptions {
   cli: string;
   environment: () => Env;
   onAuthenticated?: () => Promise<void>;
-  /** The provider refused the stored sign-in, though the CLI still reports
-   * it: Connect replaces it instead of keeping it. */
+  /** The provider refused the stored sign-in though the CLI still reports it. */
   signInRejected?: () => boolean;
   startupTimeoutMs?: number;
   lifetimeMs?: number;
   terminateTimeoutMs?: number;
 }
 
-/** A fixed login command, not a remotely accessible terminal. CLI output
- * stays in bounded private memory; only a device page and code are exposed. */
+/** A fixed login command, not a terminal: CLI output stays in bounded private memory; only the page and code leave. */
 export class DeviceAuthController {
   private flow: Flow | null = null;
   private command: ChildProcess | null = null;
+  private signingOut: Promise<void> | null = null;
   private disposed = false;
   private readonly spec: DeviceSignIn;
   private readonly options: DeviceAuthOptions;
@@ -101,7 +82,6 @@ export class DeviceAuthController {
     this.options = options;
   }
 
-  /** The credential home the lock is held on, for this environment. */
   private home(env: Env, action: "signing in" | "signing out"): { home: string; homeKey: string } {
     const { homeEnv, homeDir, product } = this.spec;
     const home = env.HOME || env.USERPROFILE || homedir();
@@ -145,16 +125,12 @@ export class DeviceAuthController {
           this.finish(flow, "failed", this.spec.failure(loginOutput));
           return;
         }
-        // A successful command is not enough: confirm the sign-in the way
-        // this client's bots will find it, with the same executable and
-        // environment.
         flow.startupTimer = setTimeout(() => this.finish(flow, "failed", `${product} finished sign-in but could not confirm the account. Refresh Settings and try again.`), this.options.startupTimeoutMs ?? 30_000);
         flow.startupTimer.unref();
         this.confirm(flow, env, home, (signedIn) => this.finish(flow, signedIn ? "succeeded" : "failed",
           `${product} finished sign-in but did not confirm a ${account} account. Refresh Settings and try again.`));
       }, true);
-      // Never overwrite a working login just because Connect was clicked
-      // twice. One the provider refused is not working, whatever status says.
+      // Never overwrite a working login; one the provider refused is not working, whatever status says.
       if (!status) { login(); return; }
       this.run(flow, [...status.args], env, home, (code, output) => {
         const state = status.read(code, output);
@@ -183,13 +159,24 @@ export class DeviceAuthController {
   async dispose(): Promise<void> {
     this.disposed = true;
     await this.cancel();
+    // A stopped sign-out frees the account's lock once its pipes close, which can come after the exit cancel() waits for.
+    const signingOut = this.signingOut;
+    if (signingOut) await Promise.race([signingOut.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 1_500).unref())]);
     this.flow = null;
   }
 
-  /** Remove the sign-in the CLI stores for this server account so a
-   * different account can connect. A sign-in in progress is never pulled
-   * away underneath the browser completing it. */
+  /** A sign-in in progress is never pulled away underneath the browser completing it. */
   async signOut(): Promise<void> {
+    const run = this.signOutNow();
+    this.signingOut = run;
+    try {
+      await run;
+    } finally {
+      if (this.signingOut === run) this.signingOut = null;
+    }
+  }
+
+  private async signOutNow(): Promise<void> {
     const { product, account, status, logoutArgs } = this.spec;
     if (!status || !logoutArgs) throw new Error(`Signing out of ${account} is not available from here.`);
     if (this.disposed) throw new Error("This provider was removed. Refresh Settings before signing out.");
@@ -211,15 +198,12 @@ export class DeviceAuthController {
       }
       const logout = await this.exec([...logoutArgs], env, home);
       if (logout.code !== 0) throw new Error(`${product} could not remove the sign-in on this server. Check the server's ${product} installation and try again.`);
-      // The command's own report is not enough: confirm with the same status
-      // check that decides whether bots may run on this account.
       const after = await this.exec([...status.args], env, home);
       if (status.read(after.code, after.output) !== "signed-out") {
         throw new Error(`${product} still reports a sign-in on this server. Update ${product} and check its login status before trying again.`);
       }
     } finally {
-      // If the OS cannot stop a command, it may still change credentials.
-      // Keep the home reserved until that exact child actually exits.
+      // A command the OS could not stop may still change credentials: keep the home reserved until it exits.
       const child = this.command;
       if (child && child.exitCode === null && child.signalCode === null) {
         child.once("close", () => authenticatingHomes.delete(homeKey));
@@ -227,8 +211,6 @@ export class DeviceAuthController {
     }
   }
 
-  /** After a login command succeeded: the status command when the CLI has
-   * one, else the stored sign-in a turn checks for. */
   private confirm(flow: Flow, env: Env, home: string, done: (signedIn: boolean) => void): void {
     const status = this.spec.status;
     if (status) {
@@ -236,7 +218,7 @@ export class DeviceAuthController {
       return;
     }
     let signedIn = false;
-    try { signedIn = this.spec.signedIn?.(env) === true; } catch { /* unreadable: not signed in */ }
+    try { signedIn = this.spec.signedIn?.(env) === true; } catch {}
     done(signedIn);
   }
 
@@ -247,8 +229,7 @@ export class DeviceAuthController {
       : `${product} could not start on this server. Check the configured CLI path and its executable permissions.`;
   }
 
-  /** One bounded, non-interactive command. Its output stays here; callers
-   * see an exit code and a status-line match, never the text. */
+  /** Callers see an exit code and a status-line match, never the output. */
   private exec(args: string[], env: Env, cwd: string): Promise<{ code: number | null; output: string }> {
     const { product } = this.spec;
     return new Promise((resolveExec, rejectExec) => {
@@ -357,8 +338,7 @@ export class DeviceAuthController {
 
   private async stopChild(child: ChildProcess | null): Promise<boolean> {
     if (!child || await killCliTree(child, this.options.terminateTimeoutMs ?? 1500)) return true;
-    // A broken CLI may ignore SIGTERM. Do not leave a stale device flow able
-    // to write credentials after the user cancelled it.
+    // A broken CLI may ignore SIGTERM; a cancelled device flow must not go on to write credentials.
     if (process.platform !== "win32" && child.pid) {
       try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
     } else child.kill("SIGKILL");

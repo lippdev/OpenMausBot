@@ -17,12 +17,9 @@ type RemoteProfilePatch = Partial<
 
 export function RemoteAgentSettingsPanel({ bot, overlay = false }: {
   bot: Bot;
-  /** Float over the chat: the remote computer panel is open too and the
-   * window cannot seat both columns (see App). */
   overlay?: boolean;
 }) {
   const { dispatch } = useStore();
-  // Docked flush under the Windows caption corner: drop the header 16px.
   const { padClass, dragProps } = useCaptionChrome();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");

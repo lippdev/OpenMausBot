@@ -1,7 +1,5 @@
 // The Data surface: what the server, the bots' tools and the panel agree on.
-// DuckDB runs in the OMB server (one database per bot); bots load, query and
-// show data through five tools; the Computer panel's Data tab renders the
-// sheet of cards. Plan: _plans/data-surface-2026-10-09/PLAN.md.
+// DuckDB runs in the OMB server, one database per bot.
 
 /** The five tools a bot gets, in the order the catalog lists them. */
 export const DATA_TOOL_NAMES = ["data_load", "data_describe", "data_sql", "data_show", "data_export"] as const;
@@ -33,10 +31,8 @@ export const DATA_LIMITS = {
   sheetCardsMax: 200,
 } as const;
 
-/** Where materialised results live inside a bot's database. DuckDB temp
- * tables are per connection, so the panel could never see the bot's; a real
- * schema is visible to both connections and survives a restart. The Sources
- * strip hides it. */
+/** Where materialised results live inside a bot's database. DuckDB temp tables
+ * are per connection; a real schema is visible to both and survives a restart. */
 export const DATA_RESULTS_SCHEMA = "omb_results";
 
 export type DataErrorCode =
@@ -176,10 +172,8 @@ export interface DataSheet {
   updatedAt: string;
 }
 
-/** Server → client. One message carries the whole sheet; sheets are small
- * (no rows), so no patches. The database's catalog (every table, including
- * ones derived with SQL) is not on the sheet: DuckDB owns it, and GET
- * /api/bots/:id/data reads it fresh as `tables`. */
+/** Server → client. One message carries the whole sheet (sheets hold no rows).
+ * The database's catalog is not on it: GET /api/bots/:id/data reads it fresh. */
 export interface DataBroadcast {
   kind: "data";
   botId: string;

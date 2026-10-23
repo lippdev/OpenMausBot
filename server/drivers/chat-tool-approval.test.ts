@@ -95,14 +95,12 @@ describe("Always allow this session", () => {
     await expect(first).resolves.toBe(true);
     expect(granted).toEqual(new Set(['["audit","write"]']));
 
-    // the same tool asks nothing more, in this turn or a later one sharing the set
     await expect(gate.ask("audit_write", "Write another receipt", '["audit","write"]')).resolves.toBe(true);
     const later = createChatToolApproval({ signal: new AbortController().signal, open, resolved, openQuestion: vi.fn(), resolvedQuestion: vi.fn(), granted });
     await expect(later.ask("audit_write", "Write a third receipt", '["audit","write"]')).resolves.toBe(true);
     expect(open).toHaveBeenCalledTimes(1);
     expect(resolved).toHaveBeenCalledTimes(1);
 
-    // another tool, and a call that names no grant, still ask
     void later.ask("audit_delete", "Delete the receipt", '["audit","delete"]');
     void later.ask("computer_click", "Click on the person's screen");
     expect(open).toHaveBeenCalledTimes(3);

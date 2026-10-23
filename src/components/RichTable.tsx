@@ -6,10 +6,8 @@ import { isTableNumber, tableCsv, tableRowOrder, type TableSort } from "@/lib/ta
 import { t } from "@/lib/i18n";
 import { copyText } from "@/lib/copy-text";
 
-/** A cell may set its own alignment over its column's (a chat widget's cells do). */
 export interface TableCell { text: string; content?: ReactNode; align?: TableAlign; vAlign?: "top" | "middle" | "bottom" }
 export type TableAlign = "left" | "center" | "right" | "start" | "end";
-/** `width` fixes a column's px width instead of reading it from the text. */
 export interface TableColumn extends TableCell { width?: number }
 export interface RichTableProps {
   columns: TableColumn[];
@@ -17,11 +15,10 @@ export interface RichTableProps {
   name?: string;
   expanded?: boolean;
   direction?: "rtl" | "ltr";
-  /** The columns have no names: the heading row is left out, and so is sorting. */
   headless?: boolean;
 }
 
-/** Native modal supplies focus containment, Escape, inert background and focus restoration. */
+/** The native modal supplies focus containment, Escape, an inert background and focus restoration. */
 export function TableDialog({ title, onClose, children, returnFocus }: { title: string; onClose: () => void; children: ReactNode; returnFocus: HTMLElement | null }) {
   const ref = useRef<HTMLDialogElement>(null);
   const id = useId();

@@ -1,11 +1,3 @@
-// Keys for OpenCode's other providers (Venice, Groq, DeepSeek…), saved in
-// Settings → Connections on an OMB Cloud home, where there is no terminal to
-// export them in. Real server booted the way the image's launcher boots it
-// (secrets over a pipe), a synthetic OpenCode (the fake ACP agent) that
-// records the environment it was started with, and the owner signed in
-// through the Admin's pairing. The saved keys reach OpenCode, and only
-// OpenCode; Settings shows their names, never their values; the server's own
-// provider keys stay out, as before. Disposable home; no network.
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +37,6 @@ async function api(method: string, path: string, body?: unknown) {
   return { status: response.status, text, body: (() => { try { return JSON.parse(text); } catch { return null; } })() as any };
 }
 
-/** The Admin's signed pairing: the owner's own session. */
 async function adminPairing(): Promise<string> {
   const body = JSON.stringify({ label: "OpenMausBot app (Cloud)", ttlSeconds: 300 });
   const timestamp = String(Math.floor(Date.now() / 1000)), nonce = randomBytes(16).toString("base64url");
@@ -57,11 +48,8 @@ async function adminPairing(): Promise<string> {
   return (await api("POST", "/api/auth/pair", { code: granted.code })).body.token;
 }
 
-/** The environment OpenCode was last started with, and that process's id. */
 const started = () => JSON.parse(readFileSync(dump, "utf8")) as { pid: number; env: Record<string, string> };
-/** True once the fake CLI has finished writing the file: existence alone can
- * catch a half-written file on a busy runner (SyntaxError: Unexpected end).
- * The dump is one JSON document; the prompt log is one JSON line per prompt. */
+/** Existence alone can catch a half-written file on a busy runner (SyntaxError: Unexpected end). */
 const written = (file: string, shape: "document" | "lines" = "document") => {
   try {
     const text = readFileSync(file, "utf8");
@@ -100,7 +88,7 @@ beforeAll(async () => {
   const deadline = Date.now() + 20_000;
   for (;;) {
     if (child.exitCode !== null) throw new Error(`the Cloud home exited:\n${log}`);
-    try { if ((await fetch(`${base}/api/health`)).ok) break; } catch { /* starting */ }
+    try { if ((await fetch(`${base}/api/health`)).ok) break; } catch {}
     if (Date.now() > deadline) throw new Error(`the Cloud home did not start:\n${log}`);
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -115,7 +103,6 @@ afterAll(async () => {
 it("saves keys for any OpenCode provider on a Cloud, shows only their names, and hands them to OpenCode alone", async () => {
   expect(owner).toMatch(/^omb_sess_/);
   expect((await api("GET", "/api/config")).body.opencodeGo).toEqual({ configured: false, providerKeys: [] });
-  // Before: the server's own provider keys stay out of OpenCode on a Cloud.
   await expect.poll(() => written(dump), { timeout: 15_000 }).toBe(true);
   expect(started().env.ANTHROPIC_API_KEY).toBeUndefined();
   expect(started().env.OPENAI_API_KEY).toBeUndefined();
@@ -124,21 +111,17 @@ it("saves keys for any OpenCode provider on a Cloud, shows only their names, and
   const saved = await api("PUT", "/api/config", { opencodeGo: { providerKeys: { VENICE_API_KEY: VENICE, ANTHROPIC_API_KEY: OWNER_ANTHROPIC } } });
   expect(saved.status, saved.text).toBe(200);
   expect(saved.body.opencodeGo).toEqual({ configured: false, providerKeys: ["ANTHROPIC_API_KEY", "VENICE_API_KEY"] });
-  // Write-only: no value comes back, now or later.
   const reread = await api("GET", "/api/config");
   for (const response of [saved.text, reread.text]) {
     expect(response).not.toContain(VENICE);
     expect(response).not.toContain(OWNER_ANTHROPIC);
   }
   expect(reread.body.opencodeGo.providerKeys).toEqual(["ANTHROPIC_API_KEY", "VENICE_API_KEY"]);
-  // Saving reloads the engines, so OpenCode lists the new provider's models
-  // straight away: its catalog is read in an environment that has the keys.
   await expect.poll(() => written(dump), { timeout: 15_000 }).toBe(true);
   expect(started().env.VENICE_API_KEY).toBe(VENICE);
   expect(started().env.ANTHROPIC_API_KEY).toBe(OWNER_ANTHROPIC);
   expect(started().env.OPENAI_API_KEY).toBeUndefined();
 
-  // A bot's turn runs OpenCode with them too.
   const { bot } = (await api("POST", "/api/bots", { name: "Venice bot", modelSelection: { instanceId: "opencodeGo", model: "fixture/warm" } })).body;
   const thread = (await api("POST", `/api/bots/${bot.id}/tasks`, { title: "Mine" })).body.task.threadId as string;
   const prompts = `${dump}.prompts.jsonl`;
@@ -153,7 +136,6 @@ it("saves keys for any OpenCode provider on a Cloud, shows only their names, and
   await expect.poll(async () => (await api("GET", "/api/bots")).body.bots.find((entry: any) => entry.id === bot.id)
     ?.tasks.find((task: any) => task.threadId === thread)?.busy, { timeout: 15_000 }).toBe(false);
 
-  // Removing one keeps the other, and OpenCode loses it at once.
   rmSync(dump, { force: true });
   const removed = await api("PUT", "/api/config", { opencodeGo: { providerKeys: { VENICE_API_KEY: "" } } });
   expect(removed.status, removed.text).toBe(200);

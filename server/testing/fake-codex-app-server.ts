@@ -1,83 +1,59 @@
 #!/usr/bin/env node
-// Fake of the codex CLI's `app-server` JSON-RPC surface, for driver
-// tests. Speaks newline-delimited JSON-RPC on stdio: answers the
-// initialize/thread/turn handshake, then plays a scripted turn. Like the
-// real app-server, it never exits on its own — the driver kills it.
-//
-//   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
-//                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | question |
-//                     multi-question | mixed-question | empty-question | malformed-question | config-profile |
-//                     config-profile-unsupported | config-read-error | image |
-//                     logged-in-stdout | logged-out | unauthorized | late-request |
-//                     retry-then-complete | signin-refused | auth-recovery | mcp-401 | legacy-error |
-//                     key-401 | recovered-403 | recovered-401 | recovering-403
-//   FAKE_CODEX_LAUNCH_CRASHES  die at turn/start (before ack) with transient stderr,
-//                               exit 1, for the first N launches (launch count kept in
-//                               FAKE_CODEX_STATE)
-//   FAKE_CODEX_LAUNCH_KILLS    like LAUNCH_CRASHES but die by SIGKILL (signal exit;
-//                               POSIX-shaped — win32 reports exit 1, signal null), for
-//                               the first N launches (launch count in FAKE_CODEX_STATE)
-//   FAKE_CODEX_LAUNCH_SILENT   die at turn/start (before ack) with exit 1 and no stderr
-//                               at all, for the first N launches (launch count in
-//                               FAKE_CODEX_STATE)
-//   FAKE_CODEX_ACK_CRASH       gate file path: hold the post-ack crash until the
-//                              test confirms the driver parsed the ack
-//   FAKE_CODEX_EXIT_MID_TURN   gate file path: hold the ack/delta stdout until the
-//                              test confirms the stale websocket-426 stderr was read
-//   FAKE_CODEX_EXIT_MID_TURN_KILL  gate file path: hold the SIGKILL until the test
-//                              confirms the reasoning delta was parsed
-//   FAKE_CODEX_ASK_HOLD        question modes: record the ask reply and hold the turn open, for
-//                              timeout tests that advance the clock
-//   FAKE_CODEX_DUMP   path to write {pid, argv, env, calls, decision} as JSON
+// Fake of the codex CLI's `app-server` JSON-RPC surface (NDJSON on stdio) for driver tests; like
+// the real one it never exits on its own. Env knobs:
+//   FAKE_CODEX_MODE  happy (default) | approval | resume | stream | windows-command | mcp-elicitation |
+//     mcp-app-approval | mcp-form | permissions-approval | question | multi-question | mixed-question |
+//     empty-question | malformed-question | config-profile | config-profile-unsupported | config-read-error |
+//     image | logged-in-stdout | logged-out | unauthorized | late-request | retry-then-complete | signin-refused |
+//     auth-recovery | mcp-401 | legacy-error | key-401 | recovered-403 | recovered-401 | recovering-403 | usage-limit
+//     | async-question (an agentMessage with delivery async and questions, as codex 0.160 sends request_user_input_async)
+//   FAKE_CODEX_MISSING_BEARER  the first N launches fail their turn as codex-cli 0.160.1 holding no login does (count in FAKE_CODEX_STATE)
+//   FAKE_CODEX_LAUNCH_CRASHES  the first N launches die pre-ack at turn/start, transient stderr, exit 1 (count in FAKE_CODEX_STATE)
+//   FAKE_CODEX_LAUNCH_KILLS  the same by SIGKILL (POSIX-shaped; win32 reports exit 1, signal null)
+//   FAKE_CODEX_LAUNCH_SILENT  the same with exit 1 and no stderr
+//   FAKE_CODEX_ACK_CRASH  gate file: hold the post-ack crash until the driver parsed the ack
+//   FAKE_CODEX_EXIT_MID_TURN  gate file: hold the ack/delta stdout until the stale websocket-426 stderr was read
+//   FAKE_CODEX_EXIT_MID_TURN_KILL  gate file: hold the SIGKILL until the reasoning delta was parsed
+//   FAKE_CODEX_ASK_HOLD  question modes: record the ask reply and hold the turn open
+//   FAKE_CODEX_ASYNC_QUESTIONS  async-question mode: JSON replacing the message's `questions`
+//   FAKE_CODEX_ASYNC_QUESTION_GATE  async-question mode: the turn keeps running until this file exists (default 300 ms)
+//   FAKE_CODEX_DUMP  path for {pid, argv, env, calls, decision}
+//   FAKE_CODEX_PATCH_BYTES  each turn first writes web/index.html by apply_patch, streamed as two
+//     item/fileChange/patchUpdated notifications (codex-cli 0.160.1's schema) of half and all this many bytes
 //   FAKE_CODEX_IGNORE_FEATURES  "1": config/read reports no `-c features.*` override
-//                     (a Codex that did not take them)
-//   FAKE_CODEX_SHELL_ENVIRONMENT_POLICY  JSON the config/read shell_environment_policy
-//                     reports. Like codex-cli 0.160, every field is present and null
-//                     unless set (an object fills in its fields, `filters` table
-//                     included); a non-object (null, false, []) is reported as-is.
-//   FAKE_CODEX_APPROVAL_REQUEST JSON {method, params} override in approval mode
+//   FAKE_CODEX_SHELL_ENVIRONMENT_POLICY  JSON config/read reports, every field present and null unless set (codex-cli 0.160)
+//   FAKE_CODEX_APPROVAL_REQUEST  JSON {method, params} override in approval mode
 //   FAKE_CODEX_ACCOUNT_EMAIL  synthetic ChatGPT identity (default ada@example.test)
-//   FAKE_CODEX_ACCOUNT_MODE   chatgpt (default) | api-key | none | unsupported | error | hang
-//   FAKE_CODEX_RESUME_ERROR   JSON-RPC error object to reject thread/resume
-//   FAKE_CODEX_START_ERROR    JSON-RPC error object to reject thread/start
-//   FAKE_CODEX_RESTORED_USAGE report 100/50/10 tokens already used before turn/start, as a resumed thread can
-//   FAKE_CODEX_STEER_ERROR  JSON-RPC error object to reject turn/steer (queue fallback)
-//   FAKE_CODEX_STEER_ERROR_FILE  gate file path: reject turn/steer only while the file exists
-//   FAKE_CODEX_STEER_HANG  accept turn/steer and never answer (delivery happened, the
-//                          reply is lost — the driver must report indeterminate)
-//   FAKE_CODEX_INTERRUPT_SILENT  ignore turn/interrupt entirely (wedged server; driver must escalate)
-//   FAKE_CODEX_INTERRUPT_GRACE_MS  driver-side grace before escalating an interrupt (tests)
-//   FAKE_CODEX_ROOM_PLAN  plan path: each turn runs the scripted room agent
-//                         (room-handoff-agent.ts) against the mounted agents
-//                         MCP server and replies with its text
-//   FAKE_CODEX_COMPLETE_BEFORE_ACK  with FAKE_CODEX_ROOM_PLAN: stream the whole
-//                         turn, completion included, before acknowledging turn/start
-//   FAKE_CODEX_TEXT_*  `codex exec` (the background one-shot, server/drivers/codex-background-text.ts):
-//     FAKE_CODEX_TEXT_ROUTES  JSON file {"marker": "reply"}, re-read each run; the first
-//                             marker the stdin prompt contains picks the reply
-//     FAKE_CODEX_TEXT_REPLY   the reply when no route matches (default "fake background answer")
-//     FAKE_CODEX_TEXT_LOG     append {argv, cwd, prompt, env} per call, one JSON object per line
-//     FAKE_CODEX_TEXT_MODE    ok (default) | fail (turn.failed) | exit (exit 1, stderr only) |
-//                             hang (never answer) | tool (a command_execution item first) |
-//                             noisy (a non-JSON line, a non-fatal error item, reasoning)
-//   FAKE_CODEX_LUNA   "1": model/list also offers gpt-6-luna (the background calls' model)
-//   FAKE_CODEX_MCP_START  "1": on thread/start, start every `-c mcp_servers.*` mount
-//                         the way codex-cli 0.160.1 does (a command with only PATH,
-//                         HOME, its env_vars and its env table; a url with its
-//                         bearer/header variables), send Codex's own initialize
-//                         (FAKE_CODEX_MCP_HANDSHAKE JSON overrides it), list the
-//                         tools, and dump each result as mcpStartup[name]:
-//                         {status: "ready", tools} | {status: "failed", error}
-//
-// Keep this file dependency-free — it runs as a bare `node` subprocess.
+//   FAKE_CODEX_ACCOUNT_MODE  chatgpt (default) | api-key | none | unsupported | error | hang
+//   FAKE_CODEX_RESUME_ERROR  JSON-RPC error rejecting thread/resume
+//   FAKE_CODEX_ARCHIVED  "1": thread/resume says the session is archived until thread/unarchive; "unarchive-fails": unarchive is refused too
+//   FAKE_CODEX_STARTUP_DELAY_MS  hold the initialize reply this long, like a loaded host
+//   FAKE_CODEX_STARTUP_LOG  append {pid, at, event: "initialize" | "turn/start"} per launch
+//   FAKE_CODEX_START_ERROR  JSON-RPC error rejecting thread/start
+//   FAKE_CODEX_MCP_FAILED  MCP server whose startup fails (`mcpServer/startupStatus/updated`) as thread/start begins
+//   FAKE_CODEX_RESTORED_USAGE  report 100/50/10 tokens used before turn/start, as a resumed thread can
+//   FAKE_CODEX_STEER_ERROR  JSON-RPC error rejecting turn/steer
+//   FAKE_CODEX_STEER_ERROR_FILE  reject turn/steer only while this file exists
+//   FAKE_CODEX_STEER_HANG  accept turn/steer and never answer
+//   FAKE_CODEX_INTERRUPT_SILENT  ignore turn/interrupt
+//   FAKE_CODEX_INTERRUPT_GRACE_MS  driver-side grace before escalating an interrupt
+//   FAKE_CODEX_ROOM_PLAN  plan path: each turn runs room-handoff-agent.ts against the agents MCP server
+//   FAKE_CODEX_COMPLETE_BEFORE_ACK  with FAKE_CODEX_ROOM_PLAN: stream the whole turn before acknowledging turn/start
+//   FAKE_CODEX_TEXT_ROUTES  `codex exec`: JSON {"marker": "reply"}; the first marker in the prompt picks the reply
+//   FAKE_CODEX_TEXT_REPLY  `codex exec` reply when no route matches (default "fake background answer")
+//   FAKE_CODEX_TEXT_LOG  `codex exec`: append {argv, cwd, prompt, env} per call
+//   FAKE_CODEX_TEXT_MODE  `codex exec`: ok (default) | fail | exit | hang | tool | noisy
+//   FAKE_CODEX_LUNA  "1": model/list also offers gpt-6-luna
+//   FAKE_CODEX_UPDATED_FILE  while this file exists, the CLI was updated in place: --version answers codex-cli 0.162.1
+//     and model/list also offers gpt-6.1-sol
+//   FAKE_CODEX_MCP_START  "1": on thread/start, start each `-c mcp_servers.*` mount as codex-cli 0.160.1 does
+//     (its initialize, or FAKE_CODEX_MCP_HANDSHAKE) and dump mcpStartup[name]
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 
-
 const mode = process.env.FAKE_CODEX_MODE ?? "happy";
 
-// Follow the spawning server down, including on Windows where ppid does
-// not change after parent exit. Inline: fakes must stay self-contained.
+// Follow the spawning server down; on Windows ppid does not change after parent exit.
 {
   const spawner = process.ppid;
   const orphanWatch = setInterval(() => {
@@ -89,13 +65,8 @@ const mode = process.env.FAKE_CODEX_MODE ?? "happy";
   orphanWatch.unref();
 }
 
-// stdout and stderr are separate pipes: the writer cannot order them for
-// the reader, and a fixed sleep only pretends to. These knobs synchronize
-// on the test instead — it watches the driver consume the earlier stream
-// and creates the gate file at that moment; the fake holds the scripted
-// write until the gate appears (a later event-loop turn at the earliest,
-// so the ordering is real, not a timing guess). Resolves after a long
-// timeout so a broken gate still surfaces as a failing test, not a hang.
+// stdout and stderr are separate pipes the writer cannot order, so these gates wait on the test
+// (it creates the file once the driver consumed the earlier stream) instead of a sleep.
 const waitForGate = (path: string | undefined, timeoutMs = 15_000): Promise<void> =>
   new Promise((resolve) => {
     const startedAt = Date.now();
@@ -107,8 +78,10 @@ const waitForGate = (path: string | undefined, timeoutMs = 15_000): Promise<void
     }, 2);
   });
 
+const updated = Boolean(process.env.FAKE_CODEX_UPDATED_FILE && existsSync(process.env.FAKE_CODEX_UPDATED_FILE));
+
 if (process.argv[2] === "--version") {
-  process.stdout.write(`${process.env.FAKE_CODEX_VERSION ?? "codex-cli 0.147.0"}\n`);
+  process.stdout.write(`${updated ? "codex-cli 0.162.1" : process.env.FAKE_CODEX_VERSION ?? "codex-cli 0.147.0"}\n`);
   process.exit(0);
 }
 if (process.argv[2] === "login" && process.argv[3] === "status") {
@@ -116,15 +89,13 @@ if (process.argv[2] === "login" && process.argv[3] === "status") {
     process.stderr.write("Not logged in\n");
     process.exit(1);
   }
-  // Codex 0.147.0 reports a successful login on stderr; retain a mode for
-  // older versions that wrote the same status on stdout.
+  // Codex 0.147.0 reports a successful login on stderr; older versions wrote it on stdout.
   const statusStream = mode === "logged-in-stdout" ? process.stdout : process.stderr;
   statusStream.write("Logged in using ChatGPT\n");
   process.exit(0);
 }
 if (process.argv[2] === "exec") {
-  // `codex exec --json … -`: the prompt arrives on stdin, the answer as
-  // exec's JSONL events (codex-cli 0.160.1), then the process exits.
+  // `codex exec --json … -`: prompt on stdin, answer as exec's JSONL events (codex-cli 0.160.1).
   const prompt = await new Promise<string>((resolve) => {
     let input = "";
     process.stdin.setEncoding("utf8");
@@ -138,8 +109,7 @@ if (process.argv[2] === "exec") {
   }
   const event = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);
   if (textMode === "hang") {
-    // a repeating timer keeps the loop alive without settling the
-    // top-level await, which Node would otherwise treat as fatal
+    // An unsettled top-level await is fatal in Node; a repeating timer keeps the loop alive.
     await new Promise(() => setInterval(() => {}, 1 << 30));
   }
   if (textMode === "exit") {
@@ -167,26 +137,20 @@ if (process.argv[2] === "exec") {
       const routes = JSON.parse(readFileSync(process.env.FAKE_CODEX_TEXT_ROUTES, "utf8")) as Record<string, string>;
       const hit = Object.entries(routes).find(([marker]) => prompt.includes(marker));
       if (hit) reply = hit[1];
-    } catch {
-      // a malformed routes file falls back to the plain reply
-    }
+    } catch {}
   }
   event({ type: "item.completed", item: { id: "item_2", type: "agent_message", text: reply } });
   event({ type: "turn.completed", usage: { input_tokens: 120, cached_input_tokens: 20, output_tokens: 7 } });
   process.exit(0);
 }
 const calls: Array<{ method: string; params: unknown }> = [];
-// Opt-in config resolution for scope tests; mirror the native -c precedence.
 const mcpOverrides: Record<string, Record<string, unknown>> = {};
 for (let index = 0; process.env.FAKE_CODEX_MCP_OVERRIDES === "1" && index < process.argv.length; index++) {
   const match = process.argv[index - 1] === "-c" ? /^mcp_servers\.([^.]+)\.([^.]+)=(.*)$/.exec(process.argv[index]!) : null;
   if (match) (mcpOverrides[match[1]!] ??= {})[match[2]!] = JSON.parse(match[3]!);
 }
-// codex-cli 0.160 config/read reports every shell_environment_policy field,
-// null when unset, even for an empty config.toml. A `-c
-// shell_environment_policy.exclude=[…]` override replaces the list and, as
-// there (codex-cli 0.160.1), drops the lower layers' `filters` table; their
-// `include_only` list stays.
+// codex-cli 0.160 config/read reports every shell_environment_policy field, null when unset. A `-c
+// shell_environment_policy.exclude=[…]` override replaces the list and drops the lower `filters` (0.160.1).
 const shellExcludeOverride = process.argv.reduce<unknown>((found, arg, index) => {
   const match = process.argv[index - 1] === "-c" ? /^shell_environment_policy\.exclude=(.*)$/.exec(arg) : null;
   return match ? JSON.parse(match[1]!) : found;
@@ -200,6 +164,10 @@ const shellEnvironmentPolicy = (): unknown => {
 };
 let developerInstructions = "";
 let resumedThread: string | null = null;
+let unarchived = false;
+const logStartup = (event: string) => {
+  if (process.env.FAKE_CODEX_STARTUP_LOG) appendFileSync(process.env.FAKE_CODEX_STARTUP_LOG, `${JSON.stringify({ pid: process.pid, at: Date.now(), event })}\n`);
+};
 let decision: unknown = null;
 let experimentalApi = false;
 
@@ -216,11 +184,7 @@ const notify = (method: string, params: any) => out({
   },
 });
 
-// The response and restored usage notification may arrive in one stdout
-// chunk. Force that ordering for the baseline fixture instead of relying on
-// the OS to coalesce two writes under load.
-// Model the resolved policy returned by native start/resume, including fields
-// absent from the client's short sandbox selector.
+// The response and restored usage notification may share one stdout chunk; force that ordering.
 const resolvedSandbox = (params: Record<string, unknown>) => {
   if (process.env.FAKE_CODEX_RESOLVED_SANDBOX) return JSON.parse(process.env.FAKE_CODEX_RESOLVED_SANDBOX);
   if (params.sandbox === "danger-full-access") return { type: "dangerFullAccess" };
@@ -231,13 +195,10 @@ const resolvedSandbox = (params: Record<string, unknown>) => {
   return { type: "readOnly" };
 };
 
-// ── FAKE_CODEX_MCP_START: Codex's own MCP client, as far as startup goes ──
 type McpStartup = { status: "ready"; tools: string[] } | { status: "failed"; error: string };
 let mcpStartup: Record<string, McpStartup> | undefined;
-/** codex-cli 0.160.1's initialize for every server it connects (captured Oct 8 2026). */
+/** codex-cli 0.160.1's initialize for every server it connects. */
 const CODEX_MCP_HANDSHAKE = { protocolVersion: "2025-06-18", capabilities: { elicitation: { form: {}, url: {} } }, clientInfo: { name: "codex-mcp-client", title: "Codex", version: "0.160.1" } };
-/** `-c mcp_servers.<name>.<key>=<value>` mounts, values parsed. An inline
- * table (`{ "K" = "V" }`, JSON-quoted on both sides) becomes an object. */
 const mcpMounts = (): Record<string, Record<string, unknown>> => {
   const mounts: Record<string, Record<string, unknown>> = {};
   process.argv.forEach((arg, index) => {
@@ -252,7 +213,6 @@ const mcpMounts = (): Record<string, Record<string, unknown>> => {
   return mounts;
 };
 const mcpError = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 500);
-/** initialize, notifications/initialized, tools/list over stdio. */
 const startStdioMcp = (mount: Record<string, unknown>, handshake: unknown): Promise<McpStartup> => new Promise((resolve) => {
   const env: Record<string, string> = {};
   for (const name of ["PATH", "HOME"]) if (process.env[name]) env[name] = process.env[name]!;
@@ -278,7 +238,6 @@ const startStdioMcp = (mount: Record<string, unknown>, handshake: unknown): Prom
   });
   write({ id: 1, method: "initialize", params: handshake });
 });
-/** The same over streamable HTTP, Codex's own headers included. */
 const startUrlMcp = async (mount: Record<string, unknown>, handshake: unknown): Promise<McpStartup> => {
   const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
   if (typeof mount.bearer_token_env_var === "string") headers.authorization = `Bearer ${process.env[mount.bearer_token_env_var] ?? ""}`;
@@ -317,19 +276,8 @@ const threadReply = (response: unknown) => {
   process.stdout.write(`${JSON.stringify(response)}\n${JSON.stringify(restored)}\n`);
 };
 
-// Every call rewrites the whole dump, and it is large (it carries the entire
-// environment). A test reading it on a slow disk could catch the truncated
-// middle of that rewrite — Windows CI failed "Unexpected end of JSON input"
-// exactly there. Write it whole or not at all: a sibling temp file, then a
-// rename over the target, which is atomic on one filesystem.
-//
-// Inlined rather than imported from ../atomic.ts on purpose. This file is
-// dependency-free because tests copy it out of the repo — the browser PATH
-// test strips it to a plain .mjs in a temp bin dir and runs it as `codex` —
-// and a relative import dies there at ESM link time, taking the whole turn
-// with it (#1372 broke main exactly so). Windows may refuse the rename for a
-// few milliseconds while an indexer holds the just-written file; retry those
-// codes briefly, as atomic.ts does.
+// Write the dump whole or not at all (temp file, then rename): Windows CI read a half-rewritten
+// dump. Windows may refuse the rename briefly while an indexer holds the file.
 const RENAME_RETRY_DELAYS_MS = [5, 10, 20, 40, 80];
 const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 const writeDumpAtomic = (path: string, contents: string): void => {
@@ -350,10 +298,7 @@ const writeDumpAtomic = (path: string, contents: string): void => {
   }
 };
 const dump = () => {
-  // Account probes run in a separate process with the same environment.
-  // Turn-focused fixtures must not lose their transport evidence when a
-  // later account/read overwrites the shared dump. Catalog/identity tests
-  // keep the default behavior so they can still inspect those probes.
+  // FAKE_CODEX_DUMP_TURNS_ONLY=1: account probes never overwrite a turn's dump.
   if (process.env.FAKE_CODEX_DUMP_TURNS_ONLY === "1" && !calls.some(call => call.method === "turn/start")) return;
   if (process.env.FAKE_CODEX_DUMP) {
     writeDumpAtomic(
@@ -364,10 +309,17 @@ const dump = () => {
 };
 
 const finishTurn = () => {
+  const patchBytes = Number(process.env.FAKE_CODEX_PATCH_BYTES);
+  if (patchBytes > 0) {
+    const change = (bytes: number) => [{ path: `${process.cwd()}/web/index.html`, kind: { type: "add" }, diff: "+".repeat(bytes) }];
+    notify("item/started", { item: { id: "p1", type: "fileChange", status: "inProgress", changes: [] } });
+    notify("item/fileChange/patchUpdated", { itemId: "p1", changes: change(Math.floor(patchBytes / 2)) });
+    notify("item/fileChange/patchUpdated", { itemId: "p1", changes: change(patchBytes) });
+    notify("item/completed", { item: { id: "p1", type: "fileChange", status: "completed", changes: change(patchBytes) } });
+  }
   notify("item/completed", { item: { id: "i1", type: "commandExecution", status: "completed", aggregatedOutput: "README.md\nAPI_KEY=codex-output-secret", exitCode: 0 } });
   notify("item/completed", { item: { id: "w1", type: "webSearch", status: "completed" } });
   if (mode === "stream") {
-    // token deltas, then the whole message — the driver must not double-emit
     notify("item/agentMessage/delta", { itemId: "m1", delta: "done from " });
     notify("item/agentMessage/delta", { itemId: "m1", delta: "fake codex" });
   }
@@ -384,10 +336,6 @@ const finishTurn = () => {
     });
   }
   notify("item/completed", { item: { id: "m1", type: "agentMessage", text: "done from fake codex" } });
-  // `total` is the process so far, `last` the final model call. With
-  // FAKE_CODEX_RESTORED_USAGE the process already carried 100/50/10 before
-  // turn/start (a resumed thread restoring earlier usage), so the driver's
-  // per-turn figure must still come out as 7/4/3.
   const carried = process.env.FAKE_CODEX_RESTORED_USAGE ? { inputTokens: 100, cachedInputTokens: 50, outputTokens: 10 } : { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
   notify("thread/tokenUsage/updated", { tokenUsage: {
     total: { inputTokens: carried.inputTokens + 7, cachedInputTokens: carried.cachedInputTokens + 4, outputTokens: carried.outputTokens + 3 },
@@ -443,12 +391,10 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
 
-    // response to our own server->client request (approval decision)
     if ((msg.id === 100 || msg.id === 101) && (msg.result !== undefined || msg.error !== undefined)) {
       decision = msg.result ?? { error: msg.error };
       if ((mode === "question" || mode === "multi-question" || mode === "empty-question") && process.env.FAKE_CODEX_ASK_HOLD === "1") {
-        // Hold: completing the turn would start the driver's child-reap
-        // timers, which freeze on a test's fake clock.
+        // Completing the turn would start the driver's child-reap timers, which freeze on a fake clock.
         dump();
       } else {
         finishTurn();
@@ -459,9 +405,22 @@ process.stdin.on("data", (chunk) => {
     if (msg.method) calls.push({ method: msg.method, params: msg.params ?? null });
 
     switch (msg.method) {
-      case "initialize":
+      case "initialize": {
         experimentalApi = msg.params?.capabilities?.experimentalApi === true;
-        out({ jsonrpc: "2.0", id: msg.id, result: { ok: true } });
+        logStartup("initialize");
+        const reply = () => out({ jsonrpc: "2.0", id: msg.id, result: { ok: true } });
+        if (process.env.FAKE_CODEX_STARTUP_DELAY_MS) setTimeout(reply, Number(process.env.FAKE_CODEX_STARTUP_DELAY_MS));
+        else reply();
+        break;
+      }
+      case "thread/unarchive":
+        dump();
+        if (process.env.FAKE_CODEX_ARCHIVED === "unarchive-fails") {
+          out({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: `cannot unarchive session ${msg.params?.threadId}` } });
+          break;
+        }
+        unarchived = true;
+        out({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: msg.params?.threadId } } });
         break;
       case "account/read": {
         dump();
@@ -507,6 +466,7 @@ process.stdin.on("data", (chunk) => {
                 ...(process.env.FAKE_CODEX_LUNA === "1"
                   ? [{ id: "gpt-6-luna", displayName: "GPT-6 Luna", hidden: false, isDefault: false }]
                   : []),
+                ...(updated ? [{ id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", hidden: false, isDefault: false }] : []),
               ],
               nextCursor: "page-2",
             },
@@ -545,7 +505,6 @@ process.stdin.on("data", (chunk) => {
                 }),
               developer_instructions: process.env.FAKE_CODEX_INSTRUCTIONS ?? null,
               shell_environment_policy: shellEnvironmentPolicy(),
-              // `-c features.<name>=<bool>` overrides, as the real config/read reports them.
               features: Object.fromEntries(process.argv.flatMap((arg, index) => {
                 const match = process.argv[index - 1] === "-c" ? /^features\.(\w+)=(true|false)$/.exec(arg) : null;
                 return match && process.env.FAKE_CODEX_IGNORE_FEATURES !== "1" ? [[match[1], match[2] === "true"]] : [];
@@ -561,9 +520,14 @@ process.stdin.on("data", (chunk) => {
         resumedThread = msg.params?.threadId ?? null;
         if (process.env.FAKE_CODEX_RESUME_ERROR) {
           out({ jsonrpc: "2.0", id: msg.id, error: JSON.parse(process.env.FAKE_CODEX_RESUME_ERROR) });
+        } else if (process.env.FAKE_CODEX_ARCHIVED && !unarchived) {
+          const id = msg.params?.threadId;
+          out({ jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: `session ${id} is archived. Run \`codex unarchive ${id}\` to unarchive it first.` } });
+        } else if (process.env.FAKE_CODEX_ARCHIVED) {
+          threadReply({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: msg.params?.threadId }, sandbox: resolvedSandbox(msg.params ?? {}) } });
         } else if (msg.params?.permissions && (!experimentalApi || mode === "config-profile-unsupported")) {
           out({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "experimental API required for permissions" } });
-        } else if (mode === "resume" || mode === "review-events" || mode === "helper-events" || mode === "instructions-unsupported" || mode === "config-profile" || mode === "config-profile-unsupported" ||
+        } else if (mode === "resume" || mode === "review-events" || mode === "helper-events" || mode === "instructions-unsupported" || mode === "config-profile" || mode === "config-profile-unsupported" || mode === "async-question" ||
             (mode === "resume-then-missing" && !existsSync(process.env.FAKE_CODEX_STATE ?? ""))) {
           threadReply({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: msg.params?.threadId }, sandbox: resolvedSandbox(msg.params ?? {}) } });
         } else {
@@ -590,7 +554,7 @@ process.stdin.on("data", (chunk) => {
           refused("active turn is not steerable");
           break;
         }
-        if (process.env.FAKE_CODEX_STEER_HANG) break; // accepted, never answered
+        if (process.env.FAKE_CODEX_STEER_HANG) break;
         if (msg.params?.expectedTurnId !== nativeTurnId) {
           refused("active turn is not steerable");
           break;
@@ -600,8 +564,6 @@ process.stdin.on("data", (chunk) => {
       }
       case "turn/interrupt":
         dump();
-        // SILENT models a server that accepts stdin but never acts: the
-        // driver must escalate to a kill after its grace window.
         if (process.env.FAKE_CODEX_INTERRUPT_SILENT) break;
         out({ jsonrpc: "2.0", id: msg.id, result: {} });
         notify("turn/completed", { turn: { status: "interrupted" } });
@@ -609,13 +571,16 @@ process.stdin.on("data", (chunk) => {
       case "thread/start":
         dump();
         developerInstructions = msg.params?.developerInstructions ?? "";
+        if (process.env.FAKE_CODEX_MCP_FAILED) {
+          const name = process.env.FAKE_CODEX_MCP_FAILED;
+          out({ jsonrpc: "2.0", method: "mcpServer/startupStatus/updated", params: { threadId: null, name, status: "failed", error: `MCP client for \`${name}\` timed out after 30 seconds.`, failureReason: null } });
+        }
         if (process.env.FAKE_CODEX_START_ERROR) {
           out({ jsonrpc: "2.0", id: msg.id, error: JSON.parse(process.env.FAKE_CODEX_START_ERROR) });
         } else if (msg.params?.permissions && (!experimentalApi || mode === "config-profile-unsupported")) {
           out({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "experimental API required for permissions" } });
         } else if (process.env.FAKE_CODEX_MCP_START === "1") {
-          // Codex starts its MCP servers with the thread; a server that fails
-          // to start leaves the thread running without its tools.
+          // Codex starts MCP servers with the thread; one that fails leaves the thread without its tools.
           const reply = { jsonrpc: "2.0", id: msg.id, result: { thread: { id: "codex-thread-1" }, model: "fake-codex-model", sandbox: resolvedSandbox(msg.params ?? {}) } };
           void startMcpServers().then((startup) => { mcpStartup = startup; dump(); threadReply(reply); });
         } else {
@@ -624,12 +589,9 @@ process.stdin.on("data", (chunk) => {
         break;
       case "turn/start": {
         dump();
+        logStartup("turn/start");
         nativeThreadId = msg.params?.threadId ?? nativeThreadId;
-        // crash script for close-path retry tests: die before
-        // acknowledging turn/start. The launch count lives in a state
-        // FILE for the same reason as the TRANSIENTS script below; it
-        // must count only turn launches, not the catalog spawn during
-        // create(), which is why this sits here and not on initialize.
+        // Counts turn launches only, not the catalog spawn during create().
         if (process.env.FAKE_CODEX_LAUNCH_CRASHES && process.env.FAKE_CODEX_STATE) {
           let launched = 0;
           try {
@@ -650,12 +612,7 @@ process.stdin.on("data", (chunk) => {
           const kills = Number(process.env.FAKE_CODEX_LAUNCH_KILLS) || 0;
           writeFileSync(process.env.FAKE_CODEX_STATE, String(launched + 1));
           if (launched < kills) {
-            // signal death: transient-looking stderr, then SIGKILL. The
-            // driver must treat the signal itself as terminal and never
-            // classify its way into a retry off the stderr text. The kill
-            // is delayed a tick so the stderr write reaches the pipe, and
-            // turn/start is never acknowledged, keeping the death pre-ack
-            // like a real OOM or kill -9.
+            // The kill waits a tick so stderr reaches the pipe; turn/start stays unacknowledged.
             console.error("Error: connection reset by peer");
             setTimeout(() => process.kill(process.pid, "SIGKILL"), 15);
             break;
@@ -669,9 +626,6 @@ process.stdin.on("data", (chunk) => {
           const silent = Number(process.env.FAKE_CODEX_LAUNCH_SILENT) || 0;
           writeFileSync(process.env.FAKE_CODEX_STATE, String(launched + 1));
           if (launched < silent) {
-            // silent death: exit 1 before ack with no stderr at all. The
-            // driver must settle from what actually happened, never by
-            // digging into the lifetime stderr buffer for a retry excuse.
             process.exit(1);
           }
         }
@@ -690,15 +644,7 @@ process.stdin.on("data", (chunk) => {
           out({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "experimental API required for permissions" } });
           break;
         }
-        // Codex 0.160's ErrorNotification: {error: TurnError, willRetry}.
-        // Its own reconnects come first with willRetry: true; signin-refused
-        // replays an expired ChatGPT login (the 2026-10-07 report),
-        // auth-recovery a provider 401 after Codex tried to recover the
-        // sign-in, mcp-401 a tool's 401 inside an otherwise good turn, and
-        // legacy-error the bare {message} of Codex 0.144. key-401 replays a
-        // refused API key (a custom provider's, or an API-key login), and
-        // recovered-40x a recovery that succeeded before that failure,
-        // recovering-403 a 403 while the recovery is still unfinished.
+        // Codex 0.160's ErrorNotification is {error: TurnError, willRetry}; its reconnects come first with willRetry: true.
         if (mode === "retry-then-complete" || mode === "signin-refused") {
           out({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: nativeTurnId } } });
           for (let attempt = 1; attempt <= 5; attempt++) {
@@ -744,6 +690,32 @@ process.stdin.on("data", (chunk) => {
           notify("turn/completed", { turn: { status: "failed", error: { message: "stream disconnected before completion" } } });
           break;
         }
+        if (process.env.FAKE_CODEX_MISSING_BEARER && process.env.FAKE_CODEX_STATE) {
+          let launched = 0;
+          try {
+            launched = Number(readFileSync(process.env.FAKE_CODEX_STATE, "utf8")) || 0;
+          } catch {}
+          writeFileSync(process.env.FAKE_CODEX_STATE, String(launched + 1));
+          if (launched < (Number(process.env.FAKE_CODEX_MISSING_BEARER) || 0)) {
+            out({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: nativeTurnId } } });
+            const prompt = { type: "userMessage", id: "u1", content: msg.params?.input ?? [] };
+            notify("item/started", { item: prompt });
+            notify("item/completed", { item: prompt });
+            const said = "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses";
+            notify("error", { willRetry: true, error: { message: "Reconnecting... 1/5", codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } }, additionalDetails: said } });
+            const error = { message: said, codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 401 } }, additionalDetails: null };
+            notify("error", { willRetry: false, error });
+            notify("turn/completed", { turn: { status: "failed", error } });
+            break;
+          }
+        }
+        if (mode === "usage-limit") {
+          out({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: nativeTurnId } } });
+          const error = { message: "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 5:23 PM.", codexErrorInfo: "usageLimitExceeded", additionalDetails: null };
+          notify("error", { willRetry: false, error });
+          notify("turn/completed", { turn: { status: "failed", error } });
+          break;
+        }
         if (mode === "unauthorized") {
           out({
             jsonrpc: "2.0",
@@ -755,11 +727,7 @@ process.stdin.on("data", (chunk) => {
           });
           break;
         }
-        // transient-failure script for retry tests. FAKE_CODEX_TRANSIENTS is
-        // how many launches fail transiently; the launch count lives in a
-        // state FILE because child processes cannot mutate the parent's env.
-        // FAKE_CODEX_PARTIAL_FAILS makes the FIRST failing turn stream a text
-        // delta first, so the partial-output guard has something to see.
+        // FAKE_CODEX_TRANSIENTS launches fail transiently (count in FAKE_CODEX_STATE); FAKE_CODEX_PARTIAL_FAILS streams a delta first.
         if (process.env.FAKE_CODEX_TRANSIENTS && process.env.FAKE_CODEX_STATE) {
           let launched = 0;
           try {
@@ -784,11 +752,7 @@ process.stdin.on("data", (chunk) => {
         }
         if (process.env.FAKE_CODEX_ACK_CRASH) {
           out({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: nativeTurnId } } });
-          // Crash only once the test confirms the ack above was parsed
-          // (the env var is the gate file path). stderr that races ahead
-          // of the parsed ack gets reset as pre-output and the message
-          // assertion flakes (seen on windows-latest, where pipe delivery
-          // order varies).
+          // Crash only once the ack was parsed: on Windows pipe delivery order varies.
           void waitForGate(process.env.FAKE_CODEX_ACK_CRASH).then(() => {
             console.error("Error: connection reset by peer");
             process.exit(1);
@@ -796,16 +760,8 @@ process.stdin.on("data", (chunk) => {
           break;
         }
         if (process.env.FAKE_CODEX_EXIT_MID_TURN) {
-          // replay of the 2026-09-14 incident: a websocket 426 on stderr
-          // at turn start, output keeps flowing, and the process is then
-          // killed by a signal long after the stale line
           console.error("2026-09-14T20:24:19Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 426 Upgrade Required, url: ws://127.0.0.1:10100/v1/responses");
-          // Hold the stdout writes back until the test confirms the stale
-          // stderr above was read. If the driver parses stdout first, the
-          // stderr chunk lands after the last parse and the stale 426 is
-          // blamed at close — the same windows pipe-ordering flake class
-          // as ACK_CRASH above. The kill waits for its own gate so the
-          // delta is parsed before the close event fires.
+          // Hold stdout until the stale stderr was read, or it lands after the last parse (Windows pipe order).
           void waitForGate(process.env.FAKE_CODEX_EXIT_MID_TURN).then(() => {
             out({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: nativeTurnId } } });
             notify("item/reasoning/textDelta", { itemId: "m1", delta: "still thinking" });
@@ -823,8 +779,6 @@ process.stdin.on("data", (chunk) => {
         out({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: nativeTurnId } } });
         if (mode === "early-turn-events") break;
         if (mode === "helper-events") {
-          // Interleave child and stale-parent traffic with the active parent.
-          // A child completion must not kill the process or answer for the parent.
           for (const scope of [
             { threadId: "helper-thread", turnId: "helper-turn" },
             { threadId: nativeThreadId, turnId: "previous-turn" },
@@ -839,8 +793,6 @@ process.stdin.on("data", (chunk) => {
             notify("turn/completed", { ...scope, turn: { id: scope.turnId, status: "completed" } });
             notify("turn/completed", { ...scope, turn: { id: scope.turnId, status: "failed" } });
           }
-          // This request proves that the parent is still able to do work after
-          // the child finished. Wait for the real adapter approval response.
           out({ jsonrpc: "2.0", id: 100, method: "execCommandApproval", params: { command: "echo parent continues" } });
           break;
         }
@@ -940,8 +892,6 @@ process.stdin.on("data", (chunk) => {
           mode === "empty-question" ||
           mode === "malformed-question"
         ) {
-          // one card per ask: a single question vs a bundled pair vs a
-          // broken-plus-valid pair vs none vs a malformed shape
           out({
             jsonrpc: "2.0",
             id: 101,
@@ -968,13 +918,31 @@ process.stdin.on("data", (chunk) => {
                   ],
             },
           });
+        } else if (mode === "async-question") {
+          const item = {
+            type: "agentMessage",
+            id: "call_async_question",
+            text: "Which source should I use?\n- Directly in OpenMausBot\n- The official server in Executor",
+            phase: "final_answer",
+            memoryCitation: null,
+            delivery: "async",
+            questions: process.env.FAKE_CODEX_ASYNC_QUESTIONS
+              ? JSON.parse(process.env.FAKE_CODEX_ASYNC_QUESTIONS)
+              : [{ title: "Which source should I use?", options: ["Directly in OpenMausBot", "The official server in Executor"] }],
+          };
+          notify("item/started", { item, startedAtMs: Date.now() });
+          notify("item/completed", { item, completedAtMs: Date.now() });
+          const gate = process.env.FAKE_CODEX_ASYNC_QUESTION_GATE;
+          void waitForGate(gate, gate ? 15_000 : 300).then(() => {
+            dump();
+            finishTurn();
+          });
         } else if (mode === "approval" || mode === "windows-command") {
           const approvalCommand = mode === "windows-command" ? command : "rm -rf scratch";
           const approval = process.env.FAKE_CODEX_APPROVAL_REQUEST
             ? JSON.parse(process.env.FAKE_CODEX_APPROVAL_REQUEST)
             : { method: "execCommandApproval", params: { command: approvalCommand } };
           out({ jsonrpc: "2.0", id: 100, ...approval });
-          // turn continues from the approval response handler above
         } else {
           finishTurn();
           if (process.env.FAKE_CODEX_REVIEW_AFTER_COMPLETION) {

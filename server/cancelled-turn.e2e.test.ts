@@ -1,8 +1,3 @@
-// A client abort ends a turn as a quiet stop, end to end through a real
-// harness server and a scripted chat-completions provider: the text the turn
-// said before the stop is not its reply, the stop never raises an incident,
-// and a room's Retry resends the request the stopped turn answered, files
-// included.
 import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -83,7 +78,6 @@ it("keeps a client abort a quiet stop and retries the room request it stopped", 
   try {
     await api("PATCH", "/api/config", { openaiCompat: { key: "synthetic-fixture-key", url: `http://127.0.0.1:${address.port}/v1`, model: "fixture-model" } });
 
-    // ── a direct turn says something, reads its team, then the client aborts ──
     const { bot } = await control(["new-bot", "--name", "Stopper"]);
     await control(["set-model", "--bot", bot.id, "--instance", "openaiCompat", "--model", "fixture-model"]);
     await api("PATCH", `/api/bots/${bot.id}`, { notifications: true });
@@ -97,20 +91,14 @@ it("keeps a client abort a quiet stop and retries the room request it stopped", 
     const direct = await messages(bot.activeTaskId);
     expect(direct.filter((message) => message.tool?.name === STOPPED_TURN_NAME)).toHaveLength(1);
     expect(direct.some((message) => message.kind === "activity" && /cancelled by the client/i.test(message.tool?.name ?? ""))).toBe(false);
-    // The text before the stop stays in the transcript, but it is not the
-    // turn's reply: neither the digest nor the finished notification reads it.
     expect(direct.some((message) => message.kind === "text" && message.text === PARTIAL)).toBe(true);
     expect(direct.some((message) => message.card)).toBe(false);
     expect(JSON.stringify(digest.digest)).not.toContain(PARTIAL);
-    // "finished" with nothing said stays quiet (server/notify.ts).
     const notices = stream.frames.filter((candidate) => candidate.kind === "notify" && candidate.notification?.botId === bot.id);
     expect(notices.map((candidate) => candidate.notification.kind)).toEqual([]);
-    // The provider settled the turn as an error, but it was a stop: no
-    // incident buzzes the person or lands in a Chief's incidents thread.
     const bots = (await api("GET", "/api/bots")).bots as any[];
     expect(bots.flatMap((candidate) => candidate.tasks ?? []).some((task: any) => /incident/i.test(task.title ?? ""))).toBe(false);
 
-    // ── a room: a text request settles, then a request with a file stops ──
     const { group } = await api("POST", "/api/groups", {
       name: "Stop room", memberIds: [bot.id],
       setup: { bulletin: "", defaultResponder: { kind: "member", botId: bot.id } },
@@ -133,7 +121,6 @@ it("keeps a client abort a quiet stop and retries the room request it stopped", 
     expect(retry!.text).toContain(`path="${brief}"`);
     expect(retry!.text).not.toContain("Say hello first.");
 
-    // Resending it on the room's own path reaches the model with the file.
     const before = requests.length;
     await api("POST", `/api/groups/${group.id}/messages`, { text: retry!.text, threadId: group.threadId, mode: retry!.mode });
     await control(["wait", "--channel", group.id, "--timeout", "30"]);

@@ -17,8 +17,7 @@ export async function preparedBotTemplate(draft: BotCreationDraft) {
   return template;
 }
 
-/** Create only after the user commits. File setup and native consent finish
- * before Chief handover or routine activation can affect other work. */
+/** File setup and native consent finish before Chief handover or routine activation can affect other work. */
 export async function createConfiguredBot(
   draft: BotCreationDraft,
   request: typeof api = api,
@@ -29,9 +28,6 @@ export async function createConfiguredBot(
   const template = await preparedBotTemplate(draft);
   const { chiefOfStaff, managedSections, toolScope, ...profile } = template.profile;
   if (!profile.name?.trim()) throw new Error("Give the bot a name");
-  // The server adds a chosen preset's skills (switched on only for an
-  // organization's preset) and starter notes; for the same skill name or
-  // note file, the preset's wins over the draft's.
   const preset = draft.preset;
   const response = await request<{ bot: Bot }>("/api/bots", {
     method: "POST", body: JSON.stringify({ name: profile.name, title: profile.title,
@@ -44,16 +40,11 @@ export async function createConfiguredBot(
   const routines: Array<{ id: string; enabled: boolean }> = [];
   const warnings: string[] = [];
   try {
-    // The create endpoint already validated the chosen model and completed
-    // workspace effort defaults. Do not overwrite those with the raw draft.
+    // The create endpoint already validated the model and effort defaults; never overwrite them with the raw draft.
     const patched = await update(bot.id, { ...profile, modelSelection: bot.modelSelection, ...draft.consent }, new AbortController().signal,
       request, approvals, bot);
     bot = { ...bot, ...patched };
     if (profile.approvalMode === "full" || profile.approvalMode === "custom") {
-      // persistBotUpdate sets the bot default first. An initial thread is
-      // already present, so it takes the level in its own write: through the
-      // desktop's private bridge when there is one, over the API for Full
-      // when there is not (Custom cannot get this far without the bridge).
       if (patched.approvalMode !== profile.approvalMode) {
         throw new Error("The bot's requested approval level was not granted");
       }
@@ -92,9 +83,7 @@ export async function createConfiguredBot(
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(cleanup.length ? `${message}. Cleanup failed for ${cleanup.join(", ")}; remove them before retrying.` : message);
   }
-  // Creation is complete. Activation failures leave a visible, configured
-  // bot with paused routines; never delete a bot whose routine may have run,
-  // undo a Chief handover, or invite a duplicate creation retry.
+  // Creation is complete: never delete a bot whose routine may have run, undo a Chief handover, or invite a duplicate retry.
   if (chiefOfStaff) {
     try {
       const result = await request<{ bot: Bot }>(`/api/bots/${bot.id}`, {

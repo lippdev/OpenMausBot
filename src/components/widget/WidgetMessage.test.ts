@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// The desktop renderer for chat widgets: every sample draws, a tree this
-// build does not know still draws, and a press posts one widgetAction on the
-// send route (or nothing at all, for a link or an unfilled required field).
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +28,6 @@ const row = (root: WidgetRoot, more: Partial<WidgetPayload> = {}): Message => ({
 const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const fetchMock = vi.fn<(path: string, init?: RequestInit) => Promise<Response>>();
 const openExternal = vi.fn(async (_url: string) => {});
-/** The store's save of a bot's pending settings, which a press waits for. */
 const flushBotPatches = vi.fn<(botId: string) => Promise<null>>();
 const store = { state: {}, dispatch: vi.fn(), flushBotPatches } as unknown as ReturnType<typeof useStore>;
 const inStore = (message: Message) => createElement(BotEditorStore, { value: store, children: createElement(WidgetMessage, { botId: "scout", threadId: "t1", message }) });
@@ -47,7 +43,6 @@ const find = <T extends Element = HTMLElement>(selector: string) => host.querySe
 const all = <T extends Element = HTMLElement>(selector: string) => Array.from(host.querySelectorAll<T>(selector));
 const button = (label: string) => all<HTMLButtonElement>("button").find((element) => element.textContent?.trim() === label);
 const field = <T extends HTMLElement>(name: string) => find<T>(`[data-widget-field="${name}"]`)!;
-/** A press, and everything the answer to it sets off. */
 const press = (element: HTMLElement) => act(async () => { element.click(); });
 
 function type(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
@@ -58,7 +53,6 @@ function type(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   });
 }
 
-/** Open a TimePicker's list and take one of its times. The list is drawn over the page, outside the card. */
 function pickTime(name: string, time: string) {
   act(() => field<HTMLButtonElement>(name).click());
   const option = document.querySelector<HTMLElement>(`[role="option"][data-value="${time}"]`);
@@ -66,10 +60,8 @@ function pickTime(name: string, time: string) {
   act(() => option.click());
 }
 
-/** The days a DayPicker has on, in week order. */
 const daysOn = () => all<HTMLButtonElement>('[data-day][aria-pressed="true"]').map((day) => day.dataset.day);
 
-/** A form whose one required field starts empty. */
 function emptyTimeForm(): WidgetRoot {
   const parsed = parseWidgetInput({
     type: "Card", title: "When",
@@ -80,7 +72,6 @@ function emptyTimeForm(): WidgetRoot {
   return parsed.value;
 }
 
-/** What the one POST carried. */
 function posted(call = 0): { path: string; method?: string; body: Record<string, any> } {
   const [path, init] = fetchMock.mock.calls[call]!;
   return { path, method: init?.method, body: JSON.parse(String(init?.body)) };
@@ -114,7 +105,6 @@ describe("drawing a widget", () => {
     expect(markup).toContain('data-widget="w1"');
     mount(message);
     expect(find('[data-widget="w1"]')!.getAttribute("data-widget-state")).toBe("live");
-    // every action the widget offers is on the page, under its own ref
     for (const entry of widgetActions(message.widget!.root)) expect(find(`[data-widget-ref="${entry.ref}"]`), entry.label).not.toBeNull();
     expect(warned).not.toHaveBeenCalled();
   });
@@ -131,7 +121,6 @@ describe("drawing a widget", () => {
       "Android: thread pin parity#739 · 2 files · passed 5h agoReady",
       "iOS: file links, send, attach#719 · 9 files · 1 test failingFailing",
     ]);
-    // the status is a dot and a plain label; the icon in front is the 40px thumbnail
     expect(rows[0]!.querySelector(".size-\\[7px\\].bg-success")).not.toBeNull();
     expect(rows[2]!.querySelector(".size-\\[7px\\].bg-danger")).not.toBeNull();
     expect(rows[0]!.firstElementChild!.className).toContain("size-10");
@@ -181,6 +170,7 @@ describe("drawing a widget", () => {
   it("falls back to the row's text when there is no tree to draw", () => {
     mount({ id: "w1", role: "bot", kind: "widget", at: 1, text: "the readable fallback" });
     expect(host.textContent).toBe("the readable fallback");
+    expect(host.querySelector(".chat-text")?.className).toContain("max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct))]");
     expect(find("[data-widget]")).toBeNull();
   });
 
@@ -249,7 +239,6 @@ describe("drawing a widget", () => {
     expect(field("email").getAttribute("aria-label")).toBe("you@example.com");
     expect(find('[role="radiogroup"]')!.getAttribute("aria-label")).toBe("Plan");
     await press(button("Save")!);
-    // the sentence the server would give: a field with no Label node goes by its name
     expect(find('[role="alert"]')!.textContent).toBe(t("widget.required", { label: "email" }));
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -259,7 +248,6 @@ describe("drawing a widget", () => {
     const report = field<HTMLSelectElement>("report");
     expect(all<HTMLLabelElement>("label").find((label) => label.textContent === "Report to")!.htmlFor).toBe(report.id);
     expect(report.getAttribute("aria-label")).toBe("Report to");
-    // a group of days goes by its Label's words, and a click on them picks no day
     expect(find('[role="group"][aria-label="Runs on"]')).not.toBeNull();
     expect(all<HTMLLabelElement>("label").find((label) => label.textContent === "Runs on")!.htmlFor).toBe("");
     const at = field<HTMLButtonElement>("at");
@@ -269,8 +257,8 @@ describe("drawing a widget", () => {
     expect(field<HTMLInputElement>("starts").type).toBe("date");
     expect(field<HTMLInputElement>("starts").min).toBe("2026-10-13");
     expect(field<HTMLInputElement>("stopOnRed").checked).toBe(true);
-    // the offered options, and a resting line that cannot be chosen again
-    expect(Array.from(report.options).map((option) => option.value)).toEqual(["", "discord:releases", "chat"]);
+    expect(Array.from(report.options).map((option) => option.value).slice(0, 3)).toEqual(["", "discord:releases", "chat"]);
+    expect(Array.from(report.options).map((option) => option.textContent).slice(3)).toEqual([t("question.other")]);
     expect(report.options[0]!.disabled).toBe(true);
     expect(report.value).toBe("");
   });
@@ -298,7 +286,6 @@ describe("a settled widget", () => {
     const controls = all<HTMLInputElement | HTMLSelectElement>("[data-widget-field]");
     expect(controls.length).toBe(5);
     expect(controls.every((control) => control.disabled)).toBe(true);
-    // no action row under a settled card
     expect(find('[data-widget-ref="confirm"]')).toBeNull();
     expect(find('[data-widget-ref="cancel"]')).toBeNull();
 
@@ -317,7 +304,6 @@ describe("a settled widget", () => {
     expect(field<HTMLInputElement>("stopOnRed").checked).toBe(false);
     expect(all<HTMLInputElement>("[data-widget-field]").every((control) => control.disabled)).toBe(true);
 
-    // a record with no values (an older row) still shows the card, at its defaults
     mount(row(sample("routineForm"), { settled: { ref: "confirm", label: "Create routine", tone: "confirm", at: 2 } }));
     expect(daysOn()).toEqual(["mon", "tue", "wed", "thu", "fri"]);
     expect(field<HTMLInputElement>("stopOnRed").checked).toBe(true);
@@ -353,7 +339,6 @@ describe("pressing", () => {
     });
     expect("text" in body).toBe(false);
 
-    // on its way: the pressed button spins and nothing takes input
     const card = find('[data-widget="w1"]')!;
     expect(card.getAttribute("aria-busy")).toBe("true");
     expect(card.getAttribute("data-widget-state")).toBe("sending");
@@ -365,13 +350,11 @@ describe("pressing", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(find('[data-ask-card="settled"]')).toBeNull();
 
-    // the server takes it: the tick line is drawn from what was pressed, with no new message prop
     await act(async () => { answer(reply(200, { ok: true })); });
     const line = find('[data-ask-card="settled"]')!;
     expect(line.textContent).toBe(`Create routine${t("question.details")}`);
     expect(line.querySelector("svg.lucide-check")).not.toBeNull();
     expect(find("[data-widget]")).toBeNull();
-    // and Details shows what was sent, read-only
     act(() => button(t("question.details"))!.click());
     expect(daysOn()).toEqual(["mon", "tue", "wed", "thu", "fri", "sat"]);
     expect(field<HTMLButtonElement>("at").value).toBe("08:30");
@@ -379,8 +362,6 @@ describe("pressing", () => {
     expect(all<HTMLInputElement>("[data-widget-field]").every((control) => control.disabled)).toBe(true);
     expect(find('[data-widget-ref="confirm"]')).toBeNull();
 
-    // the `message.patch` frame then replaces what was drawn here, with the server's own record
-    // (an older record wrote the time without its leading zero; it reads the same)
     mount(row(sample("routineForm"), { settled: { ref: "confirm", label: "Create routine", tone: "confirm", at: 2, values: { days: "mon,tue,wed,thu,fri,sat", starts: "2026-10-14", at: "8:30", report: "", stopOnRed: false } } }));
     expect(find('[data-ask-card="settled"]')!.textContent).toContain("Create routine");
     expect(field<HTMLButtonElement>("at").value).toBe("08:30");
@@ -391,10 +372,8 @@ describe("pressing", () => {
     mount(row(sample("pullRequests")));
     await press(button("Merge the two ready")!);
     expect(find('[data-ask-card="settled"]')).not.toBeNull();
-    // the patch frame: settled, waiting in the queue
     mount(row(sample("pullRequests"), { settled: { ref: "confirm", label: "Merge the two ready", tone: "confirm", at: 2, queueId: "q1" } }));
     expect(find('[data-ask-card="settled"]')).not.toBeNull();
-    // the person cancels the queued message: the row is patched back to live
     mount(row(sample("pullRequests")));
     expect(find('[data-ask-card="settled"]')).toBeNull();
     expect(button("Merge the two ready")!.disabled).toBe(false);
@@ -407,19 +386,16 @@ describe("pressing", () => {
     mount(row(sample("pullRequests")));
     await press(button("Merge the two ready")!);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    // the server patches the row before it answers the POST
     mount(row(sample("pullRequests"), queued));
     expect(find('[data-ask-card="settled"]')).not.toBeNull();
     await act(async () => { answer(reply(200, { ok: true, queued: true, queueId: "q1" })); });
     expect(find('[data-ask-card="settled"]')).not.toBeNull();
-    // the person cancels the queued press: the row is patched back to live, and so is the card
     mount(row(sample("pullRequests")));
     expect(find('[data-ask-card="settled"]')).toBeNull();
     expect(find('[data-widget="w1"]')!.getAttribute("data-widget-state")).toBe("live");
     expect(button("Merge the two ready")!.disabled).toBe(false);
     expect(button("Fix #719 first")!.disabled).toBe(false);
 
-    // even when the answer is the last of the three to land
     fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { answer = resolve; }));
     await press(button("Merge the two ready")!);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -429,7 +405,6 @@ describe("pressing", () => {
     expect(find('[data-ask-card="settled"]')).toBeNull();
     expect(button("Merge the two ready")!.disabled).toBe(false);
 
-    // and the reopened card still folds on its next press
     await press(button("Fix #719 first")!);
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(find('[data-ask-card="settled"]')!.textContent).toContain("Fix #719 first");
@@ -458,7 +433,6 @@ describe("pressing", () => {
     if (!parsed.ok) throw new Error(parsed.error);
     const [outer, inner] = widgetActions(parsed.value);
     mount(row(parsed.value));
-    // a row that holds either is not a real button around them
     const outerRow = find(`[data-widget-ref="${outer!.ref}"]`)!;
     expect(outerRow.tagName).toBe("DIV");
     expect(outerRow.getAttribute("role")).toBe("button");
@@ -469,12 +443,11 @@ describe("pressing", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(posted().body.widgetAction.ref).toBe(inner!.ref);
 
-    // the link is the browser's to follow (stopped here, so the test opens nothing): the row sends nothing
+    // Stopped here so the test opens nothing; following the link is the browser's job.
     host.addEventListener("click", (event) => { if ((event.target as Element).closest("a")) event.preventDefault(); });
     await press(outerRow.querySelector<HTMLAnchorElement>("a")!);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    // the row's own ground is still the row's press
     await act(async () => { outerRow.click(); });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(posted(1).body.widgetAction.ref).toBe(outer!.ref);
@@ -491,11 +464,9 @@ describe("pressing", () => {
     await enter();
     expect(openExternal).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
-    // pressing the button itself is the person's own choice, and still opens it
     await press(button("Search the web")!);
     expect(openExternal).toHaveBeenCalledWith("https://example.com/search");
 
-    // with a real submit beside it, Enter presses that one
     openExternal.mockClear();
     const both = parseWidgetInput({ type: "Card", children: [{ type: "Form", onSubmitAction: { type: "q.ask" }, children: [{ type: "Input", name: "q", defaultValue: "widgets" }, link, { type: "Button", label: "Ask", submit: true }] }] });
     if (!both.ok) throw new Error(both.error);
@@ -527,7 +498,6 @@ describe("pressing", () => {
     expect(document.activeElement).toBe(at);
     expect(find('[data-widget="w1"]')!.getAttribute("data-widget-state")).toBe("live");
 
-    // filling it clears the mark, and the press goes
     pickTime("at", "09:00");
     expect(at.getAttribute("aria-invalid")).toBeNull();
     expect(find('[role="alert"]')).toBeNull();
@@ -539,7 +509,6 @@ describe("pressing", () => {
     mount(row(emptyTimeForm()));
     await press(button("Never mind")!);
     expect(posted().body).toEqual({ threadId: "t1", sendId: expect.any(String), widgetAction: { messageId: "w1", ref: "cancel", rev: 0 } });
-    // a cancel settles too: the line folds with a cross
     const line = find('[data-ask-card="settled"]')!;
     expect(line.textContent).toContain("Never mind");
     expect(line.querySelector("svg.lucide-x")).not.toBeNull();
@@ -551,7 +520,6 @@ describe("pressing", () => {
     expect(link.title).toBe("https://developers.openai.com/api/docs/guides/chatkit-widgets");
     await press(link);
     expect(openExternal).toHaveBeenCalledWith("https://developers.openai.com/api/docs/guides/chatkit-widgets");
-    // a row with no action is not a button at all
     expect(all('[role="listitem"]')[1]!.querySelector("button")).not.toBeNull();
     act(() => button("Show all (3)")!.click());
     expect(all('[role="listitem"]')[2]!.querySelector("button, [role=button]")).toBeNull();
@@ -559,6 +527,19 @@ describe("pressing", () => {
     mount(row(sample("kitchenSink")));
     await press(button("Open the docs")!);
     expect(openExternal).toHaveBeenLastCalledWith("https://mausbot.com/docs");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("opens a published page's open_url in the bot's browser panel in the desktop app, and posts nothing", async () => {
+    const PAGE = "https://abcdefghijklmnopqrstuvwxyz.mausbot.page/";
+    const dispatch = vi.fn();
+    const withBrowser = { ...store, dispatch, state: { selectedId: "scout", bots: [{ id: "scout" }], groups: [], config: { features: { browser: true }, browserEngine: { kind: "engine" } } } } as unknown as ReturnType<typeof useStore>;
+    const parsed = parseWidgetInput({ type: "Card", children: [{ type: "Button", label: "Open page", onClickAction: { type: "open_url", payload: { url: PAGE } } }] });
+    if (!parsed.ok) throw new Error(parsed.error);
+    act(() => root.render(createElement(BotEditorStore, { value: withBrowser, children: createElement(WidgetMessage, { botId: "scout", threadId: "t1", message: row(parsed.value) }) })));
+    await press(button("Open page")!);
+    expect(dispatch.mock.calls).toEqual([[{ type: "toggleComputer", open: true }]]);
+    expect(openExternal).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -625,19 +606,16 @@ describe("pressing", () => {
   });
 
   it("names the revision a press was made on, and starts the card again when the tree is replaced", async () => {
-    // an updated widget: the press carries its revision
     mount(row(sample("kitchenSink"), { rev: 3 }));
     type(find<HTMLTextAreaElement>("textarea")!, "Typed on revision 3");
     await press(button("Ask me later")!);
     expect(posted().body.widgetAction.rev).toBe(3);
     expect(button("Ask me later")!.querySelector("svg.lucide-check")).not.toBeNull();
-    // update_widget replaces the tree: what was typed and the sent tick belonged to the old one
     mount(row(sample("kitchenSink"), { rev: 4 }));
     expect(find<HTMLTextAreaElement>("textarea")!.value).toBe("");
     expect(button("Ask me later")!.querySelector("svg.lucide-check")).toBeNull();
     expect(find('[role="status"]')!.textContent).toBe("");
 
-    // a line folded ahead of the patch frame does not outlive its tree either
     mount(row(sample("routineForm")));
     pickTime("at", "06:00");
     await press(button("Create routine")!);
@@ -647,7 +625,6 @@ describe("pressing", () => {
     expect(find('[data-widget="w1"]')!.getAttribute("data-widget-state")).toBe("live");
     expect(field<HTMLButtonElement>("at").value).toBe("09:00");
     expect(button("Create routine")!.disabled).toBe(false);
-    // the same revision redrawn (any other patch of the row) keeps what the card holds
     pickTime("at", "07:00");
     mount(row(sample("routineForm"), { rev: 1 }));
     expect(field<HTMLButtonElement>("at").value).toBe("07:00");
@@ -668,7 +645,6 @@ describe("pressing", () => {
     flushBotPatches.mockImplementationOnce(() => new Promise((resolve) => { saved = () => resolve(null); }));
     mount(row(sample("pullRequests")));
     await press(find<HTMLButtonElement>('[role="listitem"] > button')!);
-    // locked and waiting on the save: nothing has gone to the send route yet
     expect(flushBotPatches).toHaveBeenCalledWith("scout");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(find('[data-widget="w1"]')!.getAttribute("data-widget-state")).toBe("sending");
@@ -703,7 +679,6 @@ describe("pressing", () => {
       holder.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     });
     expect(posted().body.widgetAction.ref).toBe(parsed.value.children![0]!.id);
-    // the button inside it is its own press, not the row's
     await press(button("More")!);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(posted(1).body.widgetAction.ref).toBe(widgetActions(parsed.value).find((entry) => entry.label === "More")!.ref);

@@ -1,17 +1,4 @@
-// Around every bot browser call: what the page reported (every bot), and for
-// a bot set to Record browser steps, a step with its screenshot, target box,
-// page and timing (browser-evidence.ts). BrowserRuntime calls before() and
-// after() inside the call's lane, so no other call of the same browser can
-// clear its lists or move its page in between; everything here goes over the
-// engine's loopback relay (browser-relay.ts) and never launches a browser.
-//
-// Per action, for every bot: a probe, three reads and two clears before
-// (what happened since the previous call, then the console and request lists
-// are emptied), a probe and four reads after: eleven round trips of about
-// 1 ms. A read such as a snapshot takes a probe before and five after. A
-// recording bot's action also reads the page's geometry and its target's box
-// before, waits for the action's own page load or POST (at most 1.5 s) and
-// one animation frame, reads the geometry again and takes one JPEG.
+// before() and after() run inside the call's lane, so no other call clears its lists or moves its page between them.
 import { join } from "node:path";
 import { readFileSync, unlinkSync } from "node:fs";
 
@@ -25,19 +12,15 @@ import {
 import { RelayPorts, RelayTimeout, relay, relayPorts, relayTarget, type RelayTarget } from "./browser-relay.ts";
 import type { BrowserSpawnSpec } from "./browser-runtime.ts";
 import { sanitizeUrl, scrubBrowserResult } from "./browser-tool-shape.ts";
+import { browserEgress } from "./browser/egress/registry.ts";
 
-/** Who a call works for, from the turn's capability. */
 export interface StepContext {
   botId: string;
   botName: string;
   threadId: string;
   generation: string;
-  /** The provider's turn id, once the engine has named it. */
   turnId: () => string | null;
-  /** The bot is set to Record browser steps. */
   record: boolean;
-  /** A caller's own words for what the step did, in place of the label
-   * made from the tool call. */
   label?: string;
 }
 
@@ -45,7 +28,6 @@ export function stepContext(bot: { id: string; name: string; recordBrowserSteps?
   return { botId: bot.id, botName: bot.name, threadId: turn.threadId, generation: turn.generation, turnId, record: bot.recordBrowserSteps === true };
 }
 
-/** One bot call as the runtime hands it over. */
 export interface StepCall {
   session: string;
   spec: BrowserSpawnSpec;
@@ -54,31 +36,25 @@ export interface StepCall {
   ctx?: StepContext;
   /** A person took the browser, or it became uncertain or is closing: capture nothing more. */
   stopped(): boolean;
-  /** The turn is still the current one. */
   alive(): boolean;
-  /** Size the page again, after a browser was started under this call. */
   resize(): Promise<void>;
 }
 
 export interface Box { x: number; y: number; w: number; h: number }
 export interface Marker extends Box { approx?: true }
 
-/** `frame`: the focus is inside a same-origin frame (its rect is the
- * frame's), or a cross-origin frame no page script can see into. */
+/** `frame`: focus is inside a same-origin frame (rect is the frame's) or a cross-origin one no page script can see into. */
 interface Focus { role: string; name: string; editable: boolean; valueLength: number; secret: boolean; rect: Box; frame?: "same" | "cross" | null }
 export interface Geometry { url: string; title: string; vw: number; vh: number; dpr: number; sx: number; sy: number; focus: Focus | null; unmasked: number; loadedAt?: number }
 
 interface StepState {
   startedAt: number;
-  /** When the engine got the action, after the reads before it: what the
-   * engine stamps later (it stamps requests as it drains its events) is the action's. */
+  /** When the engine got the action: whatever it stamps later is the action's. */
   actionAt: number;
   action: boolean;
   recorded: boolean;
   aliveBefore: boolean | null;
-  /** No daemon answered for this session before the call: its lists, when
-   * one runs after, hold only this call's news. A daemon that outlived its
-   * Chrome (or this server) keeps its old lists. */
+  /** No daemon answered before the call, so its lists hold only this call's news (a daemon that outlived Chrome keeps old ones). */
   noDaemon: boolean;
   wasRunning: boolean;
   late: HealthDelta | null;
@@ -87,21 +63,14 @@ interface StepState {
   target: { selector: string; role?: string; name?: string; inFrame: boolean } | null;
 }
 
-/** Calls that change the page: their lists are emptied first, so what the
- * page reports after is theirs. */
 const ACTIONS = new Set(["open", "click", "fill", "type", "press", "check", "uncheck", "select", "scroll", "back", "forward", "reload", "tab_new", "tab_switch", "tab_close", "eval", "close"]
   .map((name) => `agent_browser_${name}`));
-/** Calls after which the engine's refs no longer name what the bot saw. */
 const REFS_RESET = new Set(["open", "tab_new", "tab_switch", "tab_close", "close"].map((name) => `agent_browser_${name}`));
 
 const PASS_MS = 1_000;
 const SETTLE_CAP_MS = 1_500;
 const FRAME_WAIT_MS = 300;
-/** Full Chrome headless on macOS (Chrome for Testing 152) sometimes stalls
- * 10-20 s or more on a fresh browser's first capture: 1-2 of 8 browsers,
- * directly over CDP too; later captures take 30-100 ms. The bundled headless
- * shell (12 browsers) and Linux Chrome for Testing in the Docker image (20)
- * never did. Waiting 12 s keeps the picture when the stall ends in time. */
+/** Headless full Chrome on macOS (Chrome for Testing 152) sometimes stalls 10-20 s on a fresh browser's first capture. */
 const SCREENSHOT_MS = 12_000;
 const JPEG_QUALITY = 70;
 const CODE_LATCH_MS = 60_000;
@@ -109,13 +78,7 @@ const FRESH_IMAGE_MS = 2_000;
 
 const RELAUNCHED = "The browser had stopped and was started again during this call: pages, refs and form input from before are gone. Take a snapshot before acting on refs.";
 
-/** Read-only: the page's address, size, scroll, the focused element (its
- * role, label and how much it holds, never its value; through open shadow
- * roots and same-origin frames), and how many secret fields on screen show
- * what they hold, in the page, its open shadow roots and its same-origin
- * frames. A cross-origin frame is out of a page script's reach: the focus
- * stops at it (`frame: "cross"`), and typing into a secret-looking field
- * there pauses screenshots for the page instead (SessionSteps.secretPage). */
+/** Read-only; reports how much the focused element holds, never its value. A cross-origin frame stops the focus walk. */
 export const GEOMETRY_SCRIPT = `(() => {
   const SECRET = /pass|pwd|otp|one.?time|2fa|mfa|security.?code|verif\\w*.?code|cvc|cvv|card.?num|cc.?num/i;
   const AUTO = /(?:^|\\s)(?:current-password|new-password|one-time-code|cc-number|cc-csc)(?:\\s|$)/i;
@@ -179,12 +142,8 @@ export const GEOMETRY_SCRIPT = `(() => {
   return JSON.stringify({ url: location.href, title: document.title, vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio, sx: scrollX, sy: scrollY, focus, unmasked, loadedAt: performance.timeOrigin });
 })()`;
 
-/** Read-only: the page's address, and when its document loaded (a reload of
- * the same address is a new visit). */
 const PAGE_SCRIPT = "JSON.stringify({ url: location.href, loadedAt: performance.timeOrigin })";
 
-/** Waits for the page to paint what the action changed: two animation
- * frames, or 250 ms in the page, whichever comes first. */
 const FRAME_SCRIPT = "new Promise((r) => { const t = setTimeout(() => r(0), 250); requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); r(1); })); })";
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -214,19 +173,13 @@ function parseGeometry(value: unknown): Geometry | null {
   };
 }
 
-/** Where a page is, for telling a new address from the same one: origin,
- * path and query, never the fragment. */
 function pageKey(href: string): string | null {
   try { const url = new URL(href); return `${url.origin}${url.pathname}${url.search}`; } catch { return null; }
 }
 
-/** The engine's refs as the bot last saw them: role, name, and whether the
- * element sits inside an iframe (whose boxes are frame-relative). */
 export class RefIndex {
   private refs = new Map<string, { role: string; name: string; inFrame: boolean }>();
 
-  /** From a snapshot: its text (for iframe nesting) and, when the engine
-   * gave one, its `refs` map (exact roles and names). */
   replace(texts: readonly string[], refs?: unknown): void {
     this.refs.clear();
     const frames: number[] = [];
@@ -238,7 +191,7 @@ export class RefIndex {
         while (frames.length && frames.at(-1)! >= indent) frames.pop();
         const ref = /\[ref=(e\d+)\]/u.exec(line)?.[1];
         let name = item[3] ?? "";
-        try { name = JSON.parse(`"${name}"`) as string; } catch { /* keep it as written */ }
+        try { name = JSON.parse(`"${name}"`) as string; } catch {}
         if (ref) this.refs.set(ref, { role: item[2]!, name, inFrame: frames.length > 0 });
         if (item[2]!.toLowerCase() === "iframe") frames.push(indent);
       }
@@ -261,9 +214,7 @@ export class RefIndex {
 
 const SECRET_TARGET = /pass|pwd|otp|one.?time|2fa|mfa|security.?code|verif\w*.?code|cvc|cvv|card.?num|cc.?num|\bpin\b|ssn|secret|token/iu;
 
-/** What a step did, in plain words for a person reading a report. Page
- * names are quoted and capped; typed text is scrubbed of held secrets and
- * masked outright for any field that looks secret. */
+/** Typed text is scrubbed of held secrets and masked outright for any field that looks secret. */
 export function stepLabel(tool: string, args: Record<string, unknown>, ref?: { role: string; name: string }, focus?: Focus | null): string {
   const q = (text: unknown) => JSON.stringify(sanitizePageText(String(text ?? ""), 80));
   const selector = typeof args.selector === "string" ? args.selector : "";
@@ -300,13 +251,7 @@ export function stepLabel(tool: string, args: Record<string, unknown>, ref?: { r
   }
 }
 
-/** Where on the screenshot the target was, in image pixels. A box read
- * before the action is in the page's coordinates then: it stands as read
- * when the window did not scroll, moves with the page when it did (marked
- * approximate), and is left out when an inner panel must have scrolled to
- * it, the page navigated, or the element sits in an iframe. Never a box read
- * after the action: the engine may resolve the ref to another element by
- * then. */
+/** Only a box read before the action counts: afterwards the engine may resolve the ref to another element. */
 export function markerFor(box: Box | null, before: Geometry | null, after: Geometry | null, options: { navigated: boolean; inFrame: boolean }): { marker: Marker | null; why: string | null } {
   if (!box) return { marker: null, why: "no-target" };
   if (options.navigated) return { marker: null, why: "navigated" };
@@ -331,33 +276,24 @@ export function markerFor(box: Box | null, before: Geometry | null, after: Geome
   return { marker: approx ? { ...marker, approx: true } : marker, why: null };
 }
 
-/** The focus a step's label names: where it was before the call (a key
- * press goes there), else where the call left it. Secret when either one
- * looks secret: typing lands in the field the call named, which may only have
- * taken the focus during the call. */
+/** Secret when either focus looks secret: typing lands in the field the call named, which may only have taken focus during it. */
 function labelFocus(before: Focus | null, after: Focus | null): Focus | null {
   const focus = before ?? after;
   return focus && !focus.secret && after?.secret ? { ...focus, secret: true } : focus;
 }
 
 interface SessionSteps {
-  /** The browser was up at the end of the last call, and not closed on purpose since. */
   running: boolean;
   refs: RefIndex;
-  /** After fill_login typed a one-time code: no screenshot until this time,
-   * or until the page leaves `codeUrl` (pageKey; null: not known, so any page). */
+  /** After fill_login typed a one-time code: no screenshot until this time or until the page leaves `codeUrl`. */
   codeUntil: number;
   codeUrl: string | null;
-  /** The bot typed into a secret-looking field inside a frame, whose value
-   * this page's scripts cannot see (a card number in a payment provider's
-   * frame): no screenshot until the page leaves this address (pageKey). */
+  /** Typed into a secret-looking field in a cross-origin frame (a card field): no screenshot until the page leaves this address. */
   secretPage: string | null;
-  /** The last step's screenshot, which a preview frame reuses while fresh. */
   image: { path: string; at: number } | null;
 }
 
-/** A step as kept: held secrets and anything shaped like a key out of
- * every text in it (a page's title, console line or label can echo them). */
+/** Held secrets and key-shaped text out of every text in a step: a title, console line or label can echo them. */
 function clean(entry: StepRecord): StepRecord {
   const { v, step, at, threadId, generation, image, botId, turnId, ...rest } = entry;
   return { ...(scrubBrowserResult(rest, redactSecretsInText) as Record<string, unknown>), v, step, at, threadId, generation, image, botId, turnId };
@@ -368,7 +304,6 @@ function textsOf(result: unknown): string[] {
   return Array.isArray(content) ? content.flatMap((part) => typeof record(part)?.text === "string" ? [record(part)!.text as string] : []) : [];
 }
 
-/** The engine's own answer inside an MCP result, when it carries one. */
 function engineData(result: unknown): Record<string, unknown> | null {
   return record(record(record(record(result)?.structuredContent)?.response)?.data);
 }
@@ -400,19 +335,13 @@ export class BrowserSteps {
 
   refs(session: string): RefIndex { return this.session(session).refs; }
 
-  /** The picture the session's last recorded step took, while under two
-   * seconds old: the preview frame right after a recorded action is that
-   * step's screenshot, one capture rather than two (BrowserRuntime.previewFrame). */
   recentFrame(session: string): { png: string; format: "jpeg" } | null {
     const image = this.sessions.get(session)?.image;
     if (!image || this.now() - image.at >= FRESH_IMAGE_MS) return null;
     try { return { png: readFileSync(image.path).toString("base64"), format: "jpeg" }; } catch { return null; }
   }
 
-  /** A relayed read inside a budget: each read at most one second, all of
-   * them at most `budgetMs`. A timeout trips the session's breaker. A read
-   * that found Chrome gone started it again (the engine relaunches for any
-   * command outside its launch-free list): the call says so. */
+  /** Each read ≤ 1 s, all ≤ budgetMs; a timeout trips the breaker. agent-browser relaunches Chrome for any command outside its launch-free list. */
   private reader(target: RelayTarget, port: number, budgetMs = PASS_MS): RelayRead {
     const deadline = this.now() + budgetMs;
     return async (command) => {
@@ -431,14 +360,9 @@ export class BrowserSteps {
 
   private target(call: { session: string; spec: SessionSpec }): RelayTarget { return relayTarget(call.spec, call.session); }
 
-  /** Before the engine runs the call: whether the browser is up (every
-   * call, so a call that starts one is known), and for an action what the
-   * page reported since the previous call, after which its console and
-   * request lists are emptied; a recording bot's action also reads the
-   * page's geometry and its target's box. Never throws. */
+  /** Never throws. */
   async before(call: StepCall): Promise<StepState> {
     const steps = this.session(call.session);
-    // Any call may change the page: the last step's picture no longer shows it.
     steps.image = null;
     const state: StepState = {
       startedAt: this.now(), actionAt: 0, action: ACTIONS.has(call.tool), recorded: call.ctx?.record === true && ACTIONS.has(call.tool),
@@ -464,18 +388,14 @@ export class BrowserSteps {
         const x = finite(box?.x), y = finite(box?.y), w = finite(box?.width), h = finite(box?.height);
         if (x !== null && y !== null && w !== null && h !== null) state.box = { x, y, w, h };
       } else if (call.tool === "agent_browser_press" && state.geometry?.focus && !state.geometry.focus.frame) {
-        // The focused element's box; one inside a frame has the frame's coordinates.
         state.box = state.geometry.focus.rect;
       }
-    } catch { /* evidence is best effort; the call goes on */ }
+    } catch {}
     finally { state.actionAt = this.now(); }
     return state;
   }
 
-  /** After the engine answered: the parts to append to the bot's result
-   * (what the page reported, a relaunch, the step number), and whether a
-   * browser was started under this call. Never throws. A person who takes
-   * the browser meanwhile ends it at the next check, never after the wait. */
+  /** Never throws; a person who takes the browser meanwhile ends it at the next check. */
   async after(call: StepCall, result: unknown, state: StepState, engineMs = 0): Promise<{ parts: Array<{ type: "text"; text: string }>; launched: boolean }> {
     const out: { parts: Array<{ type: "text"; text: string }>; launched: boolean } = { parts: [], launched: false };
     const steps = this.session(call.session);
@@ -489,6 +409,7 @@ export class BrowserSteps {
       if (ok && tool === "agent_browser_screenshot" && call.args.annotate === true) steps.refs.clear();
       if (ok && tool === "agent_browser_close") {
         steps.running = false;
+        browserEgress.takeNotice(call.session);
         this.health.forget(call.session);
         this.ports.forget(call.session);
         if (state.recorded) await this.write(call, state, { ok, imageSkipped: "no-browser", engineMs });
@@ -498,9 +419,6 @@ export class BrowserSteps {
       const target = this.target(call);
       const probe = await this.ports.probe(target);
       const aliveAfter = probe ? probe.connected : null;
-      // A browser started under this call: a first launch the sizing step
-      // did not do, a reopen after the bot closed it, or a Chrome or daemon
-      // that died, started again by the call or by a read around it.
       const engineStarted = record(engineData(result)?.lifecycle)?.launched === true;
       const startedElsewhere = this.ports.takeStarted(call.session);
       if ((aliveAfter === true && state.aliveBefore === false) || engineStarted || startedElsewhere) {
@@ -531,26 +449,23 @@ export class BrowserSteps {
       }
       const page = geometry ?? parseGeometry((await read({ action: "evaluate", script: PAGE_SCRIPT }))?.data?.result);
       this.health.setPage(call.session, page?.url ?? null, page?.loadedAt ?? null);
-      // A daemon that was not up before this call holds only what this call did.
       const delta = await this.health.read(call.session, read, call.ctx?.threadId ?? null, state.noDaemon);
       if (this.ports.takeStarted(call.session)) await this.started(call, steps, true, out);
       const pageHost = this.health.pageHost(call.session);
       const lines = [
         state.late ? healthLine(this.health.visible(call.session, state.late), [], "late", SETTLE_CAP_MS / 1000, pageHost) : null,
         delta ? healthLine(this.health.visible(call.session, delta), recording ? unansweredWorthSaying(pending) : [], state.action ? "after" : "late", SETTLE_CAP_MS / 1000, pageHost) : null,
+        browserEgress.takeNotice(call.session),
       ];
       for (const text of lines) if (text) out.parts.push({ type: "text", text });
       if (state.recorded) {
         const step = await this.write(call, state, { ok, engineMs, settleMs, geometry, failure, delta, pending, captureFrom: probe.port });
         if (step) out.parts.push({ type: "text", text: `Recorded as step ${step}.` });
       }
-    } catch { /* the bot's result stands without the extras */ }
+    } catch {}
     return out;
   }
 
-  /** A browser was started under this call: its refs are gone, its page is
-   * sized again like the first launch, and `news` (it had been running)
-   * tells the bot its pages died. Once per call. */
   private async started(call: StepCall, steps: SessionSteps, news: boolean, out: { parts: Array<{ type: "text"; text: string }>; launched: boolean }): Promise<void> {
     if (out.launched) return;
     out.launched = true;
@@ -559,11 +474,6 @@ export class BrowserSteps {
     if (news) out.parts.push({ type: "text", text: RELAUNCHED });
   }
 
-  /** The action's own page load or change, given time to answer: until no
-   * document and no non-GET call to the page's own site that started with
-   * the action is waiting, at most 1.5 s, or until a person takes the
-   * browser. Long polls, beacons and analytics never hold it. What still
-   * waits is returned. */
   private async settle(target: RelayTarget, port: number, since: number, stopped: () => boolean): Promise<{ pending: FailedRequest[]; ms: number }> {
     const started = this.now();
     const read = this.reader(target, port, SETTLE_CAP_MS + PASS_MS);
@@ -586,7 +496,6 @@ export class BrowserSteps {
     return { pending, ms: this.now() - started };
   }
 
-  /** Write one step, its screenshot taken now unless something forbids it. */
   private async write(call: StepCall, state: StepState, facts: {
     ok: boolean; engineMs: number; imageSkipped?: string; settleMs?: number; geometry?: Geometry | null; failure?: string;
     delta?: HealthDelta | null; pending?: FailedRequest[]; captureFrom?: number;
@@ -598,20 +507,14 @@ export class BrowserSteps {
     const navigated = Boolean(state.geometry && geometry && state.geometry.url !== geometry.url);
     const ref = state.target?.role !== undefined ? { role: state.target.role, name: state.target.name ?? "" } : undefined;
     const { marker, why } = markerFor(state.box, state.geometry, geometry, { navigated, inFrame: state.target?.inFrame ?? false });
-    // The page left where fill_login typed a one-time code, or where a
-    // secret went into a frame: pictures resume.
     const here = geometry ? pageKey(geometry.url) : null;
     if (steps.codeUrl !== null && here !== null && here !== steps.codeUrl) steps.codeUntil = 0;
     if (steps.secretPage !== null && here !== null && here !== steps.secretPage) steps.secretPage = null;
     const typed = call.tool === "agent_browser_fill" || call.tool === "agent_browser_type";
-    // Typing into a secret-looking field inside a frame (a payment provider's
-    // card field), whose value no page script here can see: no picture while
-    // the page stays where it was typed.
     const target = state.target;
     if (typed && here !== null && ((target?.inFrame && SECRET_TARGET.test(`${target.role ?? ""} ${target.name ?? ""}`)) || (geometry?.focus?.frame === "cross" && geometry.focus.secret))) {
       steps.secretPage = here;
     }
-    // A conversation whose step lines reached their cap takes no more steps: no number, no picture.
     if (!this.evidence.accepts(ctx.threadId)) return null;
     const step = this.evidence.nextStep();
     let imageSkipped = facts.imageSkipped ?? null;
@@ -638,7 +541,7 @@ export class BrowserSteps {
         if (call.stopped()) { imageSkipped = "person-took-control"; taken = false; }
         if (taken) imagePath = slot.path;
         else {
-          try { unlinkSync(slot.path); } catch { /* never written */ }
+          try { unlinkSync(slot.path); } catch {}
           imageSkipped ??= "capture-failed";
         }
       }
@@ -661,7 +564,6 @@ export class BrowserSteps {
       marker, markerWhy: why,
       verify: typed && geometry ? {
         focus: geometry.focus ? { role: geometry.focus.role, name: sanitizePageText(geometry.focus.name, 120), editable: geometry.focus.editable, valueLength: geometry.focus.valueLength } : null,
-        // Unknown inside a cross-origin frame, whose field no page script sees.
         landed: geometry.focus?.frame === "cross" ? null : Boolean(geometry.focus?.editable && geometry.focus.valueLength > 0),
       } : null,
       health,
@@ -671,7 +573,7 @@ export class BrowserSteps {
     let kept: StepRecord;
     try { kept = await this.evidence.commit(clean(entry), imagePath); }
     catch {
-      if (imagePath) { try { unlinkSync(imagePath); } catch { /* gone */ } }
+      if (imagePath) { try { unlinkSync(imagePath); } catch {} }
       return null;
     }
     const file = kept.image ? this.evidence.imageFile(ctx.threadId, ctx.generation, kept.image) : null;
@@ -679,9 +581,7 @@ export class BrowserSteps {
     return step;
   }
 
-  /** fill_login signed the bot in, inside the browser's lane: a step with
-   * no screenshot, and none for a minute after a one-time code unless the
-   * page leaves the address the code was typed on. */
+  /** A step with no screenshot, and none for a minute after a one-time code unless the page leaves its address. */
   async signIn(call: { session: string; spec: SessionSpec; ctx?: StepContext }, outcome: { ok: boolean; host?: string; filled?: string[] }): Promise<number | null> {
     const steps = this.session(call.session);
     const ctx = call.ctx;
@@ -701,7 +601,6 @@ export class BrowserSteps {
     return this.note(ctx, { tool: "fill_login", action, ok: outcome.ok });
   }
 
-  /** A step with no screenshot and no page reads: fill_login, restart_browser. */
   async note(ctx: StepContext | undefined, fact: { tool: string; action?: string; ok: boolean }): Promise<number | null> {
     if (!ctx?.record || !this.evidence?.accepts(ctx.threadId)) return null;
     const step = this.evidence.nextStep();
@@ -715,15 +614,12 @@ export class BrowserSteps {
     } catch { return null; }
   }
 
-  /** A person took the browser (BrowserRuntime.take): what its page reports
-   * while they hold it never reaches a bot or a step, and no picture from
-   * before their hold stands in for a preview frame. */
+  /** While a person holds the browser, what its page reports never reaches a bot or a step. */
   personTook(session: string): void {
     this.health.discardNext(session);
     this.session(session).image = null;
   }
 
-  /** The browser closed or restarted: nothing of its page carries over. */
   forget(session: string): void {
     this.sessions.delete(session);
     this.health.forget(session);
@@ -733,6 +629,5 @@ export class BrowserSteps {
 
 type SessionSpec = Pick<BrowserSpawnSpec, "command" | "env">;
 
-// One instance per server: one store, one counter, the server's relay ports.
 export const browserEvidence = new BrowserEvidence({ root: join(DATA_DIR, "evidence") });
 export const browserSteps = new BrowserSteps({ ports: relayPorts, evidence: browserEvidence });

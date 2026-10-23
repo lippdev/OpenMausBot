@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// The store keeps one data sheet per bot and loads it from the panel route.
-// A `data` frame replaces the sheet whole; the panel itself runs and cancels
-// SQL (DataPanel.test.ts) and leaves the answer to the frame.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -90,7 +87,6 @@ describe("data sheets in the store", () => {
     expect(reducer(opened, { type: "openDataResult", botId: "deleted", cardId: "c_1" })).toBe(opened);
   });
   it("opens a receipt's bot the way selecting it does: unread clears and the read is posted", async () => {
-    // Another bot with unread messages, not the one on screen.
     const other: BotAnnouncement = { ...bot, id: "other", name: "Other", unread: true, tasks: [{ ...bot.tasks![0]!, unread: true }] };
     await send({ kind: "bot", bot: other as unknown as Extract<ServerFrame, { kind: "bot" }>["bot"] });
     expect(seen.selectedId).toBe("bot");

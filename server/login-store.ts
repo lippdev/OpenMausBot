@@ -1,26 +1,13 @@
-// Saved logins at rest, and the scrubber that keeps them out of everything a
-// bot or a transcript can read.
-//
-// The store is the browser engine's own at-rest mechanism, reused: the whole
-// list is one file sealed with AES-256-GCM under SHA-256 of a random key
-// (server/browser-sites.ts encryptBrowserState, the format agent-browser
-// writes its saved sign-ins in), the key a 0600 file beside it in the data
-// folder. It is the same on the desktop, a server and Cloud. Its key is its
-// own, not the browser engine's, because that one is handed to every
-// browser process in its environment and this one never leaves the server.
-// Neither file is ever backed up, exported or moved to another computer
-// (server/workspace-backup-policy.ts): a saved password stays on the
-// computer it was saved on.
-//
-// The 1Password service-account token (Settings → Logins) is kept in the
-// same sealed file.
+// Sealed under a key of its own (a 0600 file beside it), never the browser engine's, which every browser process gets in
+// its environment. Neither file is ever backed up, exported or moved: a saved password stays on its computer, unless the
+// person sends that one login to their own Cloud with Also use on My Cloud (login-handoff.ts).
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 
 import { HELD_SECRET_MASK } from "../shared/redact.ts";
-import { LOGIN_FIELD_MAX, type LoginBots, type LoginSummary } from "../shared/logins.ts";
+import { LOGIN_FIELD_MAX, LOGIN_HOSTS_MAX, loginMatchesHost, loginSite, loginUsableBy, type LoginBots, type LoginPlace, type LoginSummary } from "../shared/logins.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { decryptBrowserState, encryptBrowserState } from "./browser-sites.ts";
 import type { TotpKey } from "./totp.ts";
@@ -35,14 +22,21 @@ const totpSchema = z.object({
   period: z.number().int().min(10).max(300),
 });
 
-const loginSchema = z.object({
+const botsSchema = z.union([z.literal("all"), z.array(z.string())]);
+
+// The previous release reads `version: 1` records by `host` alone and replaces a file it cannot parse, so every record
+// keeps `host` (its first sign-in host) and the version stays 1: going back a release never loses a saved login.
+const diskLoginSchema = z.object({
   id: z.string().min(1),
   host: z.string().min(1),
+  site: z.string().min(1).optional(),
+  hosts: z.array(z.string().min(1)).min(1).max(LOGIN_HOSTS_MAX).optional(),
+  exactHost: z.boolean().optional(),
   username: z.string().max(LOGIN_FIELD_MAX),
   password: z.string().min(1).max(LOGIN_FIELD_MAX),
   totp: totpSchema.optional(),
   source: z.enum(["card", "settings"]),
-  bots: z.union([z.literal("all"), z.array(z.string())]),
+  bots: botsSchema,
   createdAt: z.number(),
   updatedAt: z.number(),
   lastUsedAt: z.number().optional(),
@@ -50,16 +44,20 @@ const loginSchema = z.object({
 
 const fileSchema = z.object({
   version: z.literal(1),
-  logins: z.array(loginSchema),
+  logins: z.array(diskLoginSchema),
   onePassword: z.object({ token: z.string().min(1), connectedAt: z.number() }).optional(),
+  /** Vault id → the bots that may use its logins; a vault not named here is for every bot. Kept across reconnects. */
+  onePasswordGrants: z.record(z.string(), botsSchema).optional(),
 });
 
-/** One saved login with its secrets. Server-only: no route returns this. */
-export type StoredLogin = z.infer<typeof loginSchema>;
-type StoreFile = z.infer<typeof fileSchema>;
+type DiskLogin = z.infer<typeof diskLoginSchema>;
+type DiskFile = z.infer<typeof fileSchema>;
 
-export interface NewLogin {
-  host: string;
+/** One saved login with its secrets. Server-only: no route returns this. */
+export type StoredLogin = Omit<DiskLogin, "host" | "site" | "hosts" | "exactHost"> & LoginPlace;
+type StoreFile = Omit<DiskFile, "logins"> & { logins: StoredLogin[] };
+
+export interface NewLogin extends LoginPlace {
   username: string;
   password: string;
   totp?: TotpKey | null;
@@ -70,19 +68,34 @@ export interface NewLogin {
 export interface LoginPatch {
   username?: string;
   password?: string;
-  /** null removes the 2FA key. */
   totp?: TotpKey | null;
   bots?: LoginBots;
+  exactHost?: boolean;
 }
 
 const EMPTY: StoreFile = { version: 1, logins: [] };
 
+/** A record written before logins had a site: its one host becomes its sign-in host, and its site the host's. */
+function fromDisk({ host, site, hosts, exactHost, ...rest }: DiskLogin): StoredLogin {
+  return { ...rest, site: site ?? loginSite(host), hosts: hosts ?? [host], exactHost: exactHost ?? false };
+}
+
+function toDisk(login: StoredLogin): DiskLogin {
+  return { ...login, host: login.hosts[0]! };
+}
+
 export function summarizeLogin(login: StoredLogin): LoginSummary {
   return {
-    id: login.id, host: login.host, username: login.username, hasTotp: Boolean(login.totp),
+    id: login.id, site: login.site, hosts: [...login.hosts], exactHost: login.exactHost, username: login.username, hasTotp: Boolean(login.totp),
     source: login.source, bots: login.bots, createdAt: login.createdAt,
     ...(login.lastUsedAt === undefined ? {} : { lastUsedAt: login.lastUsedAt }),
   };
+}
+
+/** The same account: one username on one site, unless either is kept to hosts the other does not share. */
+function sameAccount(login: StoredLogin, input: NewLogin): boolean {
+  if (login.username.toLowerCase() !== input.username.toLowerCase() || login.site !== input.site) return false;
+  return (!login.exactHost && !input.exactHost) || login.hosts.some((host) => input.hosts.includes(host));
 }
 
 export class LoginStore {
@@ -91,7 +104,6 @@ export class LoginStore {
   private readonly now: () => number;
   private cache: StoreFile | null = null;
   private unreadableWarned = false;
-  /** Bumped on every change, so the scrubber rebuilds its list only then. */
   version = 0;
 
   constructor(options: { dataDir: string; now?: () => number }) {
@@ -100,14 +112,11 @@ export class LoginStore {
     this.now = options.now ?? Date.now;
   }
 
-  /** The key, made on first save. Reading never makes one: no key means
-   * nothing was ever saved here. */
   private key(create: boolean): string | null {
     try {
       const existing = readFileSync(this.keyFile, "utf8").trim();
       if (/^[0-9a-f]{64}$/u.test(existing)) return existing;
     } catch {
-      // not made yet
     }
     if (!create) return null;
     const key = randomBytes(32).toString("hex");
@@ -123,10 +132,10 @@ export class LoginStore {
       const key = this.key(false);
       try {
         if (!key) throw new Error("missing key");
-        data = fileSchema.parse(JSON.parse(decryptBrowserState(readFileSync(this.file), key)));
+        const disk = fileSchema.parse(JSON.parse(decryptBrowserState(readFileSync(this.file), key)));
+        data = { ...disk, logins: disk.logins.map(fromDisk) };
       } catch {
-        // A file that cannot be opened (its key lost, or damaged) holds
-        // nothing usable; the next save replaces it. Never its contents in a log.
+        // Never log an unreadable file's contents.
         if (!this.unreadableWarned) console.warn("saved logins: the saved logins file could not be opened; it will be replaced on the next save");
         this.unreadableWarned = true;
         data = EMPTY;
@@ -138,38 +147,48 @@ export class LoginStore {
   }
 
   private write(data: StoreFile): void {
-    const parsed = fileSchema.parse(data);
+    const parsed = fileSchema.parse({ ...data, logins: data.logins.map(toDisk) });
     const key = this.key(true)!;
     mkdirSync(join(this.file, ".."), { recursive: true });
     writeFileAtomic(this.file, encryptBrowserState(JSON.stringify(parsed), key), { mode: 0o600 });
-    this.cache = parsed;
+    this.cache = { ...parsed, logins: parsed.logins.map(fromDisk) };
     this.version++;
   }
 
   list(): LoginSummary[] {
-    return this.read().logins.map(summarizeLogin).sort((a, b) => a.host.localeCompare(b.host) || a.username.localeCompare(b.username));
+    return this.read().logins.map(summarizeLogin).sort((a, b) => a.site.localeCompare(b.site) || a.username.localeCompare(b.username));
+  }
+
+  /** When each login last changed, for Send to My Cloud's comparison: never a secret. */
+  changes(): Array<{ id: string; site: string; hosts: string[]; exactHost: boolean; username: string; updatedAt: number }> {
+    return this.read().logins.map(({ id, site, hosts, exactHost, username, updatedAt }) => ({ id, site, hosts, exactHost, username, updatedAt }));
+  }
+
+  onePasswordConnectedAt(): number | null {
+    return this.read().onePassword?.connectedAt ?? null;
   }
 
   get(id: string): StoredLogin | null {
     return this.read().logins.find((login) => login.id === id) ?? null;
   }
 
-  /** Save a login. The same host and username (ignoring case) replaces the
-   * one already saved — the person saving again means "this is the password
-   * now" — keeping who may use it unless `bots` widens it. */
+  /** The same account saved again replaces its password, adds its sign-in hosts and widens who may use it; being kept
+   * to exact hosts is never undone here. */
   create(input: NewLogin): LoginSummary {
     const data = this.read();
     const at = this.now();
-    const same = data.logins.find((login) => login.host === input.host && login.username.toLowerCase() === input.username.toLowerCase());
+    const same = data.logins.find((login) => sameAccount(login, input));
     if (same) {
       const bots: LoginBots = same.bots === "all" || input.bots === "all" ? "all" : [...new Set([...same.bots, ...input.bots])];
       const updated: StoredLogin = { ...same, username: input.username, password: input.password, bots, updatedAt: at,
+        hosts: [...new Set([...same.hosts, ...input.hosts])].slice(0, LOGIN_HOSTS_MAX), exactHost: same.exactHost || input.exactHost,
         ...(input.totp ? { totp: input.totp } : {}) };
       this.write({ ...data, logins: data.logins.map((login) => login.id === same.id ? updated : login) });
       return summarizeLogin(updated);
     }
     const login: StoredLogin = {
-      id: randomUUID(), host: input.host, username: input.username, password: input.password,
+      id: randomUUID(), site: input.site, hosts: input.hosts.slice(0, LOGIN_HOSTS_MAX), exactHost: input.exactHost,
+      username: input.username, password: input.password,
       ...(input.totp ? { totp: input.totp } : {}),
       source: input.source, bots: input.bots, createdAt: at, updatedAt: at,
     };
@@ -186,6 +205,7 @@ export class LoginStore {
       ...(patch.username === undefined ? {} : { username: patch.username }),
       ...(patch.password === undefined ? {} : { password: patch.password }),
       ...(patch.bots === undefined ? {} : { bots: patch.bots }),
+      ...(patch.exactHost === undefined ? {} : { exactHost: patch.exactHost }),
       updatedAt: this.now(),
     };
     if (patch.totp === null) delete next.totp;
@@ -201,16 +221,15 @@ export class LoginStore {
     return true;
   }
 
-  /** The logins a bot may use on exactly this host. */
-  usableFor(host: string, botId: string): StoredLogin[] {
-    return this.read().logins.filter((login) => login.host === host && (login.bots === "all" || login.bots.includes(botId)));
+  usableFor(pageHost: string, botId: string): StoredLogin[] {
+    return this.read().logins.filter((login) => loginMatchesHost(login, pageHost) && loginUsableBy(login, botId));
   }
 
-  /** Every host and username a bot has a login for: what its prompt names. */
-  hostsFor(botId: string): Array<{ host: string; username: string }> {
-    return this.read().logins.filter((login) => login.bots === "all" || login.bots.includes(botId))
-      .map((login) => ({ host: login.host, username: login.username }))
-      .sort((a, b) => a.host.localeCompare(b.host) || a.username.localeCompare(b.username));
+  /** Where each login a bot may use fills, and its username, for the bot's prompt. */
+  sitesFor(botId: string): Array<LoginPlace & { username: string }> {
+    return this.read().logins.filter((login) => loginUsableBy(login, botId))
+      .map((login) => ({ site: login.site, hosts: [...login.hosts], exactHost: login.exactHost, username: login.username }))
+      .sort((a, b) => a.site.localeCompare(b.site) || a.username.localeCompare(b.username));
   }
 
   markUsed(id: string): void {
@@ -230,7 +249,19 @@ export class LoginStore {
     this.write(token ? { ...rest, onePassword: { token, connectedAt: this.now() } } : rest);
   }
 
-  /** Every secret value this store holds, for the scrubber. */
+  onePasswordGrants(): Record<string, LoginBots> {
+    return this.read().onePasswordGrants ?? {};
+  }
+
+  /** "all" opens a vault to every bot again. */
+  setOnePasswordGrant(vaultId: string, bots: LoginBots): void {
+    const data = this.read();
+    const { [vaultId]: _previous, ...others } = data.onePasswordGrants ?? {};
+    const grants = bots === "all" ? others : { ...others, [vaultId]: bots };
+    const { onePasswordGrants: _grants, ...rest } = data;
+    this.write(Object.keys(grants).length ? { ...rest, onePasswordGrants: grants } : rest);
+  }
+
   secretValues(): string[] {
     const data = this.read();
     return [
@@ -240,34 +271,23 @@ export class LoginStore {
   }
 }
 
-// ── the scrubber ───────────────────────────────────────────────────────
-// Every saved password (and 2FA key, and the 1Password token), every
-// password filled from elsewhere this run, and every one-time code made in
-// the last few minutes is replaced with •••••• wherever text crosses to a
-// bot or a transcript: browser tool results, the stored conversation, the
-// engines' protocol logs (shared/redact.ts runs this inside
-// redactSecretsInText). The forms a value takes in page text, JSON, a URL or
-// HTML are all matched. A screenshot cannot be scrubbed.
+// Saved secrets, passwords filled this run and recent one-time codes are masked wherever text crosses to a bot or a
+// transcript. A screenshot cannot be scrubbed.
 
-/** Shorter values are not treated as secrets: masking every "abc" in a
- * transcript would destroy it, and no site accepts such a password. */
 const MIN_SECRET = 4;
-/** How long a filled one-time code is scrubbed after it was made. */
 const CODE_MEMORY_MS = 5 * 60_000;
-/** Passwords filled from 1Password this run, at most. */
 const FILLED_LIMIT = 500;
 
 function htmlEscaped(value: string): string {
   return value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").replace(/"/gu, "&quot;").replace(/'/gu, "&#39;");
 }
 
-/** The forms one value takes in text a bot may read. */
 export function secretForms(value: string): string[] {
   const forms = new Set([value, JSON.stringify(value).slice(1, -1), htmlEscaped(value)]);
   try {
     forms.add(encodeURIComponent(value));
     forms.add(encodeURIComponent(value).replace(/%20/gu, "+"));
-  } catch { /* a lone surrogate has no URL form */ }
+  } catch {}
   return [...forms].filter((form) => form.length >= MIN_SECRET);
 }
 
@@ -290,8 +310,6 @@ export class HeldSecrets {
     this.now = now;
   }
 
-  /** A value about to reach a page: a password (kept for this run) or a
-   * one-time code (kept for a few minutes). */
   remember(value: string, kind: "password" | "code"): void {
     if (!value) return;
     if (kind === "code") {
@@ -325,7 +343,6 @@ export class HeldSecrets {
       const now = this.now();
       for (const [code, until] of this.codes) {
         if (until <= now) { this.codes.delete(code); continue; }
-        // A code is digits: only a whole number matches, never part of a longer one.
         if (out.includes(code)) out = out.replace(new RegExp(`(?<!\\d)${escapeRegExp(code)}(?!\\d)`, "gu"), HELD_SECRET_MASK);
       }
     }

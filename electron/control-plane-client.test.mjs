@@ -123,9 +123,7 @@ describe("control-plane desktop client", () => {
 
   it("identifies native Better Auth mutations with the trusted control-plane origin", async () => {
     const fetchImpl = vi.fn(async (_url, init) => {
-      // Undici adds Fetch Metadata after our request wrapper hands off the
-      // init object. Model Better Auth 1.7's form-CSRF decision here: a
-      // browser-shaped request without a trusted Origin is forbidden.
+      // Undici adds Fetch Metadata after our wrapper; Better Auth 1.7 forbids a browser-shaped request without a trusted Origin.
       const wireHeaders = new Headers(init.headers);
       wireHeaders.set("sec-fetch-mode", "cors");
       if (wireHeaders.has("sec-fetch-mode") && wireHeaders.get("origin") !== "https://accounts.openmausbot.com") {
@@ -268,8 +266,6 @@ describe("control-plane desktop client", () => {
     });
     expect(sent()).toEqual({ body: JSON.stringify({ appVersion: "0.1.104" }), contentType: "application/json" });
 
-    // An older caller, or a version the control plane would refuse, sends no
-    // body at all, exactly as before.
     for (const options of [undefined, {}, { appVersion: "" }, { appVersion: "   " }, { appVersion: "0.1\n.104" },
       { appVersion: "9".repeat(65) }, { appVersion: 104 }, { appVersion: new String("0.1.104") }]) {
       await client.ensureEndpoint(INSTALL, options);

@@ -1,4 +1,3 @@
-// The remote MCP client against a real HTTP server on loopback.
 import { afterEach, describe, expect, it } from "vitest";
 
 import { McpRpcError, RemoteMcpClient, bypassesProxy, plainHttpProxyFetch } from "./mcp-http.ts";

@@ -1,13 +1,4 @@
-// POST /api/decider/test: Settings → Decision model's Test button. One tiny
-// yes/no call with the draft key in the body, or the saved key, whatever the
-// switches say, because it tests the key itself. The answer is a verdict
-// (and how long it took), never the key and never the vendor's raw body.
-// Admin-scoped by default (server/request-auth.ts lists no client rule for
-// it): it spends a real, if tiny, amount on the workspace's key.
-//
-// GET /api/decider/models: the OpenRouter models Settings offers (a curated
-// list, plus what OpenRouter's public catalog adds). Needs no key and spends
-// nothing; Admin-scoped like the rest.
+// The answer is a verdict (and how long it took), never the key and never the vendor's raw body.
 import type { AppConfig } from "../config.ts";
 import { OPENROUTER_MODEL_ID_MAX } from "../decider/config.ts";
 import type { Decider } from "../decider/index.ts";

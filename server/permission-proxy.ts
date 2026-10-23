@@ -1,25 +1,5 @@
-// permission-proxy — the MCP stdio server the claude CLI spawns for
-// --permission-prompt-tool (ported from agentcal's runPermissionProxy;
-// dedicated entry file, so there is no argv-dispatch fork-bomb hazard).
-// Forwards each ask over a unix socket to the broker living in the
-// OpenMausBot server and waits for the human's answer.
-//
-//   approve   — the CLI calls this for any tool use its permission mode
-//               would deny; the answer is the --permission-prompt-tool
-//               JSON contract ({behavior:"allow"|"deny", …}).
-//   ask_user  — the agent can pose a question mid-run and wait; the
-//               human's words come back verbatim. With multiSelect it is
-//               asked as a question card the person can pick several from.
-//
-// One tool arrives through `approve` that is not a permission at all: the
-// CLI's own AskUserQuestion. It is the tool the model actually reaches for
-// when it wants a person to choose, and acceptEdits will not run it unasked,
-// so it lands here looking like "may I run a tool?" — which is how a question
-// ended up on screen as an Allow/Deny dialog over a JSON blob. It is intercepted
-// below and asked as what it is: one card carrying every question it posed,
-// answered through the tool's own `answers` field.
-//
-// stdout is the MCP channel — never console.log here.
+// MCP stdio server the claude CLI spawns for --permission-prompt-tool; forwards each ask to the server's broker over a unix socket.
+// stdout is the MCP channel: never console.log here.
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
 import { parseAskQuestions, questionAnswersByQuestion, type AskQuestion } from "../shared/ask-question.ts";
@@ -34,8 +14,7 @@ const socketPath = process.argv[2] ?? "";
 
 const waiting = new Map<string, (msg: any) => void>();
 const conn = connect(socketPath);
-// Both streams below carry JSON lines that can be larger than one read.
-// Decoding as a stream keeps a character split across two reads whole.
+// JSON lines can span reads; a stream decoder keeps a split character whole.
 conn.setEncoding("utf8");
 
 interface AllowPermissionResult {
@@ -74,7 +53,6 @@ conn.on("data", (chunk) => {
 
 const send = (obj: unknown) => process.stdout.write(JSON.stringify(obj) + "\n");
 
-/** Hand one ask to the broker and wait for the human's answer. */
 function askBroker(ask: Record<string, unknown>): Promise<any> {
   return new Promise((resolve) => {
     waiting.set(String(ask.id), resolve);
@@ -87,46 +65,20 @@ function askBroker(ask: Record<string, unknown>): Promise<any> {
   });
 }
 
-/** A multiSelect ask_user as the one-question card AskUserQuestion already
- * draws with checkboxes; flat choices can only ever be one tap. Null when
- * the call asks for a single pick. */
 function multiSelectQuestion(args: Record<string, unknown>): AskQuestion[] | null {
   if (args.multiSelect !== true) return null;
   const options = Array.isArray(args.choices) ? args.choices : [];
   return parseAskQuestions({ questions: [{ question: args.question, multiSelect: true, options }] });
 }
 
-// ── the CLI's own AskUserQuestion ──────────────────────────────────────
 const ASK_USER_QUESTION = "AskUserQuestion";
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 
-/** One question, in the shape the broker and the option card understand. */
-/**
- * Ask the person every question at once, then answer the tool the way it
- * documents.
- *
- * The answer is NOT a bare allow. A bare allow tells the CLI to go and run
- * AskUserQuestion, and a headless run has no dialog to collect anything —
- * the model gets "The user did not answer the questions." back and the
- * click is thrown away. The `answers` object is the field the tool's own
- * schema calls "User answers collected by the permission component":
- * keyed by the question's text, one comma-joined string per question.
- *
- * One ask, not one per question: the card draws the whole set with a tab
- * each, so a person sees what they are committing to before answering any
- * of it. `questionAnswersByQuestion` maps the answer text back per question.
- *
- * There is deliberately no "fall through to the permission path" here. That
- * path cannot answer this tool — allowing it throws the click away, as
- * above — so the fallback offered a person an Allow/Deny dialog over raw JSON.
- * That dialog is the bug this file exists to remove.
- */
+/** A bare allow makes the headless CLI run AskUserQuestion with no dialog ("The user did not answer the questions."),
+ * so answers go in the tool's own `answers` field: keyed by question text, one comma-joined string each. */
 async function answerNativeQuestions(input: unknown): Promise<string> {
-  // Unanswerable entries are SKIPPED by the parser, not fatal: one bad entry
-  // must not cost the user the good questions beside it. Nothing left means
-  // the whole call was unanswerable, which becomes a denial.
   const questions = parseAskQuestions(input);
   if (!questions?.length) {
     return JSON.stringify({
@@ -142,16 +94,10 @@ async function answerNativeQuestions(input: unknown): Promise<string> {
     tool: ASK_USER_QUESTION,
     input: { questions },
   });
-  // A question is only ever denied when the broker is gone.
   if (answer.behavior === "deny") {
     return JSON.stringify({ behavior: "deny", message: answer.message || "Denied from OpenMausBot" });
   }
-  // What lands in `answers` turns on WHO answered, not on whether there are
-  // words. The broker's own notes are words — the timeout's "nobody answered
-  // in time, use your best judgment" is a whole sentence — so filing anything
-  // non-blank hands the model system text in the slot reserved for what the
-  // person chose. Left out, the CLI reports the question as unanswered, which
-  // is the truth.
+  // Only the person's own answer fills `answers`: the broker's notes (a timeout's sentence) would read as their choice.
   const answers =
     answer.source === "user" && typeof answer.message === "string"
       ? questionAnswersByQuestion(answer.message, questions)
@@ -215,17 +161,13 @@ async function handle(msg: any) {
     const args = msg.params?.arguments ?? {};
     const reply = (text: string) => send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text }] } });
     if (name === "ask_user" && !allowQuestion) return reply("OpenMausBot: this question tool is excluded by the bot's tool selection.");
-    // AskUserQuestion is a question wearing a permission's clothes. It never
-    // continues into the permission path below — see nativeQuestions.
     if (name === "approve" && args.tool_name === ASK_USER_QUESTION) {
       return reply(await answerNativeQuestions(args.input));
     }
     const askId = randomUUID();
     const isQuestion = name === "ask_user";
     const picksSeveral = isQuestion ? multiSelectQuestion(args) : null;
-    // the CLI may include its own suggested permission rules; on allow we
-    // hand them straight back as updatedPermissions so claude stops asking
-    // at its own layer — no invented rule syntax (agentcal)
+    // Hand the CLI's own suggested rules back as updatedPermissions, so claude stops asking at its own layer.
     const suggestions = Array.isArray(args.permission_suggestions)
       ? args.permission_suggestions
       : Array.isArray(args.suggestions)
@@ -237,8 +179,6 @@ async function handle(msg: any) {
         : { t: "ask", id: askId, tool: args.tool_name, input: args.input },
     );
     let text = answer.message || "No answer was given — use your best judgment.";
-    // The card answers in its Q:/A: form; hand back just the picks, the way
-    // a one-tap answer arrives. Only the person's own words are unpacked.
     if (picksSeveral && answer.source === "user" && typeof answer.message === "string") {
       text = questionAnswersByQuestion(answer.message, picksSeveral)[picksSeveral[0]!.question] ?? text;
     }
@@ -271,7 +211,6 @@ process.stdin.on("data", (chunk) => {
     try {
       void handle(JSON.parse(line));
     } catch {
-      /* ignore malformed lines */
     }
   }
 });

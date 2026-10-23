@@ -6,18 +6,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot } from "@/state/store";
 import { restoreComposerDraft } from "@/lib/drafts";
 
-const fixture = vi.hoisted(() => ({ dispatch: vi.fn() }));
+const fixture = vi.hoisted(() => ({ dispatch: vi.fn(), track: vi.fn() }));
+const ADDED_CLAUDE = "claude-3f0c2b1e-9d1a-4c55-8a51-0a3a6f1e2b7c";
 vi.mock("@/state/store", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/state/store")>();
   return { ...original, useStore: () => ({
     state: { ...original.initialState, bots: [bot, peer], instances: [{
-      instanceId: "fake", driverKind: "claude", displayName: "Fake",
+      instanceId: ADDED_CLAUDE, driverKind: "claudeAgent", displayName: "Ada's work Claude",
       capabilities: { agentsMcp: true },
     }] },
     dispatch: fixture.dispatch,
   }) };
 });
-vi.mock("@/lib/analytics", () => ({ track: vi.fn() }));
+vi.mock("@/lib/analytics", () => ({ track: fixture.track }));
 vi.mock("@/lib/use-owner-or-admin", () => ({ useOwnerOrAdmin: () => false }));
 vi.mock("./CallView", () => ({ CallButton: () => null }));
 
@@ -26,7 +27,7 @@ import { Composer } from "./Composer";
 const bot: Bot = {
   id: "ime-bot", threadId: "ime-thread", name: "Atlas", title: "", description: "",
   color: "blue", notifications: false, unread: false, busy: false, messages: [],
-  modelSelection: { instanceId: "fake", model: "fake" },
+  modelSelection: { instanceId: ADDED_CLAUDE, model: "fake" },
 };
 const peer: Bot = { ...bot, id: "ime-peer", name: "調査担当" };
 const draftId = `bot:${bot.id}:${bot.threadId}`;
@@ -105,6 +106,7 @@ describe("Japanese IME in the real composer", () => {
     expect(fixture.dispatch).toHaveBeenCalledWith(expect.objectContaining({
       type: "send", botId: bot.id, text: "@調査担当",
     }));
+    expect(fixture.track.mock.calls).toEqual([["message_sent", { driver: "claude", queued: false }]]);
   });
 
   it("keeps ordinary slash selection and Shift+Enter working", () => {

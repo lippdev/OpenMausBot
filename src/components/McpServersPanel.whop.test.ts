@@ -1,8 +1,4 @@
 // @vitest-environment happy-dom
-// Connecting Whop from its app card: OAuth succeeds, then the app lists
-// Whop's tools once before turning the server on. When that list fails, the
-// card says why in one line (the test's own reason) and Connect retries;
-// while it runs, the card says it is loading tools and Cancel stops it.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -84,7 +80,6 @@ describe("Connecting Whop from its card", () => {
     expect(alerts).toEqual([
       "Signed in, but Whop’s tools could not be loaded: The server did not answer in time. Please connect again to retry.",
     ]);
-    // never turned on, and Connect is the retry
     expect(fixture.api.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")).toBe(false);
     expect(button("Connect")).toBeTruthy();
   });

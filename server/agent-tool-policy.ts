@@ -1,9 +1,5 @@
-/** Reviewed local reads exposed by the built-in agents MCP integration.
- * This exact catalog supplies MCP tool metadata only; names, prefixes, or
- * third-party annotations alone must never grant read access.
- * Session recall keeps its own-bot scope and may record a deduplicated access
- * disclosure in a room; it does not edit recalled messages or launch work.
- */
+/** The reviewed local reads of the built-in agents MCP. Names, prefixes or third-party annotations alone must never grant
+ * read access; session recall keeps its own-bot scope. */
 export const READ_ONLY_AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "list_bots",
   "list_team_setup",
@@ -14,11 +10,12 @@ export const READ_ONLY_AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "session_search",
   "session_read",
   "tool_result_read",
-  "list_routines",
+  "list_triggers",
+  "list_trigger_events",
   "skills_list",
 ]);
 
-const READ_ONLY_ANNOTATIONS = Object.freeze({
+export const READ_ONLY_ANNOTATIONS = Object.freeze({
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,

@@ -1,8 +1,6 @@
-// Model-shaped widget inputs, written the way a bot or ChatKit's Widget
-// Builder writes them (spacing units, ChatKit prop names). Between them they
-// use every node type. Tests, the phone fixtures and the verification recipe
-// (docs/verification/widgets.md) all read these, so a change here is a change
-// to what all three renderers are checked against.
+// Model-shaped widget inputs, written the way a bot or ChatKit's Widget Builder
+// writes them, using every node type between them. Tests, the phone fixtures
+// and the verification recipe all read these.
 
 const prRow = (number: number, title: string, detail: string, status: string, color: string) => ({
   type: "ListViewItem",

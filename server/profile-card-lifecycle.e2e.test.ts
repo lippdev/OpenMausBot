@@ -38,8 +38,6 @@ it("applies the bot's own alert and voice changes at once, refuses a stale Undo,
     const propose = (changes: unknown) => api("POST", "/api/internal/profile-requests", {
       fromBotId: bot.id, fromThreadId: bot.threadId, changes, reason: "Requested fixture preferences",
     }, 201, token);
-    // A bot's changes to itself apply at once: no card waits, and none uses
-    // up the eight-card quota.
     const applied: Array<{ requestId: string; state: string }> = [];
     for (let index = 0; index < 9; index++) applied.push(await propose({ title: `Applied title ${index}` }));
     expect(applied.every((proposal) => proposal.state === "applied")).toBe(true);
@@ -47,7 +45,6 @@ it("applies the bot's own alert and voice changes at once, refuses a stale Undo,
     writeFileSync(gate, "finish");
     await expect.poll(async () => (await api("GET", "/api/bots?messages=0")).bots.find((candidate: any) => candidate.id === bot.id).busy,
       { timeout: 15_000 }).toBe(false);
-    // The profile moved since, so Undo refuses and changes nothing.
     const undo = (requestId: string, expected = 200) => api("POST", `/api/threads/${bot.threadId}/undo`, { requestId }, expected);
     expect(await undo(applied.at(-1)!.requestId, 409)).toMatchObject({ code: "changed-since" });
     expect((await control("wait", "--bot", bot.id, "--task", bot.threadId, "--timeout", "20")).status).toBe("settled");
@@ -70,7 +67,6 @@ it("applies the bot's own alert and voice changes at once, refuses a stale Undo,
     expect(toggle.state).toBe("applied");
     const changed = (await api("GET", "/api/bots")).bots.find((candidate: any) => candidate.id === bot.id);
     expect(changed).toMatchObject({ notifications: false, speakReplies: true, title: "Applied title 8" });
-    // Undo puts the two toggles back, and only those.
     expect(await undo(toggle.requestId)).toMatchObject({ ok: true, undone: true });
     expect((await api("GET", "/api/bots")).bots.find((candidate: any) => candidate.id === bot.id))
       .toMatchObject({ notifications: true, speakReplies: false, title: "Applied title 8" });

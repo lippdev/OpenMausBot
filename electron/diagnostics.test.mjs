@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
 const {
+  appendDesktopCrashRecord,
   buildDiagnosticsReport,
   decodeLogTail,
   diagnosticsFileName,
@@ -17,13 +18,10 @@ const {
   CREDENTIAL_ENV_NAMES,
 } = require("./diagnostics.mjs");
 
-// The desktop shell cannot import TypeScript, so its credential list is a
-// hand copy of server/config.ts WORKSPACE_CREDENTIAL_ENV. This test is the
-// drift alarm: a name added server-side without updating the copy here would
-// otherwise ship an unredacted export path.
-describe("credential env parity with server/config.ts", () => {
+// The desktop credential list is a hand copy of server/credential-env.ts WORKSPACE_CREDENTIAL_ENV; this test is the drift alarm.
+describe("credential env parity with server/credential-env.ts", () => {
   it("matches WORKSPACE_CREDENTIAL_ENV exactly", () => {
-    const config = readFileSync(new URL("../server/config.ts", import.meta.url), "utf8");
+    const config = readFileSync(new URL("../server/credential-env.ts", import.meta.url), "utf8");
     const match = config.match(/WORKSPACE_CREDENTIAL_ENV = \[([\s\S]*?)\] as const/);
     expect(match).not.toBeNull();
     const names = [...match[1].matchAll(/"([A-Z0-9_]+)"/g)].map((m) => m[1]);
@@ -432,4 +430,17 @@ describe("diagnosticsFileName", () => {
       "openmausbot-diagnostics-20260822-160509.txt",
     );
   });
+});
+
+it("appends a crash line, truncates a full log, and refuses a hard-linked one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "omb-crash-"));
+  const file = join(dir, "logs", "desktop-crashes.log");
+  appendDesktopCrashRecord(file, 64, "first crash");
+  expect(readFileSync(file, "utf8")).toMatch(/^\[.+\] first crash\n$/);
+  appendDesktopCrashRecord(file, 10, "second crash");
+  expect(readFileSync(file, "utf8")).toMatch(/^\[.+\] second crash\n$/);
+  linkSync(file, join(dir, "other"));
+  appendDesktopCrashRecord(file, 1_000, "third crash");
+  expect(readFileSync(file, "utf8")).not.toContain("third crash");
+  rmSync(dir, { recursive: true, force: true });
 });

@@ -1,5 +1,3 @@
-// The headless verbs' command line: verbs and their actions, strict flags,
-// and the duration, size and count forms every verb shares.
 import { describe, expect, it } from "vitest";
 
 import { EXIT, HEADLESS_VERBS, MUTATING_VERBS, oneOf, parseCommand, parseCount, parseDuration, parseSize } from "./args.ts";
@@ -21,7 +19,6 @@ describe("parseCommand", () => {
     expect(parseCommand(["wait", "--bot", "b1", "--task", "t1", "--timeout", "30"])).toMatchObject({ verb: "wait", flags: { bot: "b1", task: "t1", timeout: "30" } });
     expect(parseCommand(["send", "Mira", "-"])).toMatchObject({ positionals: ["Mira", "-"] });
     expect(parseCommand(["events", "--thread", "a", "--thread", "b"]).flags.thread).toEqual(["a", "b"]);
-    // a message that looks like a flag goes after --
     expect(parseCommand(["send", "Mira", "--", "--not-a-flag"]).positionals).toEqual(["Mira", "--not-a-flag"]);
   });
 

@@ -1,5 +1,3 @@
-// Simple mode's Settings: at most five pages, several of them stacking what
-// Advanced shows as separate pages, and every old deep link still landing.
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,6 +65,7 @@ vi.mock("./UsageSection", () => ({ UsageSection: marker("usage") }));
 vi.mock("./WorkspaceBackupSettings", () => ({ WorkspaceBackupSettings: marker("backups") }));
 vi.mock("./RoomTurnTimeoutSettings", () => ({ RoomTurnTimeoutSettings: () => null }));
 vi.mock("./CompanyBackupSettings", () => ({ CompanyBackupSettings: () => null }));
+vi.mock("./ImportSettings", () => ({ ImportSettings: marker("import") }));
 
 const desktop = { ogb: { environments: {}, organization: {}, cloudAccount: {} } };
 
@@ -95,26 +94,22 @@ const blocks = (html: string) => [...html.matchAll(/data-settings-block="([^"]+)
 const markers = (html: string) => [...html.matchAll(/MARKER:([^;]+);/g)].map((match) => match[1]);
 
 describe("Settings in Simple mode", () => {
-  it("draws at most five pages on the desktop, and none of the Advanced-only ones", () => {
+  it("draws at most six pages on the desktop, MausBot Cloud among them, and none of the Advanced-only ones", () => {
     const html = render();
-    expect(pages(html)).toEqual(["general", "appearance", "ai", "computers", "account"]);
-    expect(SIMPLE_PAGES.length).toBeLessThanOrEqual(5);
-    // a flat list: no group headings, no per-section rail entries
+    expect(pages(html)).toEqual(["general", "appearance", "ai", "computers", "cloud", "account"]);
+    expect(SIMPLE_PAGES.length).toBeLessThanOrEqual(6);
     expect(html).not.toContain("data-settings-group=");
     expect(html).not.toContain("data-settings-section=");
-    for (const hidden of ["usage", "backups", "experimental", "workspaces", "skills"]) expect(html).not.toContain(`value="${hidden}"`);
-    // the narrow-window picker offers the same five pages
+    for (const hidden of ["backups", "experimental", "workspaces", "skills"]) expect(html).not.toContain(`value="${hidden}"`);
     const picker = html.match(/<select aria-label="Settings"[\s\S]*?<\/select>/)![0];
-    expect([...picker.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1])).toEqual(["general", "appearance", "ai", "computers", "account"]);
+    expect([...picker.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1])).toEqual(["general", "appearance", "ai", "computers", "cloud", "account"]);
   });
 
   it("files every Advanced page under one Simple page, or hides it", () => {
     const placed = SIMPLE_PAGES.flatMap((page) => page.sections);
     expect(new Set(placed).size).toBe(placed.length);
     const hidden = SECTIONS.map((entry) => entry.id).filter((id) => !placed.includes(id));
-    // Skills (the shared library, main's new page) is Advanced-only too, so
-    // Simple stays at five pages; a deep link still opens it.
-    expect(hidden).toEqual(["skills", "usage", "backups", "workspaces", "experimental"]);
+    expect(hidden).toEqual(["skills", "backups", "workspaces", "experimental"]);
     for (const id of hidden) expect(SIMPLE_HIDDEN_SECTIONS).toContain(id);
   });
 
@@ -137,41 +132,47 @@ describe("Settings in Simple mode", () => {
     expect(html).toContain("More providers for OpenCode bots");
   });
 
-  it("stacks Remote access, Servers, Local VM, the built-in browser and Logins on Computers", () => {
+  it("stacks Remote access, Servers, Bot desktops, the built-in browser and Logins on Devices", () => {
     fixture.section = "companion";
     const html = render();
     expect(currentPage(html)).toBe("computers");
     expect(blocks(html)).toEqual(["companion", "desktopWorkspaces", "computer", "browser", "logins"]);
     const headings = [...html.matchAll(/<h3[^>]*>([^<]+)<\/h3>/g)].map((match) => match[1]);
-    expect(headings).toEqual(["Remote access", "Servers", "Local VM", "Built-in browser", "Logins"]);
+    expect(headings).toEqual(["Remote access", "Servers", "Bot desktops", "Built-in browser", "Logins"]);
     expect(html).toContain('aria-label="Enable the built-in browser"');
   });
 
-  it("stacks OMB Cloud and Organization on Account in the desktop app", () => {
+  it("gives MausBot Cloud its own page, and stacks Organization, Import and Usage on Account in the desktop app", () => {
     fixture.section = "cloudAccount";
-    const html = render();
+    let html = render();
+    expect(currentPage(html)).toBe("cloud");
+    expect(blocks(html)).toEqual(["cloudAccount"]);
+    fixture.section = "organization";
+    html = render();
     expect(currentPage(html)).toBe("account");
-    expect(blocks(html)).toEqual(["cloudAccount", "organization"]);
+    expect(blocks(html)).toEqual(["organization", "import", "usage"]);
+    expect(markers(html)).toContain("import");
   });
 
-  it("adds People and Activity to Account for a hosted workspace's admins in a browser", () => {
+  it("adds People and Activity to Account, above Usage, for a hosted workspace's admins in a browser", () => {
     vi.stubGlobal("window", {});
     fixture.ownerOrAdmin = true;
     fixture.section = "people";
     const html = render();
-    // no Servers page without the desktop bridge, and no desktop-only account pages
     expect(pages(html)).toEqual(["general", "appearance", "ai", "computers", "account"]);
-    expect(blocks(html)).toEqual(["people", "activity"]);
+    expect(blocks(html)).toEqual(["people", "activity", "usage"]);
   });
 
-  it("drops Account when nothing on it is shown", () => {
-    // an OMB Cloud home in a browser: no desktop account pages, nobody to invite, not an admin
+  it("keeps Account for Usage alone when nothing else on it is shown", () => {
     vi.stubGlobal("window", {});
     fixture.config = { ...fixture.config, cloudHome: true };
-    expect(pages(render())).toEqual(["general", "appearance", "ai", "computers"]);
+    fixture.section = "usage";
+    const html = render();
+    expect(pages(html)).toEqual(["general", "appearance", "ai", "computers", "account"]);
+    expect(blocks(html)).toEqual(["usage"]);
   });
 
-  it("keeps a paired remote client's reduced set: Appearance, and Computers with Remote access and Servers", () => {
+  it("keeps a paired remote client's reduced set: Appearance, and Devices with Remote access and Servers", () => {
     vi.stubGlobal("window", { ogb: { ...desktop.ogb, remoteClient: { active: true } } });
     fixture.section = "desktopWorkspaces";
     const html = render();
@@ -191,8 +192,9 @@ describe("Settings in Simple mode", () => {
     ["remote", "computers"],
     ["desktopWorkspaces", "computers"],
     ["computer", "computers"],
-    ["cloudAccount", "account"],
+    ["cloudAccount", "cloud"],
     ["organization", "account"],
+    ["import", "account"],
   ])("lands a deep link to %s on %s", (section, page) => {
     fixture.section = section;
     const html = render();
@@ -201,13 +203,12 @@ describe("Settings in Simple mode", () => {
   });
 
   it.each<[AppSettingsSection, string]>([
-    ["usage", "usage"],
     ["backups", "backups"],
     ["experimental", "skillAuthoring"],
   ])("opens a hidden page (%s) for as long as it is the open one", (section, content) => {
     fixture.section = section;
     const html = render();
-    expect(pages(html)).toEqual(["general", "appearance", "ai", "computers", "account", section]);
+    expect(pages(html)).toEqual(["general", "appearance", "ai", "computers", "cloud", "account", section]);
     expect(currentPage(html)).toBe(section);
     if (content === "skillAuthoring") expect(html).toContain("Bots may write their own skills");
     else expect(markers(html)).toContain(content);
@@ -229,12 +230,11 @@ describe("Settings in Simple mode", () => {
 describe("the built-in browser switch", () => {
   const browserSwitch = () => fixture.switches.find((props) => props["aria-label"] === "Enable the built-in browser");
 
-  it.each([false, true])("writes features.browser from Computers (advanced: %s)", async (advanced) => {
+  it.each([false, true])("writes features.browser from Devices (advanced: %s)", async (advanced) => {
     fixture.advancedMode = advanced;
     fixture.section = "computer";
     const html = render();
     if (advanced) {
-      // Advanced: it heads the Local VM page
       expect(html.indexOf('aria-label="Enable the built-in browser"')).toBeLessThan(html.indexOf("MARKER:computer;"));
     } else {
       expect(html.indexOf("MARKER:computer;")).toBeLessThan(html.indexOf('aria-label="Enable the built-in browser"'));
@@ -258,7 +258,7 @@ describe("the built-in browser switch", () => {
     expect(browserSwitch()).toBeUndefined();
   });
 
-  it("is found by searching for the browser under Local VM in Advanced", () => {
+  it("is found by searching for the browser under Bot desktops in Advanced", () => {
     const computer = SECTIONS.find((entry) => entry.id === "computer")!;
     const experimental = SECTIONS.find((entry) => entry.id === "experimental")!;
     expect(computer.keywords).toContain("browser");

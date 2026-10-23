@@ -63,7 +63,6 @@ it("runs the script entry a turn was itself asked for, a one-shot entry once, an
     { key: "job", match: ["JOB"], reply: "job done" },
   ] } }));
   const turn = (text: string) => runRoomHandoffAgent(["--mcp-config", join(dir, "mcp.json"), "--append-system-prompt-file", join(dir, "system.txt")], plan, { message: { content: text } });
-  // a replay quoting the job is not a turn asked for the job
   await expect(turn("User: JOB\n\n[Now reply to the user's latest message:]\n\nLOOP")).resolves.toBe("looped");
   await expect(turn("JOB: build it")).resolves.toBe("job done");
   await expect(turn("JOB: build it")).rejects.toThrow("Unplanned fixture turn for fixture: JOB: build it");

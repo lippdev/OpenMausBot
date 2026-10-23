@@ -31,16 +31,12 @@ test("each notice shows at most once a day, on whichever page asks first, and ag
   assert.equal(notices.due(ended), null, "shown today");
   notices.seen(ended);
   assert.equal(writes.length, 1, "one record per showing");
-  // The record is today's only, and names no account.
   assert.equal(saved.day, localDay(now)); assert.equal(saved.shown.length, 1);
   assert.ok(!JSON.stringify(saved).includes("account-1"));
-  // A restart reads it back: still shown today.
   const restarted = createTrialNotices({ read: () => saved, write: value => { saved = value; }, now: () => now });
   assert.equal(restarted.due(ended), null);
-  // Another state of the same trial is another notice.
   const late = account(trial("late", NOON - 4 * DAY, { deleteAt: NOON + 3 * DAY, keep: "portal" }));
   assert.equal(restarted.due(late), "late");
-  // The next day it shows once more while it is still due.
   now += DAY;
   assert.equal(notices.due(ended), "ended");
   assert.equal(restarted.due(ended), "ended");
@@ -56,7 +52,6 @@ test("an active trial's notice in its last two days shows once each day; a new t
   assert.equal(notices.due(active), "active"); notices.seen(active);
   assert.equal(notices.due(active), null);
   now += DAY; assert.equal(notices.due(active), "active");
-  // The same state for another account, or another trial (a new end), is not the one seen.
   notices.seen(active);
   assert.equal(notices.due(account(trial("active", endsAt), "account-2")), "active");
   assert.equal(notices.due(account(trial("active", endsAt + HOUR))), "active");
@@ -73,7 +68,6 @@ test("nothing is due without a verified session and a trial; a broken record nev
   assert.equal(notices.due(ended), "ended");
   assert.doesNotThrow(() => notices.seen(ended));
   assert.equal(notices.due(ended), null, "kept in memory when the file cannot be written");
-  // A record from another day, or one that is not ours, shows nothing as seen.
   for (const saved of [{ day: "2020-01-01", shown: ["0".repeat(32)] }, { day: localDay(NOON), shown: "all" }, { day: localDay(NOON), shown: [42, "<b>"] }, "nonsense"]) {
     assert.equal(createTrialNotices({ read: () => saved, write: () => {}, now: () => NOON }).due(ended), "ended");
   }

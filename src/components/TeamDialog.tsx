@@ -6,7 +6,6 @@ import { BotPickerList } from "./BotPickerList";
 import { NewBotDialog } from "./lazy-screens";
 import { t } from "@/lib/i18n";
 
-/** A team may start empty; choosing bots moves their membership, never copies them. */
 export function TeamDialog({ section, rename = false, onClose, onRenamed }: {
   section?: string;
   rename?: boolean;

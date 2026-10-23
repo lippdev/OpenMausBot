@@ -1,6 +1,4 @@
-// The DuckDB engine against the real binding, loaded the way the packaged
-// app loads it: from a tree outside node_modules named by OMB_DUCKDB_DIR.
-// Every database lives in a throwaway folder; nothing touches DATA_DIR.
+// Loaded the way the packaged app loads it: from a tree outside node_modules named by OMB_DUCKDB_DIR.
 import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -50,22 +48,16 @@ const bot = { connection: "bot" as const };
 const panel = { connection: "panel" as const };
 
 afterAll(async () => {
-  // On Windows CI, DuckDB's native close blocks the worker thread after
-  // these tests (the hook timed out with no JavaScript timer firing), so no
-  // bound in here can help. The process exit reclaims the handles; the
-  // tests themselves have already decided the result.
+  // On Windows CI DuckDB's native close blocks the worker thread here; the process exit reclaims the handles.
   if (process.platform === "win32") {
     console.warn("engine.test: leaving the databases to the process on Windows (native close blocks the thread)");
     return;
   }
-  // A close gives up on a stuck statement after CLOSE_DRAIN_MS; the hook must
-  // outlast that for every engine.
+  // A close gives up on a stuck statement after CLOSE_DRAIN_MS; the hook must outlast that.
   const closing = Promise.all(engines.map((e) => e.closeAll()));
   const gaveUp = new Promise<"gave-up">((resolve) => setTimeout(() => resolve("gave-up"), CLOSE_DRAIN_MS * 2).unref());
   if (await Promise.race([closing.then(() => "closed" as const), gaveUp]) === "gave-up") throw new Error("closeAll did not finish");
-  // Windows keeps a just-closed database busy for a while (EPERM on rm); a
-  // temp directory left on a runner is not a test failure there. rm's retry
-  // delay grows linearly, so 10 × 100 ms stays well inside the hook timeout.
+  // Windows keeps a just-closed database busy (EPERM on rm); 10 × 100 ms of linear retry stays inside the hook timeout.
   await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }, CLOSE_DRAIN_MS * 4);
 
@@ -174,9 +166,6 @@ describe("extensions", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
-  /** A binding whose connections answer `SELECT 1`, spend `installMs` on an
-   * INSTALL (honouring interrupt() like a download would), and fail an
-   * INSTALL with `installError` when set. */
   function fakeBinding(installMs: number) {
     const statements: string[] = [];
     const fake = { statements, installError: null as Error | null, interrupts: 0 };
@@ -223,7 +212,6 @@ describe("extensions", () => {
     expect(seen.rows).toEqual([[1]]);
     expect(fake.interrupts).toBe(0);
     expect(fake.statements.slice(1)).toEqual(["INSTALL excel FROM core", "LOAD excel", "SELECT 1"]);
-    // The budget is the extension step's, not the statement's.
     expect(EXTENSION_INSTALL_TIMEOUT_MS).toBe(5 * 60_000);
     fake.installError = new Error("Could not connect");
     const offline = await failure(db.run("SELECT 1", { ...bot, extensions: ["excel"] }));
@@ -520,12 +508,48 @@ describe("cancellation", () => {
     setTimeout(() => controller.abort(), 100);
     const error = await failure(db.run(LONG_QUERY, { ...bot, signal: controller.signal }));
     expect(error.error.code).toBe("cancelled");
-    // A slow runner may not have started the statement within 100 ms; then
-    // the signal is seen before it runs, which is cancelled all the same.
+    // A slow runner may see the signal before the statement starts, which is cancelled all the same.
     expect(error.error.message).toMatch(/interrupt|cancelled before it ran/i);
     const early = new AbortController();
     early.abort();
     expect((await failure(db.run("SELECT 1", { ...bot, signal: early.signal }))).error.code).toBe("cancelled");
+  });
+
+  it("cancels a statement whose abort landed before it dispatched", async () => {
+    let dispatched = false;
+    let delivered = 0;
+    let abandon: (() => void) | undefined;
+    const connection = {
+      run: () => {
+        dispatched = true;
+        return new Promise<unknown>((resolve, reject) => {
+          const finish = setTimeout(() => resolve("finished without an interrupt"), 500);
+          abandon = () => { clearTimeout(finish); reject(new Error("INTERRUPT Error: Interrupted!")); };
+        });
+      },
+      interrupt: () => {
+        delivered++;
+        abandon?.();
+      },
+    };
+    const lane = new Lane(connection as never);
+    let parked!: () => void;
+    const atWork = new Promise<void>((done) => { parked = done; });
+    let open!: () => void;
+    const gate = new Promise<void>((done) => { open = done; });
+    const controller = new AbortController();
+    const running = lane.run("SELECT 1", { signal: controller.signal, timeoutMs: 30_000 }, async (conn) => {
+      parked();
+      await gate;
+      return conn.run("SELECT 1");
+    });
+    await atWork;
+    controller.abort();
+    open();
+    const error = await failure(running);
+    expect(dispatched).toBe(true);
+    expect(error.error.code).toBe("cancelled");
+    expect(delivered).toBeGreaterThan(1);
   });
 
   it("interrupts one connection while the other keeps working, and queued statements still run", async () => {
@@ -574,8 +598,7 @@ describe("lifecycle", () => {
     const db = await e.forBot("doomed");
     await db.run("CREATE TABLE t AS SELECT 1", bot);
     const folder = join(root, "bots", "doomed");
-    // Leftovers of an earlier run: written once the database is closed, since
-    // Windows refuses to open the WAL while DuckDB holds it.
+    // Written once the database is closed: Windows refuses to open the WAL while DuckDB holds it.
     await db.close();
     mkdirSync(join(folder, "data-tmp"), { recursive: true });
     writeFileSync(join(folder, "data-tmp", "spill.tmp"), "x");

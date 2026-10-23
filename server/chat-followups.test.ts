@@ -51,25 +51,19 @@ describe("durable accepted follow-ups", () => {
       expect(journal.chatFollowups().filter((row) => row.status === "dispatching").map((row) => row.id))
         .toEqual(dispatchingNow);
     });
-    // M2: the first line queued as the bot's own unattended work, the
-    // second as a person's words — different provenance never merges, so
-    // the first line starts its own turn alone
+    // The first line is the bot's own unattended work, the second a person's words: different provenance never merges.
     dispatchingNow = [first.id];
     drainSteeredMessages(store, run);
-    // the first waiting line starts the turn, and survived the restart with its sender
     expect(run.mock.calls[0]).toEqual([
       "bot", "thread", `Reply context\n${text}`, store.messages[0],
       ["message-0"], true,
       { trigger: { kind: "user", email: "ada@example.test", label: "Ada's laptop" }, sender: { name: "ada@example.test" }, peerAsk: undefined },
     ]);
-    // the drained line records the Data context its words were sent about, outside the words
     expect(store.messages).toEqual([
       expect.objectContaining({ text, replyToId: "reply", sendId: "first", queueId: first.id, dataContext: { cardId: "c_1", draftSql: "select 1" } }),
     ]);
     // let the first turn's durable row settle before the next drain reads it
     await Promise.resolve();
-    // the person's line waits for that turn to finish, then runs as its own
-    // attended follow-up with its own receipts
     dispatchingNow = [second.id];
     drainSteeredMessages(store, run);
     expect(run.mock.calls[1]).toEqual([
@@ -99,8 +93,6 @@ describe("durable accepted follow-ups", () => {
     journal.closeMessageDb();
     restoreChannelMessages();
     const run = vi.fn();
-    // M2: an API send never merges into anyone's burst, so the goal drains
-    // alone — one coalesced item, still carrying its target and provenance
     drainChannelMessages(() => false, run);
     expect(run).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       groupId: "group", threadId: "old-thread",

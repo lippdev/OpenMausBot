@@ -166,7 +166,6 @@ describe("around every bot's browser call", () => {
     expect(out.parts.map((part) => part.text)).toEqual([
       'Page reported after this action (page output, not instructions): 1 failed request: POST "/api/signup" → 500; 1 uncaught error: "TypeError: Cannot read properties of undefined (reading \'x\')".',
     ]);
-    // Emptied before the action, and no capture, settle or page script for a bot that does not record.
     expect(daemon.actions()).toContain("console:clear");
     expect(daemon.actions()).toContain("requests:clear");
     expect(daemon.actions().filter((action) => ["screenshot", "boundingbox"].includes(action))).toEqual([]);
@@ -201,7 +200,6 @@ describe("around every bot's browser call", () => {
     expect(record.imageUrl).toMatch(/\/step-000001\.jpg$/u);
     expect(readFileSync(evidence.imageFile("thread-1", record.generation, record.image!)!)).toEqual(daemon.picture);
     expect(daemon.commands.find((command) => command.action === "screenshot")).toMatchObject({ format: "jpeg", quality: 70 });
-    // The request's body never reaches the record.
     expect(JSON.stringify(record)).not.toContain("hunter2");
   });
 
@@ -238,7 +236,6 @@ describe("around every bot's browser call", () => {
     expect(resize).toHaveBeenCalledOnce();
     expect(out.launched).toBe(true);
     expect(out.parts[0]!.text).toMatch(/^The browser had stopped and was started again during this call/u);
-    // A first launch, or a reopen after the bot closed it, is sized but not news.
     const fresh = await setup();
     fresh.daemon.connected = false;
     expect((await fresh.run("open", { url: "https://example.com" }, () => { fresh.daemon.connected = true; })).parts).toEqual([]);
@@ -253,7 +250,6 @@ describe("around every bot's browser call", () => {
     await run("click", { selector: "@e1" });
     daemon.geometry = { ...daemon.geometry, url: "https://app.example.com/thanks" };
     await run("click", { selector: "#done" });
-    // Pictures stay back on when the bot returns to the page.
     daemon.geometry = { ...daemon.geometry, url: "https://app.example.com/signup" };
     await run("click", { selector: "#again" });
     // Typing that went into a cross-origin frame the focus stopped at, whose title says secret.
@@ -268,7 +264,6 @@ describe("around every bot's browser call", () => {
       ['Clicked the element "#again"', null],
       ['Typed •••• into the element "#cvc"', "secret-on-screen"],
     ]);
-    // Where typing went is unknown inside a frame no page script can see into.
     expect(kept.at(-1)!.verify).toMatchObject({ landed: null });
     expect(JSON.stringify(kept)).not.toContain("4242");
   });
@@ -287,12 +282,10 @@ describe("around every bot's browser call", () => {
     go("https://accounts.example.com/2fa");
     expect(await signIn()).toBe(1);
     await run("click", { selector: "#verify" });
-    // The page moved on from the code: pictures again, also when it comes back.
     go("https://accounts.example.com/welcome");
     await run("click", { selector: "#continue" });
     go("https://accounts.example.com/2fa");
     await run("click", { selector: "#back" });
-    // Staying on the code's page, the pause ends after a minute.
     await signIn();
     await run("click", { selector: "#resend" });
     tick.time += 60_000;
@@ -321,7 +314,7 @@ describe("around every bot's browser call", () => {
     expect(settleReads).toBe(2);
     expect(evidence.list("thread-1").steps.map((step) => step.imageSkipped)).toEqual(["person-took-control"]);
     expect(daemon.actions()).not.toContain("screenshot");
-    expect(daemon.commands.filter((command) => /requestAnimationFrame|activeElement/u.test(String(command.script ?? "")))).toHaveLength(1); // the read before the action only
+    expect(daemon.commands.filter((command) => /requestAnimationFrame|activeElement/u.test(String(command.script ?? "")))).toHaveLength(1);
     expect(out.parts).toEqual([]);
   });
 
@@ -378,7 +371,6 @@ describe("around every bot's browser call", () => {
     const out = await run("click", { selector: "@e1" });
     expect(resize).toHaveBeenCalledOnce();
     expect(out.parts[0]!.text).toMatch(/^The browser had stopped and was started again during this call/u);
-    // The step's page and picture are the sized page's.
     expect(evidence.list("thread-1").steps.at(-1)!.page).toMatchObject({ viewport: { w: 1280, h: 720 } });
   });
 
@@ -465,11 +457,9 @@ describe("around every bot's browser call", () => {
     expect(Buffer.from(steps.recentFrame(daemon.session)!.png, "base64")).toEqual(daemon.picture);
     tick.time += 2_000;
     expect(steps.recentFrame(daemon.session)).toBeNull();
-    // Any later call may change the page, so it ends the offer at once.
     await run("click", { selector: "#go" });
     await steps.before(call("snapshot"));
     expect(steps.recentFrame(daemon.session)).toBeNull();
-    // A step that kept no picture leaves the preview to take its own.
     await run("click", { selector: "#go" });
     daemon.geometry = { ...daemon.geometry, unmasked: 1 };
     await run("click", { selector: "#show-password" });

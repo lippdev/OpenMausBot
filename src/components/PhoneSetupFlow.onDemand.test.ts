@@ -1,9 +1,5 @@
 // @vitest-environment happy-dom
-// A signed-in computer holds no HTTPS address until someone pairs. Pressing
-// Pair asks the desktop for one under the "Creating secure remote access"
-// spinner, then opens the HTTPS QR. When no address is free, the person is
-// told when to try again and can pair on Wi-Fi instead. The real controller
-// and view run against a fake preload bridge.
+// The real controller and view run against a fake preload bridge.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -17,8 +13,6 @@ const HOSTED = "https://c-opaque.openmausbot.com";
 const FULL =
   "Secure HTTPS links are temporarily full. Try again in 10 minutes, or pair on this Wi-Fi or with Tailscale.";
 
-/** The desktop as the bridge shows it: Remote access off, signed in, and no
- * address until prepare() makes one. */
 function desktop() {
   let companion: CompanionState = { enabled: false, keepAwake: false, port: 8810, devices: [], pairing: null };
   let account: CompanionAccountState = { available: true, status: "ready", email: "ada@example.com" };
@@ -76,8 +70,6 @@ function desktop() {
       companion = { ...withHosted(), enabled: true };
       account = { ...account, endpoint: HOSTED };
     },
-    /** An hour after the request the desktop stops retrying and clears the
-     * error: signed in, no address, nothing in flight. */
     stopRetrying() {
       account = { available: true, status: "ready", email: "ada@example.com" };
     },
@@ -126,10 +118,8 @@ describe("pairing on a computer that holds no HTTPS address yet", () => {
       { timeout: 5_000 },
     );
     expect(fake.bridge.companion.pairing).toHaveBeenCalledWith(true);
-    // The code's address is the new HTTPS one.
     flushSync(() => button("Reveal")!.click());
     expect(text()).toContain(`Pairing address${HOSTED}`);
-    // Once to create it, and once more, unawaited, as the QR opens on it.
     expect(fake.bridge.companionAccount.prepare).toHaveBeenCalledTimes(2);
   });
 
@@ -145,7 +135,6 @@ describe("pairing on a computer that holds no HTTPS address yet", () => {
     expect(button("Pair on this Wi-Fi instead")).not.toBeNull();
     expect(fake.bridge.companion.pairing).not.toHaveBeenCalled();
 
-    // Wi-Fi pairing opens its own QR and asks for no HTTPS address.
     flushSync(() => button("Pair on this Wi-Fi instead")!.click());
     await vi.waitFor(() => expect(host.querySelector('[aria-label="Device pairing QR code"]')).not.toBeNull());
     expect(fake.bridge.companion.pairing).toHaveBeenCalledWith(true);
@@ -159,7 +148,6 @@ describe("pairing on a computer that holds no HTTPS address yet", () => {
     fake.finishPrepare("full");
     await vi.waitFor(() => expect(text()).toContain(FULL));
 
-    // Not a spinner with nothing behind it: the open pairing asks again.
     fake.stopRetrying();
     await vi.waitFor(
       () => expect(fake.bridge.companionAccount.prepare).toHaveBeenCalledTimes(2),
@@ -181,9 +169,6 @@ describe("pairing on a computer that already holds its HTTPS address", () => {
     await startPairing(fake);
 
     await vi.waitFor(() => expect(host.querySelector('[aria-label="Device pairing QR code"]')).not.toBeNull());
-    // Recorded as a request, so a release planned for the idle address does
-    // not land while the person installs the app. The QR did not wait for
-    // it: this prepare() never answers.
     expect(fake.bridge.companionAccount.prepare).toHaveBeenCalledOnce();
     expect(fake.bridge.companion.pairing).toHaveBeenCalledWith(true);
   });

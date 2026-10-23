@@ -6,9 +6,7 @@ import { createOpenAIChatRuntime } from "./openai-chat.ts";
 // https://dev.meta.ai/docs/protocols/chat-completions
 const DEFAULT_URL = "https://api.meta.ai/v1";
 const MUSE_CONTEXT_WINDOW = 1_048_576;
-// https://dev.meta.ai/docs/models
-// Muse Wonder's id is from Muse Code's own Meta catalog (`model/list`,
-// Oct 12, 2026); the Model API docs did not list it yet.
+// https://dev.meta.ai/docs/models (Muse Wonder's id is from Muse Code's own `model/list`; the docs omit it)
 const DEFAULT_MODELS: ModelCatalog = {
   default: "muse-wonder-1.0",
   options: [
@@ -45,8 +43,7 @@ function museLabel(id: string): string {
   return id.split("-").map(word => /^\d/.test(word) ? word : word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 }
 
-/** Muse Wonder shipped on Oct 12, 2026 without a documented API id, so the
- * default follows Meta's own listing: its standard-tier Wonder, before Full. */
+/** Muse Wonder has no documented API id: follow Meta's listing, standard-tier Wonder before Full. */
 function wonderModel(options: ModelCatalog["options"]): string | undefined {
   return options.map(option => option.id)
     .filter(id => /^muse-wonder/i.test(id) && !/contributor/i.test(id))
@@ -66,8 +63,7 @@ export const MetaDriver: ProviderDriver<MetaConfig> = {
   defaultConfig: () => decodeConfig({}),
   async create(input) {
     const { config } = input;
-    // An instance with a custom host must bring its own credential. The
-    // workspace injects its key only for its explicitly configured endpoint.
+      // A custom host must bring its own credential; the workspace key goes only to its configured endpoint.
     const apiKey = (input.environment.META_API_KEY ??
       (config.url === DEFAULT_URL ? process.env.META_API_KEY : undefined) ?? "").trim();
     const known = new Map(DEFAULT_MODELS.options.map(option => [option.id, option]));
@@ -79,8 +75,6 @@ export const MetaDriver: ProviderDriver<MetaConfig> = {
       return { default: options.some(option => option.id === preferred) ? preferred : options[0].id, options };
     };
     let catalog = withConfiguredModel(DEFAULT_MODELS.options);
-    // The catalog is Meta's own listing, so a new Muse model reaches the
-    // picker (its refresh button, a restart or a saved key) without a release.
     const refreshModels = async () => {
       if (!apiKey) return;
       try {
@@ -101,9 +95,7 @@ export const MetaDriver: ProviderDriver<MetaConfig> = {
             ...(/^muse-(?:spark|wonder)/i.test(id) ? { contextWindow: MUSE_CONTEXT_WINDOW } : {}) });
         }
         if (options.length) catalog = withConfiguredModel(options);
-      } catch {
-        // A failed or malformed refresh keeps the last usable catalog.
-      }
+      } catch {}
     };
     if (apiKey) void refreshModels();
     return createOpenAIChatRuntime({
@@ -117,8 +109,7 @@ export const MetaDriver: ProviderDriver<MetaConfig> = {
       httpErrorLabel: "Meta",
       missingKeyError: "Save a Meta Model API key in Settings → API keys, or set META_API_KEY.",
       unavailableReason: "No Meta Model API key — open Settings → API keys.",
-      // Muse reasons privately and streams nothing until it answers, so a
-      // long think at high effort must not trip the idle timer.
+      // Muse reasons privately and streams nothing until it answers.
       timeoutMs: 600_000, billing: "metered", includeUsageInCompleted: true,
       nativeLog: {
         source: "meta.chat.completions",

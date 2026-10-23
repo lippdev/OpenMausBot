@@ -47,13 +47,10 @@ describe("the oldest thread", () => {
 describe("a thread saved on a routine as the oldest one", () => {
   it("is a conversation no open thread is older than, open still or archived since", () => {
     expect(wasOldestThread([latest, later, first], "first")).toBe(true);
-    // Archived after it was saved: today's oldest open thread is another.
     expect(wasOldestThread([latest, later, { ...first, archivedAt: 9 }], "first")).toBe(true);
     expect(wasOldestThread([latest, { ...later, archivedAt: 9 }, { ...first, archivedAt: 8 }], "later")).toBe(true);
-    // An older open thread means a person chose this one.
     expect(wasOldestThread([latest, later, first], "later")).toBe(false);
     expect(wasOldestThread([latest, { ...later, archivedAt: 9 }, first], "later")).toBe(false);
-    // An older routine run is no conversation; a run, a deleted thread never.
     expect(wasOldestThread([latest, later, { ...first, routineRunId: "run" }], "later")).toBe(true);
     expect(wasOldestThread([latest, { ...later, routineRunId: "run" }], "later")).toBe(false);
     expect(wasOldestThread([latest, later], "deleted")).toBe(false);

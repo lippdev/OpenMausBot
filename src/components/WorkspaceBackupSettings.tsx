@@ -4,7 +4,6 @@ import type { WorkspaceBackupSummary } from "../../shared/workspace-backup";
 import { api } from "@/state/store";
 import { t } from "@/lib/i18n";
 import { applyWorkspaceClientState, collectWorkspaceClientState, WORKSPACE_RESTORE_MARKER } from "@/lib/workspace-backup-client";
-import { CloudMoveImport } from "./CloudMove";
 import { Card } from "./SettingsPrimitives";
 
 type BackupStatus = { busy: boolean; pendingRestore?: boolean; lastRestoreId?: string };
@@ -98,8 +97,6 @@ export function WorkspaceBackupSettings() {
       method: "POST", body: JSON.stringify({ password: exportPassword, clientState: collectWorkspaceClientState() }),
     });
     if (alive.current) { setExportPassword(""); setConfirmPassword(""); }
-    // Native download streams large archives without buffering them in the
-    // renderer. Same-origin cookies/desktop headers preserve owner access.
     if (!alive.current) return;
     const url = `/api/workspace-backup/download/${encodeURIComponent(result.id)}`;
     setDownload({ url, filename: result.filename });
@@ -134,8 +131,8 @@ export function WorkspaceBackupSettings() {
 
   const restoreBackup = () => perform("restore", async () => {
     if (!preview || confirmation !== "REPLACE") return;
-    // This stage ID is also the restore ID. Persist it before the request so
-    // a lost response still lets this browser recover its own drafts at boot.
+    // The stage ID is the restore ID: persist it before the request so a lost response still lets this browser recover
+    // its drafts at boot.
     localStorage.setItem(WORKSPACE_RESTORE_MARKER, preview.id);
     try {
       await api("/api/workspace-backup/restore", {
@@ -169,8 +166,6 @@ export function WorkspaceBackupSettings() {
                 {download && <a href={download.url} download={download.filename} className="break-all text-[13px] text-accent-text underline">{t("backup.downloadAgain", { filename: download.filename })}</a>}
                 </form>
             </Card>
-            {/* On a server open in the desktop app: the same copy as its Copy this computer here offer. */}
-            <CloudMoveImport />
             <Card title={t("backup.import")} subtitle={t("backup.importHint")}>
                 <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void previewBackup(); }}>
                 <label className="text-[13px] text-ink">{t("backup.file")}<input type="file" accept=".ombbackup" disabled={disabled} onChange={(event) => { setFile(event.target.files?.[0] ?? null); setUploadedId(null); setPreview(null); setConfirmation(""); setImportPassword(""); setError(null); }} className="mt-1 block w-full min-w-0 rounded-lg border border-hairline/50 bg-inset p-2 text-[13px] text-ink file:mr-3 file:rounded file:border-0 file:bg-control file:px-2 file:py-1 file:text-ink disabled:opacity-50" /></label>
@@ -227,7 +222,6 @@ export function WorkspaceBackupRecovery({ children }: { children: ReactNode }) {
   const continueWithoutDrafts = () => {
     try {
       localStorage.removeItem(WORKSPACE_RESTORE_MARKER);
-      // Re-enter normal bootstrap so expired sessions can reach sign-in.
       window.location.reload();
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };

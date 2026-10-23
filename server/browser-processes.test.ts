@@ -3,12 +3,12 @@
 // hands its Chrome.
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { browserProcessesRunning, browserProcessTree, orphanedBrowsers, stopBrowserProcesses } from "./browser-processes.ts";
+import { browserProcessesRunning, browserProcessTree, orphanedBrowsers, releaseBrowserProfile, stopBrowserProcesses } from "./browser-processes.ts";
 import { removeTempDir } from "./testing/cleanup.ts";
 
 // The real tools, except where a test stands in for Windows' tasklist and taskkill.
@@ -21,7 +21,7 @@ const posix = process.platform !== "win32";
 const groups: number[] = [];
 const homes: string[] = [];
 afterEach(async () => {
-  for (const group of groups.splice(0)) { try { process.kill(-group, "SIGKILL"); } catch { /* already stopped */ } }
+  for (const group of groups.splice(0)) { try { process.kill(-group, "SIGKILL"); } catch {} }
   for (const home of homes.splice(0)) await removeTempDir(home);
 });
 
@@ -74,8 +74,6 @@ describe.skipIf(!posix)("browsers whose engine was killed under them", () => {
     expect(gone(orphan.pid!)).toBe(true);
     expect(await browserProcessesRunning(found!.tree)).toBe(false);
     for (const other of [daemon.pid!, served, elsewhere.pid!, lookalike.pid!]) expect(gone(other)).toBe(false);
-    // Its daemon would have removed its profile folder on close; nothing else
-    // is removed, not even a folder of a similar name.
     expect(existsSync(profile)).toBe(false);
     expect(existsSync(lookalikeProfile)).toBe(true);
   });
@@ -97,9 +95,6 @@ describe.skipIf(!posix)("browsers whose engine was killed under them", () => {
     expect(existsSync(kept)).toBe(true);
   });
 
-  // A pid the system gave to another program once the browser's process
-  // exited is matched by its start time: neither counted nor signalled, and
-  // nor is the group it leads.
   it("never counts or stops a process that took the number of one of the browser's", async () => {
     const stranger = start("sleep", ["30"], { PATH: process.env.PATH });
     const tree = { daemon: stranger.pid!, members: new Map([[stranger.pid!, "an earlier process"]]), groups: [stranger.pid!] };
@@ -108,9 +103,6 @@ describe.skipIf(!posix)("browsers whose engine was killed under them", () => {
     expect(gone(stranger.pid!)).toBe(false);
   });
 
-  // Chrome may start a helper while it shuts down, after anything here read
-  // its processes: one left in its group once Chrome itself has exited is
-  // still stopped by that group.
   it("stops a helper the browser starts while it exits, once the browser is gone", async () => {
     const home = mkdtempSync(join(tmpdir(), "omb-orphan-"));
     homes.push(home);
@@ -126,6 +118,82 @@ describe.skipIf(!posix)("browsers whose engine was killed under them", () => {
     const late = Number(readFileSync(latePid, "utf8"));
     expect(gone(orphan.pid!)).toBe(true);
     expect(gone(late)).toBe(true);
+  });
+});
+
+describe.skipIf(!posix)("a saved session's kept profile", () => {
+  /** A kept profile with a sign-in in it, locked the way Chrome locks one: SingletonLock -> "<host>-<pid>". */
+  function keptProfile(lockedBy?: string) {
+    const root = mkdtempSync(join(tmpdir(), "omb-kept-"));
+    homes.push(root);
+    const dir = join(root, "agent-browser-profiles", "0123456789abcdef0123456789abcdef");
+    mkdirSync(join(dir, "Default"), { recursive: true });
+    writeFileSync(join(dir, "Default", "Cookies"), "signed in");
+    if (lockedBy) {
+      symlinkSync(lockedBy, join(dir, "SingletonLock"));
+      symlinkSync(join(root, "socket"), join(dir, "SingletonSocket"));
+    }
+    return { root, dir, locked: () => { try { return lstatSync(join(dir, "SingletonLock")).isSymbolicLink(); } catch { return false; } } };
+  }
+  const signedIn = (dir: string) => readFileSync(join(dir, "Default", "Cookies"), "utf8") === "signed in";
+
+  it("frees a lock that names another computer or a process that is gone, and keeps the sign-ins", async () => {
+    for (const lock of [`another-host.example-${process.pid}`, `${hostname()}-2147483000`, "not-a-lock"]) {
+      const profile = keptProfile(lock);
+      await releaseBrowserProfile(profile.dir);
+      expect(profile.locked()).toBe(false);
+      expect(existsSync(join(profile.dir, "SingletonSocket"))).toBe(false);
+      expect(signedIn(profile.dir)).toBe(true);
+    }
+  });
+
+  it("stops a Chrome whose daemon was killed under it, then frees its lock, and keeps the sign-ins", async () => {
+    const profile = keptProfile();
+    const orphan = start(process.execPath, ["-e", IDLE, "--", "--remote-debugging-port=0", `--user-data-dir=${profile.dir}`], daemonEnv(profile.root, "bot-kept"));
+    symlinkSync(`${hostname()}-${orphan.pid}`, join(profile.dir, "SingletonLock"));
+    await vi.waitFor(async () => {
+      await releaseBrowserProfile(profile.dir);
+      expect(gone(orphan.pid!)).toBe(true);
+    }, { timeout: 10_000 });
+    expect(profile.locked()).toBe(false);
+    expect(signedIn(profile.dir)).toBe(true);
+  });
+
+  it("leaves a daemon's own Chrome running with its lock, until that daemon is killed", async () => {
+    const profile = keptProfile();
+    const servedPid = join(profile.root, "served.pid");
+    const chrome = ["-e", IDLE, "--", "--remote-debugging-port=0", `--user-data-dir=${profile.dir}`];
+    const daemon = start(process.execPath, ["-e", `const served = require('node:child_process').spawn(process.execPath, ${JSON.stringify(chrome)}, { stdio: 'ignore', detached: true }); require('node:fs').writeFileSync(${JSON.stringify(servedPid)}, String(served.pid)); ${IDLE}`], daemonEnv(profile.root, "bot-kept"));
+    await vi.waitFor(() => expect(existsSync(servedPid) && readFileSync(servedPid, "utf8")).toBeTruthy());
+    const served = Number(readFileSync(servedPid, "utf8"));
+    groups.push(served);
+    symlinkSync(`${hostname()}-${served}`, join(profile.dir, "SingletonLock"));
+    await releaseBrowserProfile(profile.dir);
+    await releaseBrowserProfile(profile.dir);
+    expect(profile.locked()).toBe(true);
+    for (const pid of [daemon.pid!, served]) expect(gone(pid)).toBe(false);
+    // Its daemon killed, the same Chrome is now an orphan that would take the next launch.
+    process.kill(daemon.pid!, "SIGKILL");
+    await vi.waitFor(() => expect(gone(daemon.pid!)).toBe(true));
+    await vi.waitFor(async () => {
+      await releaseBrowserProfile(profile.dir);
+      expect(gone(served)).toBe(true);
+    }, { timeout: 10_000 });
+    expect(profile.locked()).toBe(false);
+    expect(signedIn(profile.dir)).toBe(true);
+  });
+
+  it("finds a kept profile's Chrome whose daemon is gone, and stopping it never deletes the profile", async () => {
+    const profile = keptProfile();
+    const orphan = start(process.execPath, ["-e", IDLE, "--", "--remote-debugging-port=0", `--user-data-dir=${profile.dir}`], daemonEnv(profile.root, "bot-kept"));
+    const profiles = join(profile.root, "agent-browser-profiles");
+    expect(await orphanedBrowsers(profile.root)).toEqual([]);
+    await vi.waitFor(async () => expect((await orphanedBrowsers(profile.root, profiles)).map((found) => found.session)).toEqual(["bot-kept"]), { timeout: 5_000 });
+    const [found] = await orphanedBrowsers(profile.root, profiles);
+    expect(found!.tree.profiles).toEqual([]);
+    expect(await stopBrowserProcesses(found!.tree)).toBe(true);
+    expect(gone(orphan.pid!)).toBe(true);
+    expect(signedIn(profile.dir)).toBe(true);
   });
 });
 

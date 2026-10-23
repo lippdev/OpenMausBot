@@ -1,9 +1,6 @@
 #!/usr/bin/env -S node --experimental-strip-types
-// The openmausbot headless verbs (server/headless/main.ts) for verifying an
-// isolated fixture: every verb, with its flags and its JSON result, plus the
-// fixture launcher and the renderer verbs (`ui`). One difference on purpose:
-// a verb that changes something never runs on a server it merely found, so a
-// recipe cannot reach the person's own app by accident.
+// The openmausbot headless verbs for verifying an isolated fixture. A verb that
+// changes something never runs on a server it merely found.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, mkdirSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,13 +16,11 @@ import { removeTempDir, waitForExit } from "../server/testing/cleanup.ts";
 import { freePortBlock } from "../server/testing/ports.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-/** Deterministic name for the seeded starter bot of a verification fixture,
- * deliberately outside the server/names.ts pool so no suite can plan a bot
- * that collides with the starter (#1257). */
+/** Outside the bot name pool, so no suite can plan a bot that collides with the
+ * starter. */
 export const FIXTURE_STARTER_BOT_NAME = "Fixture Starter";
 const FAKE_CLI = join(ROOT, "server", "testing", "fake-claude-cli.ts");
 
-/** A control-omb refusal: the headless verbs' own error, with control-omb's (message, hint) shape. */
 export class ControlOmbError extends HeadlessError {
   constructor(message: string, hint?: string) {
     super(message, EXIT.failed, hint);
@@ -88,7 +83,6 @@ const commonOptions = {
   url: { type: "string" },
 } satisfies ParseArgsOptionsConfig;
 
-/** Strict flag parsing for one `ui` verb. */
 export function parse(
   command: string,
   args: string[],
@@ -109,7 +103,6 @@ export function parse(
   }
 }
 
-/** Run one verb and return its result: the same verbs as `openmausbot`, never on a found server when it changes something. */
 export async function runControlOmb(
   argv: string[],
   dependencies: ControlOmbDependencies = {},
@@ -117,7 +110,6 @@ export async function runControlOmb(
   const [command = "help", ...args] = argv;
   if (command === "help" || command === "--help" || command === "-h") return HELP;
   if (command === "launch") throw new ControlOmbError("launch is available only from the executable CLI");
-  // The first positional after `ui` is the verb; its tail is parsed strictly per verb.
   if (command === "ui") return runControlOmbUi(args);
   return runHeadlessCommand(argv, {
     env: dependencies.env ?? process.env,
@@ -135,10 +127,8 @@ export interface VerificationServer {
   close(): Promise<void>;
 }
 
-/** The environment of a verification server child: a temporary home in
- * `dataDir`, the fake engine's knobs from `parentEnv`, node on PATH, and
- * nothing else from the parent shell or this machine's installed CLIs. A
- * test that restarts its own fixture server on the same data uses this too. */
+/** A temporary home in `dataDir`, the fake engine's knobs from `parentEnv`, node
+ * on PATH, and nothing else from the parent shell or this machine's CLIs. */
 export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, dataDir: string, port: number): NodeJS.ProcessEnv {
   const childEnv: NodeJS.ProcessEnv = {};
   const platformKeys = new Set(["SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"]);
@@ -162,70 +152,72 @@ export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, data
     OMB_DATA_DIR: dataDir,
     OMB_PORT: String(port),
     OMB_WEBHOOK_PORT: String(port + 1),
-    // The fixture's default CLI behaviour; a caller that sets
-    // FAKE_CLAUDE_MODE explicitly overrides it below to drive the CLI's
-    // failure paths (exit-early, dead-session, hang...) through the real
-    // server. Nothing else from the parent shell reaches the fixture.
+    // A caller's FAKE_CLAUDE_MODE overrides this below to drive failure paths.
     FAKE_CLAUDE_MODE: parentEnv.FAKE_CLAUDE_MODE || "happy",
     FAKE_CLAUDE_DUMP: join(dataDir, "fake-claude-dump.json"),
-    // Keep the environment hermetic while allowing POSIX to resolve the
-    // fake CLI's `#!/usr/bin/env node` shebang. Windows resolves that same
-    // fixture through spawnCli without a shell.
+    // POSIX resolves the fake CLI's `#!/usr/bin/env node` shebang through PATH;
+    // Windows resolves it through spawnCli without a shell.
     PATH: dirname(process.execPath),
-    // ...and keep engine discovery to that PATH and this home. Without it the
-    // server also scans /opt/homebrew/bin, /usr/local/bin and the login
-    // shell's PATH, so a developer's own `codex` (or any engine CLI) becomes
-    // an "available" engine that CI never has (#2035).
+    // Without it the server also scans /opt/homebrew/bin, /usr/local/bin and the
+    // login shell's PATH, finding a developer's own engine CLIs that CI lacks.
     OMB_TEST_SEALED_PATH: "1",
   });
-  // The fake engine's own knobs (mode, replies, tool calls) are the one thing
-  // a caller may script into the child: FAKE_CLAUDE_* crosses, and the Codex
-  // fake's background-call knobs (FAKE_CODEX_TEXT_*); nothing else.
+  // The fake engines' knobs are the one thing a caller may script into the child.
   for (const [key, value] of Object.entries(parentEnv)) {
     // FAKE_CLAUDE_DUMP stays the launcher's: assertions read fixtureDumpPath.
     if ((key.startsWith("FAKE_CLAUDE_") || key.startsWith("FAKE_CODEX_TEXT_")) && key !== "FAKE_CLAUDE_DUMP" && value) childEnv[key] = value;
   }
-  // A test's key for relaying an organization library into the fixture
-  // (POST /api/testing/org-library); the route does not exist without it.
+  // Enables POST /api/testing/org-library; the route does not exist without it.
   if (parentEnv.OMB_TEST_ORG_LIBRARY_KEY) childEnv.OMB_TEST_ORG_LIBRARY_KEY = parentEnv.OMB_TEST_ORG_LIBRARY_KEY;
-  // One log line per browser call and preview frame (server/browser-runtime.ts).
+  // One log line per browser call and preview frame.
   if (parentEnv.OMB_BROWSER_TIMING === "1") childEnv.OMB_BROWSER_TIMING = "1";
-  // Live calls against server/testing/fake-openai-live.ts only: a loopback
-  // URL, and a key that only ever reaches that fake.
+  // A loopback fake only: the key never reaches a real provider.
   const liveUrl = parentEnv.OMB_OPENAI_LIVE_URL?.trim() ?? "";
   if (/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(liveUrl)) {
     childEnv.OMB_OPENAI_LIVE_URL = liveUrl;
     if (parentEnv.OMB_OPENAI_LIVE_KEY) childEnv.OMB_OPENAI_LIVE_KEY = parentEnv.OMB_OPENAI_LIVE_KEY;
   }
-  // Live calls need Pro (electron/pro-plan.mjs): a recipe that starts calls
-  // says so with OMB_PRO_PLAN=1, the way any server the desktop app did not
-  // start does. Without it the fixture refuses a call with 402 needsPro.
+  // A loopback connected-apps service only (server/testing/broker-fake.ts): its token never reaches the real one.
+  const brokerUrl = parentEnv.OMB_COMPOSIO_BROKER_URL?.trim() ?? "";
+  if (/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(brokerUrl) && parentEnv.OMB_COMPOSIO_BROKER_TOKEN) {
+    childEnv.OMB_COMPOSIO_BROKER_URL = brokerUrl;
+    childEnv.OMB_COMPOSIO_BROKER_TOKEN = parentEnv.OMB_COMPOSIO_BROKER_TOKEN;
+  }
+  // Research against loopback stubs only (server/x-research.e2e.test.ts): the relay token crosses only with its stub,
+  // and a treg stand-in replaces treg.to, so no test reaches a real relay or treg.
+  const xUrl = parentEnv.OMB_CLOUD_X_URL?.trim() ?? "";
+  if (/^http:\/\/127\.0\.0\.1:\d{1,5}(?:\/[A-Za-z0-9_-]+)*$/.test(xUrl)) {
+    childEnv.OMB_CLOUD_X_URL = xUrl;
+    if (parentEnv.OMB_CLOUD_X_TOKEN) childEnv.OMB_CLOUD_X_TOKEN = parentEnv.OMB_CLOUD_X_TOKEN;
+  }
+  const tregUrl = parentEnv.OMB_TREG_URL?.trim() ?? "";
+  if (/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(tregUrl)) childEnv.OMB_TREG_URL = tregUrl;
+  // Loopback only, for harness mechanics: a fake ElevenLabs the measurement
+  // substrate can drive without a key. Never a real address.
+  const elevenApi = parentEnv.OMB_ELEVENLABS_API?.trim() ?? "";
+  if (/^http:\/\/127\.0\.0\.1:\d{1,5}$/.test(elevenApi)) childEnv.OMB_ELEVENLABS_API = elevenApi;
+  // Live calls need Pro; without it the fixture refuses a call with 402 needsPro.
   if (parentEnv.OMB_PRO_PLAN?.trim() === "1") childEnv.OMB_PRO_PLAN = "1";
-  // Voice-note e2e fault injection: arms the one-shot audio-append failure
-  // prelude inside the fixture server (see fail-audio-append-once.mjs).
+  // Arms the one-shot audio-append failure inside the fixture server.
   if (parentEnv.OMB_TEST_FAIL_AUDIO_APPEND_ONCE) {
     childEnv.OMB_TEST_FAIL_AUDIO_APPEND_ONCE = parentEnv.OMB_TEST_FAIL_AUDIO_APPEND_ONCE;
   }
-  // Unanswered-approval e2e: the Claude broker's deadline fires on a marker
-  // file in the fixture's home instead of after 15 minutes
-  // (approval-clock-hooks.mjs).
+  // The Claude broker's approval deadline fires on a marker file, not after 15 minutes.
   if (parentEnv.OMB_TEST_APPROVAL_CLOCK === "1") childEnv.OMB_TEST_APPROVAL_CLOCK = "1";
-  // Stalled-turn e2e: the stall watchdog's window elapses on a marker file
-  // instead of after 20 minutes of silence (stall-clock-hooks.mjs).
+  // The stall watchdog fires on a marker file, not after 20 minutes of silence.
   if (parentEnv.OMB_TEST_STALL_CLOCK === "1") childEnv.OMB_TEST_STALL_CLOCK = "1";
-  // Runtime coordination e2e: the server runs teammate coordination on the
-  // Desktop mode: the server runs as the desktop app runs it, and the owner
-  // capability the app would hand it is this one (see desktop-parent.mjs).
+  // The UI checks drive this fixture from a real browser, as `pnpm dev` does; OMB_DEV_TRUST_LOCAL_BROWSER=0 tests the sign-in.
+  if (parentEnv.OMB_DEV_TRUST_LOCAL_BROWSER !== "0") childEnv.OMB_DEV_TRUST_LOCAL_BROWSER = "1";
+  // Desktop mode: the owner capability the app would hand the server.
   if (parentEnv.OMB_TEST_DESKTOP_OWNER_TOKEN) {
     childEnv.OMB_TEST_DESKTOP_OWNER_TOKEN = parentEnv.OMB_TEST_DESKTOP_OWNER_TOKEN;
     childEnv.OMB_DESKTOP_PARENT = "1";
+    if (parentEnv.OMB_TEST_DESKTOP_PAGES_ACCESS) childEnv.OMB_TEST_DESKTOP_PAGES_ACCESS = parentEnv.OMB_TEST_DESKTOP_PAGES_ACCESS;
   }
   return childEnv;
 }
 
-/** The node arguments of a verification server child: the fixture hooks its
- * environment asks for, then the server. A test that restarts its own
- * fixture server on the same data starts it with these too. */
+/** The fixture hooks its environment asks for, then the server. */
 export function verificationServerArgs(childEnv: NodeJS.ProcessEnv): string[] {
   const hook = (file: string) => ["--import", pathToFileURL(join(ROOT, "server", "testing", file)).href];
   return [
@@ -268,14 +260,13 @@ export async function launchVerificationServer(
       throw new ControlOmbError("Local VM verification requires an explicit loopback Podman machine");
     }
   }
-  // OMB_TEST_PORTS=19975-19999 keeps a recipe's fixture in a range of its own:
-  // from the environment it is given, else this process's (a whole suite).
+  // OMB_TEST_PORTS=19975-19999 keeps a recipe's fixture in a range of its own.
   const range = /^(\d+)-(\d+)$/.exec((parentEnv.OMB_TEST_PORTS ?? process.env.OMB_TEST_PORTS)?.trim() ?? "");
   const port = range ? await freePortBlock([0, 1], Number(range[1]), Number(range[2]) - Number(range[1])) : await freePortBlock([0, 1]);
   if (signal?.aborted) throw new ControlOmbError("verification launch cancelled");
   const url = `http://127.0.0.1:${port}`;
-  // Native browser daemons use UNIX sockets; a macOS temp home can exceed
-  // their path limit. This is still an owned, randomly named fixture only.
+  // Native browser daemons use UNIX sockets, and a macOS temp home can exceed
+  // their path limit.
   const dataDir = mkdtempSync(join(browser && process.platform !== "win32" ? "/tmp" : tmpdir(), "openmausbot-verify-data-"));
   const fixtureTemp = join(dataDir, "tmp");
   const fixtureDumpPath = join(dataDir, "fake-claude-dump.json");
@@ -343,7 +334,6 @@ export async function launchVerificationServer(
         const body = response.ok ? await response.json() as { app?: string } : null;
         if (body?.app === "openmausbot") break;
       } catch {
-        // The server is still starting.
       }
       if (Date.now() >= deadline) throw new Error(`verification server did not become ready; see ${logPath}`);
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -354,15 +344,9 @@ export async function launchVerificationServer(
     throw error;
   }
 
-  // The first-run seed gives the starter a random friendly name from
-  // server/names.ts, and that pool shares names with bots e2e suites plan
-  // ("Quill" among them). A name-based assertion then reports the starter as
-  // a phantom leaked bot and flakes (#1257). Pin the name so fixture state is
-  // deterministic for every suite built on this launcher; identity remains
-  // the honest comparison in tests either way.
+  // Pinned: the random starter name shares a pool with names e2e suites plan.
   try {
-    // Seeding is part of launch, not a one-second health probe. First-run
-    // filesystem work can exceed a second on Windows; keep the launch deadline.
+    // First-run filesystem work can exceed a second on Windows.
     const timeout = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
     const list = await fetch(`${url}/api/bots`, {
       headers: { origin: url },

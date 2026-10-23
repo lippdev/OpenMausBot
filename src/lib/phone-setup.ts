@@ -34,9 +34,7 @@ export const initialPhoneSetupFlowState: PhoneSetupFlowState = {
   skipped: false,
 };
 
-/** A small explicit state machine shared by first-run onboarding and Settings.
- * Network/account state remains external input; user intent stays here so a
- * refresh cannot accidentally turn a secure setup into local-only pairing. */
+/** User intent lives here so a refresh cannot turn a secure setup into local-only pairing. */
 export function phoneSetupReducer(
   state: PhoneSetupFlowState,
   event: PhoneSetupEvent,
@@ -124,9 +122,6 @@ export interface PhoneSetupCompanionSnapshot {
   endpoints?: CompanionEndpoint[];
 }
 
-/** Load the freshest state needed to validate a selected pairing route.
- * Tailscale is the only route whose availability can change behind a running
- * sidecar, so automatic HTTPS and direct Wi-Fi never pay for a CLI probe. */
 export async function preparePhonePairingRoute<State extends { enabled: boolean; error?: string }>(
   routeMode: CompanionPairingRouteMode,
   alreadyEnabled: boolean,
@@ -143,9 +138,6 @@ export async function preparePhonePairingRoute<State extends { enabled: boolean;
     && !state.enabled
     && (actions.shouldContinue?.() ?? true)
   ) {
-    // The panel is polled, so its last snapshot can say "on" after the
-    // sidecar exits. A deliberate Pair click should recover by starting it,
-    // not fail because the stale renderer snapshot chose read over start.
     state = await actions.start();
   }
   if (
@@ -159,9 +151,7 @@ export async function preparePhonePairingRoute<State extends { enabled: boolean;
   return state;
 }
 
-/** Automatic setup is hosted-HTTPS only. Tailscale and plain local pairing
- * remain explicit user choices, so a tailnet route cannot silently replace
- * hosted access while the account connection is still being prepared. */
+/** Automatic setup is hosted-HTTPS only, so a tailnet route cannot silently replace hosted access. */
 export const companionPairingMode = (
   account: CompanionAccountState | null,
   companion: PhoneSetupCompanionSnapshot | null,
@@ -183,9 +173,6 @@ export function phonePairingGate(
   companion: PhoneSetupCompanionSnapshot | null,
   explicitRoute: boolean,
 ): PhonePairingGate {
-  // The caller already validated which explicit route the person selected.
-  // This bypass is shared by Wi-Fi and Tailscale; neither is an automatic
-  // alternative to the hosted route.
   if (explicitRoute) return "open";
   switch (companionPairingMode(account, companion)) {
     case "hosted-ready":
@@ -199,11 +186,6 @@ export function phonePairingGate(
   }
 }
 
-/** The desktop holds an HTTPS address only while something needs it, and a
- * person pairing over it is that need. Automatic pairing says so: when it
- * waits for an address (which creates one), and when it opens on one that is
- * already there (so a release planned for an idle address cannot land
- * mid-pairing). Explicit Wi-Fi and Tailscale pairing never do. */
 export function shouldPrepareSecureAddress(
   routeMode: CompanionPairingRouteMode,
   gate: PhonePairingGate,
@@ -216,10 +198,6 @@ export function shouldPrepareSecureAddress(
     && (account.status === "ready" || account.status === "connecting");
 }
 
-/** The desktop stops retrying an address an hour after a person asked, and
- * then reports a signed-in account with none: nothing is creating one.
- * Automatic pairing still waiting for it asks again instead of showing a
- * spinner with nothing behind it. */
 export function secureAddressRequestLapsed(
   account: CompanionAccountState | null,
   companion: PhoneSetupCompanionSnapshot | null,
@@ -246,9 +224,6 @@ export function newlyPairedDeviceForFlow<T extends { id: string; name: string }>
   return newlyPairedDevice(flow.baselineDeviceIds, devices);
 }
 
-/** Setup cannot establish its "before" snapshot until Companion has loaded.
- * Returning null keeps the primary action inert instead of treating every
- * already-paired phone as a new success. */
 export function phoneSetupBaseline<T extends { id: string }>(devices: T[] | null): string[] | null {
   return devices ? devices.map((device) => device.id) : null;
 }
@@ -264,8 +239,6 @@ export interface PhonePairingAttemptLock {
   generation: number | null;
 }
 
-/** Pairing attempts may be replaced after cancellation or timeout. Only the
- * generation which still owns the lock may release the visible busy state. */
 export function claimPhonePairingAttempt(
   lock: PhonePairingAttemptLock,
   generation: number,
@@ -295,9 +268,7 @@ export interface PhonePairingAttemptQueue<TRequest extends PhonePairingQueuedReq
 
 export type PhonePairingQueueDecision = "start" | "queued" | "duplicate";
 
-/** Only one pairing mutation may reach the sidecar at a time. A newer request
- * replaces the pending request, never the active one, so a late POST cannot
- * replace a newer QR or close it during stale cleanup. */
+/** A newer request replaces the pending one, never the active one, so a late POST cannot replace a newer QR. */
 export function queuePhonePairingAttempt<TRequest extends PhonePairingQueuedRequest>(
   queue: PhonePairingAttemptQueue<TRequest>,
   request: TRequest,
@@ -323,8 +294,6 @@ export function completePhonePairingAttempt<TRequest extends PhonePairingQueuedR
   return next;
 }
 
-/** Invalidation removes work that has not started, but deliberately retains
- * an in-flight request until its own cleanup and finally block complete. */
 export function invalidatePhonePairingAttempt(
   queue: PhonePairingAttemptQueue<PhonePairingQueuedRequest>,
   generation: number,
@@ -360,10 +329,7 @@ export function companionPairingOpenFailure(
   return null;
 }
 
-/** Close a stale attempt only when its exact token is still the live window.
- * The second ownership check runs after the state read and immediately before
- * the close call, so a newer generation can take ownership without an older
- * completion cancelling its QR. */
+/** Ownership is checked again right before the close, so an older completion cannot cancel a newer QR. */
 export async function closePhonePairingIfOwned<TClosed>(
   opened: PhonePairingWindowSnapshot,
   current: () => Promise<PhonePairingWindowSnapshot>,
@@ -387,8 +353,6 @@ export async function closePhonePairingIfOwned<TClosed>(
   }
 }
 
-/** Resolve one pairing-open request, but close a window that completed after
- * the setup which requested it was cancelled or replaced. */
 export async function keepPhonePairingIfCurrent<T, TClosed>(
   open: () => Promise<T>,
   close: (opened: T) => Promise<TClosed>,
@@ -405,8 +369,6 @@ export interface PhoneSetupPollTimer {
   clear: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
-/** Schedule the next refresh only after the current one settles. This keeps a
- * slow loopback/account IPC call from accumulating several older snapshots. */
 export function startNonOverlappingPhoneSetupPoll<T>(
   poll: () => Promise<T>,
   intervalMs: number,
@@ -464,9 +426,7 @@ const PUBLIC_ACCOUNT_MESSAGES = [
   /^The secure connection request could not be completed\./,
 ];
 
-/** Electron prefixes rejected IPC errors with its channel implementation.
- * Keep that machinery and arbitrary internal messages out of product copy,
- * while retaining the already-sanitized account message and request ID. */
+/** Electron prefixes rejected IPC errors with its channel machinery; keep that out of product copy. */
 export function normalizePhoneSetupActionError(cause: unknown, fallback: string): string {
   const raw = cause instanceof Error ? cause.message : "";
   const unwrapped = raw.replace(IPC_REJECTION, "").replace(/^Error:\s*/i, "").trim();

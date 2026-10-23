@@ -24,7 +24,6 @@ function step(evidence: BrowserEvidence, threadId: string, generation = GEN, ext
   return { v: 1, step: evidence.nextStep(), at: 1, threadId, generation, image: null, action: "Clicked the \"Go\" button", ...extra };
 }
 
-/** Write a step with a screenshot of these bytes, as browser-steps.ts does. */
 async function shot(evidence: BrowserEvidence, threadId: string, bytes: Buffer, generation = GEN): Promise<StepRecord> {
   const record = step(evidence, threadId, generation);
   const target = evidence.imageTarget(threadId, generation, record.step);
@@ -113,15 +112,12 @@ describe("the browser step store", () => {
     const steps = join(evidence.root, "thread-1", GEN2, "steps.jsonl");
     mkdirSync(join(evidence.root, "thread-1", GEN2), { recursive: true });
     writeFileSync(steps, Buffer.alloc(EVIDENCE_LIMITS.threadStepBytes - 100, 0x20));
-    // Under the cap by a little: this step is kept, and counted as it is written.
     expect(evidence.accepts("thread-1")).toBe(true);
     await evidence.commit(step(evidence, "thread-1"), null);
     expect(evidence.accepts("thread-1")).toBe(false);
     await expect(evidence.commit(step(evidence, "thread-1"), null)).rejects.toThrow(/no more browser steps/);
     expect(evidence.list("thread-1").steps).toHaveLength(1);
-    // Another conversation is not held up.
     expect(evidence.accepts("thread-2")).toBe(true);
-    // The old turn's lines expire after 30 days, and steps resume.
     const old = new Date(Date.now() - EVIDENCE_LIMITS.retentionMs - 60_000);
     utimesSync(steps, old, old);
     utimesSync(join(evidence.root, "thread-1", GEN2), old, old);
@@ -185,10 +181,8 @@ describe("the browser step store", () => {
       writeFileSync(outside, "not evidence");
       symlinkSync(outside, join(evidence.root, "thread-1", GEN, imageFileName(999_999)));
       expect(evidence.imageFile("thread-1", GEN, imageFileName(999_999))).toBeNull();
-      // A link to a real screenshot inside the store is still not one.
       symlinkSync(join(evidence.root, "thread-1", GEN, written.image!), join(evidence.root, "thread-1", GEN, imageFileName(999_998)));
       expect(evidence.imageFile("thread-1", GEN, imageFileName(999_998))).toBeNull();
-      // Nor is a regular file reached through a linked folder outside the store.
       mkdirSync(join(evidence.root, "..", "elsewhere"));
       writeFileSync(join(evidence.root, "..", "elsewhere", imageFileName(5)), "not evidence");
       symlinkSync(join(evidence.root, "..", "elsewhere"), join(evidence.root, "thread-1", GEN2));

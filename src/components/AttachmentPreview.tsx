@@ -1,6 +1,5 @@
-// Same-origin attachment previews plus the reusable image viewer used by
-// Markdown. Transcript paths are resolved through attachmentImageUrl; model
-// text never gets to turn an arbitrary local path into a browser request.
+// Security: model text never turns an arbitrary local path into a browser request; transcript paths resolve through
+// attachmentImageUrl.
 import {
   useCallback,
   useEffect,
@@ -33,16 +32,13 @@ import {
 } from "@/lib/composer-attachments";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { TableFileButton } from "./TableFilePreview";
+import { FilePreviewButton } from "./FilePreviewButton";
 
 export interface PreviewImage {
   src: string;
   name: string;
-  /** Same-origin images can be downloaded directly. */
   downloadUrl?: string;
-  /** A portable filename chosen independently from the visible label. */
   downloadName?: string;
-  /** Authored remote images keep an explicit way to open their source. */
   openUrl?: string;
 }
 
@@ -105,7 +101,6 @@ const IMAGE_EXTENSIONS = new Set([
   "webp",
 ]);
 
-/** Keep a suggested download name portable and prevent it from naming a path. */
 export function safeDownloadFilename(value: string | null | undefined): string {
   const basename = (value ?? "").split(/[\\/]/).at(-1) ?? "";
   const cleaned = basename
@@ -127,7 +122,7 @@ export function safeDownloadFilename(value: string | null | undefined): string {
   return /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem) ? `_${bounded}` : bounded;
 }
 
-/** Read the server-selected filename, preferring RFC 5987's UTF-8 form. */
+/** Prefers RFC 5987's UTF-8 filename* form. */
 export function contentDispositionFilename(header: string | null): string | null {
   if (!header) return null;
   const encoded = /(?:^|;)\s*filename\*\s*=\s*(?:UTF-8'[^']*')?([^;]*)/i.exec(header)?.[1]?.trim();
@@ -136,7 +131,6 @@ export function contentDispositionFilename(header: string | null): string | null
     try {
       return safeDownloadFilename(decodeURIComponent(unquoted));
     } catch {
-      // A malformed extended value may still have a valid ASCII fallback.
     }
   }
   const quoted = /(?:^|;)\s*filename\s*=\s*"((?:\\.|[^"\\])*)"/i.exec(header)?.[1];
@@ -164,7 +158,6 @@ function replaceExtension(name: string, extension: string): string {
   return `${Array.from(stem).slice(0, available).join("")}${suffix}`;
 }
 
-/** The response chooses the label; image bytes/source choose the extension. */
 export function canonicalDownloadFilename({
   contentDisposition,
   fallback,
@@ -185,19 +178,17 @@ export function canonicalDownloadFilename({
 
 export function isExternalImageSource(src: string): boolean {
   const value = src.trim();
-  // The URL parser removes embedded ASCII tab/LF/CR and treats backslashes as
-  // slashes for special schemes. Normalize those parser quirks before deciding
-  // whether mounting the image would make a network request.
+  // The URL parser drops embedded ASCII tab/LF/CR and treats backslashes as slashes for special schemes.
   const networkSpelling = value.replace(/[\t\n\r]/g, "").replace(/\\/g, "/");
-  // Chromium canonicalizes special-scheme variants such as `https:host/x`,
-  // `https:/host/x`, and backslash spellings into network requests. Treat the
-  // whole scheme family as remote before an <img> can mount.
+  // Chromium canonicalizes special-scheme variants (`https:host/x`, `https:/host/x`, backslashes) into network
+  // requests.
   return networkSpelling.startsWith("//") || /^https?:/i.test(networkSpelling);
 }
 
-/** A message-scoped image URL is safe for an <img>: the server still proves
- * that this exact message rendered an image at this Markdown source offset
- * before streaming it. The host path never enters the browser URL. */
+/**
+ * Security: the host path never enters the browser URL; the server proves this message rendered an image at this source
+ * offset.
+ */
 export function messageImagePreviewUrl(
   message: MessageAttachmentContext,
   sourceOffset: number,
@@ -205,9 +196,6 @@ export function messageImagePreviewUrl(
   return `/api/threads/${encodeURIComponent(message.threadId)}/messages/${encodeURIComponent(message.messageId)}/file?preview=1&ref=${sourceOffset}`;
 }
 
-/** An <img> learns only that it failed. A message image outside the
- * conversation's folders is refused on every try, so the route is asked once
- * more for its reason, which the tile then says instead of offering a retry. */
 export async function messageImageOutsideWorkspace(src: string): Promise<boolean> {
   try {
     const response = await fetch(src, { cache: "no-store" });
@@ -226,8 +214,7 @@ function revokeObjectUrlLater(url: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-/** Downloads and explicit media previews share the message-scoped capability.
- * Never request a transcript path directly, even when it looks like a URL. */
+/** Security: never request a transcript path directly, even when it looks like a URL. */
 export async function requestMessageFile(
   filePath: string,
   message: MessageAttachmentContext,
@@ -237,8 +224,6 @@ export async function requestMessageFile(
   const response = await fetch(`/api/threads/${encodeURIComponent(message.threadId)}/messages/${encodeURIComponent(message.messageId)}/file`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    // A linked folder answers with its files instead of a 400; an entry is
-    // one of those files, fetched by name under the same message grant.
     body: JSON.stringify({
       path: filePath,
       ...(folder?.entry !== undefined ? { entry: folder.entry } : folder?.list ? { listFolder: true } : {}),
@@ -252,7 +237,6 @@ export async function requestMessageFile(
   return response;
 }
 
-/** Shared save state for transcript file chips and bot-authored file links. */
 export interface MessageFolderListing {
   name: string;
   entries: { name: string; bytes: number; mime: string }[];
@@ -264,8 +248,6 @@ export function useLocalFileSave(filePath: string, name?: string, message?: Mess
   const [folder, setFolder] = useState<MessageFolderListing | null>(null);
   const [reason, setReason] = useState("");
   const [savedTo, setSavedTo] = useState("");
-  // The server refused because the file sits outside the conversation's
-  // workspace; the bot link offers Show in folder for that case alone.
   const [outsideWorkspace, setOutsideWorkspace] = useState(false);
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -366,9 +348,6 @@ export function useLocalFileSave(filePath: string, name?: string, message?: Mess
   return { state, reason, savedTo, outsideWorkspace, folder, save };
 }
 
-/** What a failed save says. A file outside the conversation's working folder
- * is refused on every try, so it is explained in the person's language rather
- * than with the server's English, and is not offered as a retry. */
 export function saveFailureText(save: { reason: string; outsideWorkspace: boolean }): string {
   return save.outsideWorkspace ? t("attach.outsideWorkspace") : save.reason;
 }
@@ -410,7 +389,6 @@ function MessageFolderFile({ folderPath, name, bytes, message }: {
   );
 }
 
-/** The files directly inside a folder a bot linked; each one saves like a file link. */
 export function MessageFolderFiles({ folderPath, listing, message }: {
   folderPath: string;
   listing: MessageFolderListing;
@@ -432,12 +410,6 @@ export function MessageFolderFiles({ folderPath, listing, message }: {
   );
 }
 
-// A file outside the conversation's workspace is never served, but the local
-// desktop app can ask its own file manager to show where it is. A paired
-// remote client or a browser is not on the computer holding the file, so it
-// shows the path as selectable text instead. UNC and relative paths are not
-// offered for reveal: main refuses them. Shared by the inline bot link and its
-// attachment chip; the caller sets the text size.
 const REVEALABLE_PATH = /^(?:\/(?!\/)|[a-zA-Z]:[\\/])/;
 function revealBridge(): NonNullable<Window["ogb"]>["revealInFolder"] {
   const ogb = typeof window === "undefined" ? undefined : window.ogb;
@@ -690,17 +662,13 @@ export function AttachmentThumbnail({
   onPreview: () => void;
   className?: string;
   eager?: boolean;
-  /** A message image: when it fails, ask why (messageImageOutsideWorkspace). */
   explainRefusal?: boolean;
 }) {
-  // Every caller keys this component by src. Resetting in an effect races a
-  // cached/blob image's onLoad: it can become ready before the effect runs,
-  // then be put back into a permanent loading state.
+  // Callers key this by src: resetting in an effect races a cached image's onLoad, which can fire before the effect
+  // runs.
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
   const [attempt, setAttempt] = useState(0);
   const [outsideWorkspace, setOutsideWorkspace] = useState(false);
-  // Until the pixels are known the tile is 4:3; then it takes the picture's own
-  // shape (within sane bounds) so a wide image has no empty band beneath it.
   const [ratio, setRatio] = useState<number | null>(null);
 
   return (
@@ -830,8 +798,6 @@ export function AttachedImageGallery({
   );
 }
 
-/** A Markdown image keeps its remote source, but receives the same stable
- * loading/error surface and full-screen viewer as an attached image. */
 export function MarkdownImagePreview({
   src,
   name,
@@ -932,9 +898,7 @@ export function MarkdownImagePreview({
 export function AttachedFileChip({ file, message, linked = false, compact = false, className }: {
   file: TranscriptFileAttachment;
   message?: MessageAttachmentContext;
-  /** A rendered bot-authored Markdown link, still checked by the server on click. */
   linked?: boolean;
-  /** One 28px pill (icon, name, download) for the group under a reply. */
   compact?: boolean;
   className?: string;
 }) {
@@ -980,7 +944,7 @@ export function AttachedFileChip({ file, message, linked = false, compact = fals
             <Download size={13} className="shrink-0" />
           )}
         </button>
-        <TableFileButton path={file.path} name={file.name} message={message} />
+        <FilePreviewButton path={file.path} name={file.name} message={message} />
       </div>
       {save.state !== "idle" && (
         <div
@@ -1017,7 +981,6 @@ function CompactFileChip({ file, message, linked, save, className }: {
 }) {
   const failed = save.state === "failed";
   const retryable = failed && !save.outsideWorkspace;
-  // a file name in any script keeps its own direction inside the pill
   const name = <span dir="auto" className="min-w-0 truncate text-ink [unicode-bidi:isolate]">{file.name}</span>;
   if (!message || (!file.private && !linked)) {
     return (
@@ -1053,7 +1016,7 @@ function CompactFileChip({ file, message, linked, save, className }: {
             <Download size={13} strokeWidth={1.75} className="shrink-0" aria-hidden="true" />
           )}
         </button>
-        <TableFileButton path={file.path} name={file.name} message={message} />
+        <FilePreviewButton path={file.path} name={file.name} message={message} />
       </span>
       {save.state !== "idle" && save.state !== "saved" && (
         <span role={failed ? "alert" : "status"} className={cn("px-2.5 text-[11.5px]", failed ? "text-danger" : "text-ink-secondary")}>
@@ -1068,8 +1031,7 @@ function CompactFileChip({ file, message, linked, save, className }: {
   );
 }
 
-/** Transcript file paths stay inert until the person explicitly asks the
- * desktop shell to validate and save a copy. */
+/** Security: transcript paths stay inert until the person asks the desktop shell to validate and save a copy. */
 export function AttachedFileChips({ files, className, message }: { files: TranscriptFileAttachment[]; className?: string; message?: MessageAttachmentContext }) {
   if (files.length === 0) return null;
   return (

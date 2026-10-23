@@ -1,13 +1,3 @@
-// The headless CLI end to end, as Launch Room and a CI step use it: the real
-// `openmausbot` entry (server/openmausbot.ts) as a child process, against an
-// isolated fake-engine server whose engine is scripted (room-plan.json).
-// A team file makes a Chief, two teammates and a room; a second apply sends
-// nothing; `run --wait job` sends the Chief one job, waits until it and both
-// teammates are done, and exports it (the job tree, every transcript, the
-// report the Chief wrote and the teammates' screenshots). Then the team is
-// exported and applied back unchanged, renamed and pruned by a second file,
-// and a job whose teammate hangs is stopped, teammate included, when its
-// time runs out.
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -110,7 +100,6 @@ rooms:
     responder: Room Lead
 `);
 
-    // apply: created; applied again: nothing to do, and no write sent
     const applied = await cli(["team", "apply", teamFile]);
     expect(applied.code, applied.stderr).toBe(0);
     expect(applied.stdout).toContain('bot "Room Lead": create (Chief of Launch Room');
@@ -126,13 +115,11 @@ rooms:
     [lead, priya, marcus] = ["Room Lead", "Priya", "Marcus"].map(byName);
     expect(lead).toMatchObject({ section: "Launch Room", chiefOfStaff: true, modelSelection: { instanceId: "claude", model } });
     expect([priya, marcus].every((bot) => bot.section === "Launch Room")).toBe(true);
-    // what the server holds is what the file says, field by field
     const room = json(await cli(["channels", "--json"])).channels.find((channel: any) => channel.name === "Debrief");
     expect(room).toMatchObject({ section: "Launch Room", bulletin: "Talk over what each visitor saw.", defaultResponder: { kind: "member", botId: lead.id } });
     expect(new Set(room.memberIds)).toEqual(new Set([lead.id, priya.id, marcus.id]));
 
-    // The engine, scripted: the Chief hands the site to both visitors, and
-    // writes the report once both have reported; each visitor saves a screenshot.
+    // Scripted: the Chief hands the site to both visitors and writes the report once both reported; each saves a screenshot.
     writeFileSync(join(session.info.dataDir, "room-plan.json"), JSON.stringify({
       [lead.id]: { turns: [
         { steps: [{ arguments: { bot_ids: [priya.id, marcus.id], message: "Visit https://example.com as yourself and report what stopped you." } }], reply: "Briefed both visitors." },
@@ -149,15 +136,12 @@ rooms:
     const result = json(run);
     expect(result).toMatchObject({ ok: true, exitCode: 0, status: "settled", state: "completed",
       reply: { text: "Launch report: [report](report.md)", files: ["report.md"] }, export: { ok: true } });
-    // the whole tree settled: the Chief's root and both teammates
     const nodes = result.job.nodes as any[];
     expect(nodes.map((node) => [node.botName, node.status])).toEqual([["Room Lead", "completed"], ["Priya", "completed"], ["Marcus", "completed"]]);
-    // progress went to stderr as JSON lines, the first naming the thread
     const progress = run.stderr.trim().split("\n").map((line) => JSON.parse(line));
     expect(progress[0]).toMatchObject({ event: "started", threadId: result.threadId });
     expect(progress.some((event) => event.event === "job" && event.state === "running")).toBe(true);
 
-    // the export: manifest, job tree, three transcripts, the report and both screenshots
     const manifest = JSON.parse(readFileSync(join(out, "manifest.json"), "utf8"));
     expect(manifest).toMatchObject({ ok: true, threadId: result.threadId, state: "completed", skipped: [] });
     expect(manifest.transcripts).toHaveLength(3);
@@ -174,7 +158,6 @@ rooms:
     const leadTranscript = JSON.parse(readFileSync(join(out, manifest.transcripts[0].file), "utf8"));
     expect(leadTranscript.messages.some((message: any) => message.role === "user" && message.text.includes("Rehearse the launch"))).toBe(true);
 
-    // the export verb on its own: a used folder is refused, --force writes into it
     const refused = await cli(["export", "--thread", result.threadId, "--out", out]);
     expect(refused.code).toBe(2);
     expect(refused.stderr).toContain("already has files in it");
@@ -182,7 +165,6 @@ rooms:
     expect(forced.code, forced.stderr).toBe(0);
     expect(json(forced).files.length).toBeGreaterThanOrEqual(3);
 
-    // waiting again on a finished job returns at once: idle now, and how it ended from the run's own moment
     const waited = await cli(["wait", "--thread", result.threadId, "--json"]);
     expect(waited.code).toBe(0);
     expect(json(waited)).toMatchObject({ status: "settled", state: "idle" });
@@ -203,7 +185,6 @@ rooms:
     expect(check.code, `${check.stdout}\n${check.stderr}`).toBe(0);
     expect(check.stdout.trim()).toBe("No changes.");
 
-    // someone made a bot in the team by hand; the next file renames Marcus
     expect((await cli(["new-bot", "Old visitor", "--team", "Launch Room", "--json"])).code).toBe(0);
     const next = join(dir, "launch-room-v2.yaml");
     writeFileSync(next, readFileSync(teamFile, "utf8")
@@ -219,11 +200,9 @@ rooms:
     expect(pruned.stdout).toContain('bot "Old visitor": delete (not in file)');
     const bots = await botsNow();
     expect(bots.find((bot) => bot.name === "Old visitor")).toBeUndefined();
-    // the same bot, renamed: its id (and the room it is in) stay
     expect(bots.find((bot) => bot.name === "Marcus Lee")?.id).toBe(marcus.id);
     expect((await cli(["team", "apply", next, "--check"])).code).toBe(0);
 
-    // a built-in tool in a Claude bot's selection would stop every turn it runs: refused, and nothing written
     const before = JSON.stringify(await botsNow());
     const native = join(dir, "native.yaml");
     writeFileSync(native, readFileSync(next, "utf8").replace('tools: { deny: ["mcp:mail:*"] }', 'tools: { deny: ["native:Bash"] }'));
@@ -244,7 +223,6 @@ rooms:
     const result = json(run);
     expect(existsSync(join(dir, "priya-holding"))).toBe(true);
     expect(result).toMatchObject({ ok: false, exitCode: 4, status: "timed-out", stopped: [{ botName: "Priya" }] });
-    // the job ended, every part of it: nothing is left running
     await expect.poll(async () => {
       const after = json(await cli(["wait", "--thread", result.threadId, "--since", String(result.since), "--json"]));
       return { state: after.state, nodes: after.job.nodes.map((node: any) => [node.botName, node.status]) };

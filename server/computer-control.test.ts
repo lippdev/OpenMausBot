@@ -1,7 +1,3 @@
-// The who-is-driving record. What these tests pin is the authority split:
-// the person's moves (take, release) work, the bot's one move (requestHelp,
-// behind request_sign_in) never grants anything, and only the sign-in card
-// behind a plea settles it — handing back mid-way does not.
 import { describe, expect, it } from "vitest";
 
 import { ComputerControl, type ControlSnapshot } from "./computer-control.ts";

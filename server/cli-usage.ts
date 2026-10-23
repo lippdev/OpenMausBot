@@ -1,6 +1,3 @@
-// What `openmausbot help` prints, kept out of cli.ts so the command list
-// can grow without the command growing. The headless verbs (headless/main.ts)
-// add their own section; `openmausbot help VERB` prints one verb's details.
 export { HEADLESS_VERBS as HEADLESS_VERB_NAMES } from "./headless/args.ts";
 
 export const HEADLESS_USAGE = `Drive a running workspace (scripts, CI, other agents):
@@ -37,6 +34,8 @@ export const USAGE = `openmausbot — your team of AI bots, ready in a few steps
   openmausbot logout
   openmausbot access list | add EMAIL [--chat-only] | remove EMAIL
   openmausbot service install [--domain HOST | --tunnel | --tailscale] [--port N] [--data-dir DIR] | uninstall
+                    [--sentinel]   (the health scan below, every two minutes, instead of the server)
+  openmausbot sentinel [--data-dir DIR] [--out DIR] [--once] [--json]   (read-only health scan; see --help)
   openmausbot browser install [--with-deps] | status
   openmausbot fleet init --domain HOST [--operator USER] | create NAME --admin EMAIL [--member EMAIL] [--brand FILE]
                     [--anthropic-key-file FILE] [--cap USD] [--license-key KEY] [--memory 1G]

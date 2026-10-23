@@ -9,16 +9,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 import { freePortBlock } from "./testing/ports.ts";
 
-// An ordinary room round never skips a member who is busy in another
-// conversation: the round parks on them with one neutral note and they take
-// their turn when they free — whether they were a direct responder or a
-// teammate summoned by a chained @mention. The member's own 1:1 turn is
-// never touched by the wait. The bounded end of the wait (the cap) lives in
-// the short-cap server of group-goal-wait-cap.e2e.test.ts. (The bot⇄bot
-// channels ask_bot used to open are no longer created — a consultation is an
-// assignment on the job runtime — so the wait in one is no longer driven
-// here; an existing channel is a room like any other to this rule.)
-
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SERVER_DIR, "..");
 const FAKE_CLAUDE = join(SERVER_DIR, "testing", "fake-claude-cli.ts");
@@ -73,10 +63,7 @@ beforeAll(async () => {
   writeFileSync(patientFinishGate, "initial turns may finish");
   writeFileSync(join(data, "config.json"), JSON.stringify({
     instances: {
-      // A gate keeps a direct turn busy until the test observes the room's
-      // wait, rather than racing the fake CLI's 800ms closing reply. The
-      // closing reply echoes the prompt, so a room reply carries the room's
-      // own @mentions back out
+      // A gate keeps a direct turn busy until the test observes the room's wait, rather than racing the fake CLI's 800ms closing reply.
       patient: fixture("Patient fixture", { FAKE_CLAUDE_MODE: "slow", FAKE_CLAUDE_SLOW_FINISH_GATE: patientFinishGate }),
       quick: fixture("Quick fixture", { FAKE_CLAUDE_MODE: "happy" }),
       summoner: fixture("Summoning fixture", {
@@ -109,7 +96,6 @@ beforeAll(async () => {
     try {
       if ((await fetch(`${base}/api/health`)).status === 200) break;
     } catch {
-      // Still starting.
     }
     if (Date.now() >= deadline) throw new Error(`server never became healthy: ${stderr}`);
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -141,8 +127,7 @@ const botBusy = async (botId: string) => {
 };
 
 const holdBusy = async (botId: string, text: string) => {
-  // This exact file is owned by this disposable fixture. All patient turns
-  // from the preceding case have settled or been interrupted by cleanup.
+  // This file belongs to this disposable fixture, and every patient turn from the preceding case has settled.
   rmSync(patientFinishGate, { force: true });
   expect((await api("POST", `/api/bots/${botId}/messages`, { text })).status).toBe(202);
   await expect.poll(() => botBusy(botId)).toBe(true);
@@ -159,8 +144,7 @@ const roundSummary = (messages: StateMessage[], waitedBotId: string) => {
       message.kind === "activity" && message.from?.botId === waitedBotId && /another conversation/i.test(message.tool?.name ?? "")
     ).length,
     skipped: messages.some((message) => /skipped this round/i.test(message.tool?.name ?? "")),
-    // who spoke, in order; the slow fixture splits one turn into two text
-    // items, so consecutive repeats collapse to the speaker
+    // The slow fixture splits one turn into two text items, so consecutive repeats collapse to the speaker.
     speakers: messages
       .filter((message) => message.kind === "text" && message.role === "bot")
       .map((message) => message.from?.name)
@@ -193,13 +177,7 @@ const releaseAfterRoomWait = async (roomId: string, botId: string, name: string)
   writeFileSync(patientFinishGate, "observed room waiting; finish the direct turn");
 };
 
-/** These cases are deliberately slow: each one holds a real turn open on one
- * bot and waits for a second bot to take its turn only once the first settles,
- * through a real server and the fake CLI. The inner polls already allow 15s,
- * which leaves nothing inside vitest's 20s default for process start-up — so on
- * the slowest runner they time out for lack of headroom rather than because
- * anything regressed. The wait itself is what is under test; the clock is not.
- */
+/** Deliberately slow (real turns held open through a real server): the inner polls take 15s, leaving no headroom in vitest's 20s default. */
 describe("chat rooms wait for a member busy elsewhere", { timeout: 45_000 }, () => {
   it("parks on a responder busy in a 1:1, then lets them reply once that turn settles, in order", async () => {
     const busy = await createBot("Busy", "patient");
@@ -221,15 +199,12 @@ describe("chat rooms wait for a member busy elsewhere", { timeout: 45_000 }, () 
       }, { timeout: 15_000 }).toEqual({
         working: false,
         waitChip: WAIT_CHIP("Busy"),
-        // settled, not failed: the promise was kept
         waitChipOk: true,
         waitChips: 1,
         skipped: false,
-        // the round kept its order — the waited-on member still went first
         speakers: ["Busy", "Quick"],
       });
 
-      // the 1:1 turn the room waited on was left alone to finish on its own
       expect(await directReply(busy.id, "Finish this first")).toBe(true);
       expect(await botBusy(busy.id)).toBe(false);
     } finally {
@@ -248,7 +223,6 @@ describe("chat rooms wait for a member busy elsewhere", { timeout: 45_000 }, () 
 
     try {
       await holdBusy(bee.id, "Bee, finish this first");
-      // only Ace is addressed; Bee arrives through Ace's reply
       expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "@Ace please bring Bee in" })).status).toBe(202);
       await releaseAfterRoomWait(room.id, bee.id, "Bee");
 

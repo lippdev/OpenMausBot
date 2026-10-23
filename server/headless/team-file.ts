@@ -1,12 +1,4 @@
-// The team file: a whole team written down (teams and their briefs, bots
-// with their standing instructions, models, approval levels, computers and
-// skills, rooms, and the engines they run on), in YAML or JSON, applied
-// with `openmausbot team apply FILE`. This module reads and checks a file;
-// team-apply.ts compares it with the workspace and makes the changes.
-//
-// Everything a file names is read when it is loaded (souls, briefs, skills),
-// paths relative to the file. Keys are never written in the file: an engine's
-// key is { env: NAME } or { file: PATH }, read only when it must be written.
+// Keys are never written in the file: an engine's key is { env: NAME } or { file: PATH }, read only when it must be written.
 import { readFileSync } from "node:fs";
 import { dirname, posix, resolve, win32 } from "node:path";
 
@@ -18,13 +10,8 @@ import { parseSkillMd } from "../../shared/skill-md.ts";
 import { parseToolScope, type ToolScope } from "../../shared/tool-scope.ts";
 import { usageError } from "./args.ts";
 
-// The limits the server holds a write to, checked here so a file that breaks
-// one stops before the first write (team-file.test.ts pins them to the server's).
-/** A team's brief: server/section-context.ts SECTION_CONTEXT_MAX_BYTES. */
 export const TEAM_BRIEF_MAX_BYTES = 24_000;
-/** A room's brief (its bulletin): server/routes/groups.ts. */
 export const ROOM_BRIEF_MAX_CHARS = 12_000;
-/** One SKILL.md: server/new-bot-defaults.ts botSkillTemplateSchema. */
 export const SKILL_MAX_BYTES = 262_144;
 
 const secret = z.union([
@@ -131,16 +118,11 @@ const ENGINE_KIND: Record<string, string> = {
   openaiCompatible: "openai-compatible",
 };
 
-/** A tool selection that leaves every tool in: none, or one with no allow list and nothing denied. */
 export function everyTool(scope: { allow?: unknown; deny?: unknown } | null | undefined): boolean {
   return !scope || (!Array.isArray(scope.allow) && !(Array.isArray(scope.deny) && scope.deny.length > 0));
 }
 
-/** A working folder on the server, whatever system the server runs: a POSIX
- * path (/work/room) or a Windows one (C:\work\room, \\host\share\room),
- * tidied by that system's rules as the server tidies it, never by this
- * computer's (a Windows laptop would turn /work/room into C:\work\room).
- * undefined: not a full path. */
+/** Tidied by the server's system's rules, never this computer's (a Windows laptop would turn /work/room into C:\work\room). */
 export function serverFolder(raw: string): string | undefined {
   const path = raw.trim();
   if (path.startsWith("/")) return posix.resolve(path);
@@ -148,7 +130,7 @@ export function serverFolder(raw: string): string | undefined {
   return undefined;
 }
 
-/** Read and check a team file. Every problem is a usage error (exit 2) that names where it is. */
+/** Every problem is a usage error (exit 2) that names where it is. */
 export function loadTeamFile(path: string): TeamFile {
   const file = resolve(path);
   const dir = dirname(file);
@@ -174,16 +156,11 @@ export function loadTeamFile(path: string): TeamFile {
   return checkTeamFile(parsed.data, file, dir);
 }
 
-/** The marker secret redaction leaves (shared/redact.ts mask). */
 const REDACTED = /«redacted \d+ chars»/;
 
-/** Text as one system writes it everywhere: a checkout on Windows has CRLF
- * line ends where Linux CI has LF, and the same file must apply the same
- * from both, or every apply from the other one rewrites it. */
+/** A Windows checkout has CRLF where Linux CI has LF: both must apply the same. */
 const lf = (text: string) => text.replace(/\r\n?/g, "\n");
 
-/** A file the team file names, beside it. Either separator works, so a file
- * written on Windows applies on Linux and the other way round. */
 const readRelative = (dir: string, path: string, what: string): string => {
   try {
     return lf(readFileSync(resolve(dir, path.replace(/\\/g, "/")), "utf8"));
@@ -194,12 +171,10 @@ const readRelative = (dir: string, path: string, what: string): string => {
 const text = (dir: string, value: string | { file: string } | undefined, what: string) =>
   value === undefined ? undefined : typeof value === "string" ? lf(value) : readRelative(dir, value.file, what);
 
-/** The file's rules beyond its shape, and every file it names read in. */
 export function checkTeamFile(input: TeamFileInput, file: string, dir: string): TeamFile {
   const warnings: string[] = [];
   const key = (name: string) => name.trim().toLowerCase();
-  // Text team export took a secret out of: written back, the marker would
-  // replace the secret, so the field is left as it is on the server.
+  // Written back, the redaction marker would replace the secret, so the field is left as it is on the server.
   const kept = <T extends string | undefined>(value: T, where: string): T | undefined => {
     if (value === undefined || !REDACTED.test(value)) return value;
     warnings.push(`${where} has a secret taken out («redacted …»), so it is left as it is`);
@@ -240,9 +215,6 @@ export function checkTeamFile(input: TeamFileInput, file: string, dir: string): 
     if (bot.tools) {
       const scope = parseToolScope(bot.tools);
       if (!scope.ok) throw usageError(`${where}: tools: ${scope.error} (selectors look like native:Bash or mcp:server:tool; docs/tool-selection.md)`);
-      // Nothing allowed-only and nothing denied is no selection at all: the
-      // scope is cleared rather than stored empty (which would mount every
-      // tool server behind a gate that filters nothing).
       tools = everyTool(scope.scope) ? null : scope.scope!;
     }
     const skills = (bot.skills ?? []).flatMap((skill) => {
@@ -289,7 +261,6 @@ export function checkTeamFile(input: TeamFileInput, file: string, dir: string): 
   const engines: DesiredEngine[] = Object.entries(input.engines ?? {}).flatMap(([name, value]) => {
     if (!value) return [];
     const spec = value as { key: Secret; baseUrl?: string | Secret; everyClaudeBot?: boolean; install?: boolean };
-    // A key file is named relative to the team file, like every other path in it.
     const anchored = <T extends string | Secret>(ref: T): T => typeof ref === "object" && "file" in ref ? { file: resolve(dir, ref.file) } as T : ref;
     return [{ kind: ENGINE_KIND[name]!, key: anchored(spec.key), ...(spec.baseUrl !== undefined ? { baseUrl: anchored(spec.baseUrl) } : {}),
       ...(spec.everyClaudeBot !== undefined ? { everyClaudeBot: spec.everyClaudeBot } : {}), ...(spec.install ? { install: true } : {}) }];

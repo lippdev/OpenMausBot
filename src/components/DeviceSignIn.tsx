@@ -1,14 +1,10 @@
-// The one in-app sign-in with a code for an engine's CLI on the machine
-// running OpenMausBot: Codex with a ChatGPT account, Grok Build with a
-// grok.com account (a one-time code entered at the provider's page), and the
-// ChatGPT plan (a browser page, no code). The same card on the desktop, a
-// self-hosted server and My Cloud.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy, ExternalLink, Loader2, LogIn, X } from "lucide-react";
 import { api, ApiError, useStore } from "@/state/store";
 import { t } from "@/lib/i18n";
 import { openExternalLink } from "@/lib/app-links";
 import { useCopyFeedback } from "@/lib/copy-text";
+import { engineSignedIn } from "@/lib/product-events";
 import type { LocaleKey } from "@/locales";
 import { deviceSignInLink, isDeviceSignInCode, type DeviceSignInProvider } from "../../shared/device-sign-in";
 import { CodexMark } from "./ProviderIcons";
@@ -22,12 +18,10 @@ export interface DeviceSignInStatus {
   message?: string;
 }
 
-/** Whose page an engine's device code is entered at. */
 export function deviceSignInProvider(driverKind: string): DeviceSignInProvider {
   return driverKind === "grokAgent" ? "grok" : "codex";
 }
 
-/** The words that differ by whose account the code signs in. */
 export const DEVICE_SIGN_IN_COPY: Record<DeviceSignInProvider, Record<"description" | "start" | "enterCode" | "open" | "security" | "connected" | "connectedAccount" | "failed" | "invalidChallenge", LocaleKey>> = {
   codex: {
     description: "engineSetup.device.description",
@@ -61,8 +55,7 @@ function endedFlow(phase: "expired" | "failed", browserPkce = false): DeviceSign
   return { phase, flowId: null, authorizationUrl: null, expiresAt: null, ...(phase === "failed" ? { message: t(browserPkce ? "engineSetup.chatgpt.flowEnded" : "engineSetup.device.flowEnded") } : {}) };
 }
 
-/** Never turn arbitrary process output into a sign-in link. The server also
- * validates this address before returning a device challenge. */
+/** Security: never turn arbitrary process output into a sign-in link; the server validates this address too. */
 export function codexDeviceLink(value: string | null): string | null {
   return deviceSignInLink("codex", value);
 }
@@ -79,7 +72,6 @@ export function chatgptPlanLink(value: string | null): string | null {
 const chatgptButton = "flex w-full items-center justify-center gap-2 rounded-lg border border-black/20 bg-white px-3 py-2 text-[12.5px] font-semibold text-black hover:opacity-85 disabled:opacity-50";
 
 export function DeviceSignInProgress({ auth, browserPkce = false, provider = "codex" }: { auth: DeviceSignInStatus; browserPkce?: boolean; provider?: DeviceSignInProvider }) {
-  // The code stays select-all, so one click selects it for Cmd/Ctrl+C when copying is blocked.
   const { state: codeCopy, copy: copyCode } = useCopyFeedback(auth.userCode ?? "");
   const copy = DEVICE_SIGN_IN_COPY[provider];
   const link = browserPkce ? chatgptPlanLink(auth.authorizationUrl) : deviceSignInLink(provider, auth.authorizationUrl, auth.userCode);
@@ -129,26 +121,35 @@ export function DeviceSignInProgress({ auth, browserPkce = false, provider = "co
   );
 }
 
-export function DeviceSignIn({ instanceId, browserPkce = false, provider = "codex" }: { instanceId: string; browserPkce?: boolean; provider?: DeviceSignInProvider }) {
+/** `autoStart` begins at once; `onDone` hears the outcome so an account list can close the panel. */
+export function DeviceSignIn({ instanceId, browserPkce = false, provider = "codex", autoStart = false, onDone }: {
+  instanceId: string;
+  browserPkce?: boolean;
+  provider?: DeviceSignInProvider;
+  autoStart?: boolean;
+  onDone?: (signedIn: boolean) => void;
+}) {
   const { refreshInstances, refreshModels } = useStore();
   const [auth, setAuth] = useState<DeviceSignInStatus | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(autoStart);
+  const started = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const base = `/api/instances/${encodeURIComponent(instanceId)}/auth`;
   const copy = DEVICE_SIGN_IN_COPY[provider];
   const failed = t(browserPkce ? "engineSetup.chatgpt.failed" : copy.failed);
 
+  // The sign-in already succeeded: a failed catalog refresh must not read as a failed sign-in.
   const refresh = async () => {
-    await refreshInstances();
-    await refreshModels(instanceId);
+    engineSignedIn(provider, browserPkce ? "browser" : "device_code");
+    try { await refreshInstances(); } catch {}
+    try { await refreshModels(instanceId); } catch {}
+    onDone?.(true);
   };
 
   useEffect(() => {
     if (busy || auth?.phase !== "waiting" || !auth.flowId) return;
     const controller = new AbortController();
     const remaining = auth.expiresAt ? Date.parse(auth.expiresAt) - Date.now() : Number.NaN;
-    // Also expire the UI if the connection hangs or the server was restarted.
-    // No credentials are removed: this only discards an obsolete challenge.
     const expiryTimer = Number.isFinite(remaining)
       ? window.setTimeout(() => { controller.abort(); setAuth(endedFlow("expired")); setError(null); }, Math.max(0, remaining))
       : null;
@@ -158,10 +159,7 @@ export function DeviceSignIn({ instanceId, browserPkce = false, provider = "code
           if (controller.signal.aborted) return;
           setAuth(next);
           setError(null);
-          if (next.phase === "succeeded") {
-            await refreshInstances();
-            await refreshModels(instanceId);
-          }
+          if (next.phase === "succeeded") await refresh();
         })
         .catch((cause: unknown) => {
           if (controller.signal.aborted) return;
@@ -171,7 +169,6 @@ export function DeviceSignIn({ instanceId, browserPkce = false, provider = "code
             return;
           }
           setError(cause instanceof Error ? cause.message : failed);
-          // Retry transient connectivity failures without creating another login.
           setAuth({ ...auth });
         });
     }, 2000);
@@ -180,7 +177,7 @@ export function DeviceSignIn({ instanceId, browserPkce = false, provider = "code
       if (expiryTimer !== null) window.clearTimeout(expiryTimer);
       controller.abort();
     };
-  }, [auth, base, browserPkce, busy, failed, instanceId, refreshInstances, refreshModels]);
+  }, [auth, base, browserPkce, busy, failed, instanceId, refreshInstances, refreshModels, onDone]);
 
   const start = async () => {
     setBusy(true);
@@ -205,13 +202,19 @@ export function DeviceSignIn({ instanceId, browserPkce = false, provider = "code
     try {
       await api(`${base}/cancel`, { method: "POST", body: JSON.stringify({ flowId: auth.flowId }) });
       setAuth({ phase: "cancelled", flowId: null, authorizationUrl: null, expiresAt: null });
+      onDone?.(false);
     } catch (cause) {
       if (deviceFlowUnavailable(cause)) setAuth(endedFlow("failed", browserPkce));
       else setError(cause instanceof Error ? cause.message : failed);
     } finally { setBusy(false); }
   };
 
-  // A cancelled, expired or failed sign-in has one next step: a new code.
+  useEffect(() => {
+    if (!autoStart || started.current) return;
+    started.current = true;
+    void start();
+  }, [autoStart]);
+
   const startLabel = busy ? t(browserPkce ? "engineSetup.chatgpt.starting" : "engineSetup.device.starting")
     : auth || error ? t("engineSetup.device.tryAgain")
     : t(browserPkce ? "engineSetup.chatgpt.start" : copy.start);

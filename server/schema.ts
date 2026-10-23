@@ -2,14 +2,9 @@ import type { z } from "zod";
 
 import type { JsonValue } from "../shared/json.ts";
 
-// The plain-JSON vocabulary lives in shared/json.ts now (part of the wire
-// model); re-exported here so existing importers keep working.
 export type { JsonObject, JsonPrimitive, JsonValue } from "../shared/json.ts";
 
-/** JSON.parse without a reviver can only produce JSON-compatible values.
- * A leading byte order mark is dropped first: Windows PowerShell's
- * `Set-Content -Encoding UTF8` and Notepad's "UTF-8 with BOM" write one, and
- * JSON.parse rejects it, so a hand-edited config.json read as invalid. */
+/** Drops a leading BOM first: PowerShell's Set-Content -Encoding UTF8 and Notepad write one, and JSON.parse rejects it. */
 export function parseJson(text: string): JsonValue {
   return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
 }

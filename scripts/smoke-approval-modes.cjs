@@ -161,8 +161,7 @@ app.whenReady().then(async () => {
   const revoked = await coordinator.request(child, whole.id, "ask", { allThreads: true });
   assert.equal(revoked.approvalMode, "ask");
   assert.ok(revoked.tasks.every(task => task.approvalMode === "ask"));
-  // Auto and Edits reach every thread the same way, in one write with no
-  // grant phases (how a team-wide level leaves Custom).
+  // Auto and Edits reach every thread the same way, in one write.
   const autoEverywhere = await coordinator.request(child, whole.id, "auto", { allThreads: true });
   assert.equal(autoEverywhere.approvalMode, "auto");
   assert.ok(autoEverywhere.tasks.every(task => task.approvalMode === "auto"));
@@ -172,8 +171,8 @@ app.whenReady().then(async () => {
   const created = await api("/api/bots", "POST", { modelSelection: { instanceId: "claude", model: "claude-sonnet-5" } });
   assert.equal(created.status, 201);
   const id = created.body.bot.id;
-  // Full needs no private channel: the API applies it at once (owner
-  // decision, Oct 12). Custom keeps the private channel (checked below).
+  // Full needs no private channel: the API applies it at once. Custom keeps
+  // the private channel (checked below).
   assert.equal((await api(`/api/bots/${id}`, "PATCH", { approvalMode: "full" })).status, 200);
   assert.equal((await api(`/api/bots/${id}`, "PATCH", { approvalMode: "ask" })).status, 200);
   for (const [mode, native] of [["full", "bypassPermissions"], ["auto", "auto"], ["edits", "acceptEdits"], ["ask", "default"]]) {
@@ -284,11 +283,8 @@ app.whenReady().then(async () => {
           return !state.busy && state;
         });
         const text = settled.messages.slice(before).map((message) => message.text ?? "").join("\n");
-        // The fixture emits one `<tool>: <result>` chunk per read, each at the
-        // start of a line. Anchor on that: session_search now recalls the
-        // previous turn's memory log, so its own result text quotes an earlier
-        // "list_bots: Reachable teammates: …" mid-line and an unanchored count
-        // sees three reads where the agent only performed two.
+        // Anchored to line starts: session_search's result quotes earlier
+        // reads mid-line.
         assert.match(text, /^list_bots:/m);
         assert.match(text, /^session_search:/m);
         assert.equal((text.match(/^list_bots:/gm) ?? []).length, 2, "Repeated reads complete without another prompt");

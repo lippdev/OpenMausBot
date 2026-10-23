@@ -1,6 +1,7 @@
 import { atLocalTime } from "@/lib/routine-calendar";
 import type { RoutineSchedule } from "@/lib/routines";
 import { cronScheduleLabel } from "../../shared/cron-label";
+import { limitResetWhen } from "@/lib/limit-resets";
 
 export const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
@@ -12,9 +13,6 @@ export function niceDate(at: number): string {
   return new Date(at).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
 }
 
-/** A change's timestamp for a list row: the time alone if it happened
- * today, else the date — one rule shared by the Overview's recent-changes
- * card and the History section so the same row never reads two ways. */
 export function whenLabel(at: number): string {
   const date = new Date(at);
   const sameDay = new Date().toDateString() === date.toDateString();
@@ -56,6 +54,7 @@ function intervalRestrictions(schedule: Extract<RoutineSchedule, { type: "interv
 
 export function scheduleLabel(schedule: RoutineSchedule | { type: "once"; at: number } | { type: "daily"; time: string; weekdays: number[] }): string {
   if (schedule.type === "cron") return cronScheduleLabel(schedule);
+  if (schedule.type === "limit_reset") return limitResetWhen(schedule);
   if (schedule.type === "once") return `${niceDate(schedule.at)}, ${niceTime(schedule.at)}`;
   if (schedule.type === "interval") {
     return [intervalLabel(schedule.everyMinutes), ...intervalRestrictions(schedule)].join(" · ");
@@ -73,13 +72,11 @@ export function scheduleLabel(schedule: RoutineSchedule | { type: "once"; at: nu
 
 export function scheduleSentence(schedule: RoutineSchedule): string {
   if (schedule.type === "cron") return cronScheduleLabel(schedule);
+  if (schedule.type === "limit_reset") return limitResetWhen(schedule).toLocaleLowerCase();
   if (schedule.type === "interval") {
     const label = intervalLabel(schedule.everyMinutes);
-    // Convert "Every X min" → "every X minutes", "Every hour" → "every hour", etc.
     const lowercase = label.replace(/^Every /, "every ");
-    // Replace "N min" with "N minutes" (avoid replacing if already "minutes")
     const withMinutes = lowercase.replace(/(\d+) min(?!ute)/g, "$1 minutes");
-    // Replace "1 hr" with "1 hour" and "N hr" with "N hours" (but leave "every hour" unchanged)
     const cadence = withMinutes.replace(/(\d+) hr(?!our)/g, (_match, num) => {
       return num === "1" ? "1 hour" : `${num} hours`;
     });
@@ -88,7 +85,6 @@ export function scheduleSentence(schedule: RoutineSchedule): string {
   if (schedule.type === "once") {
     return `once on ${niceDate(schedule.at)}, ${niceTime(schedule.at)}`;
   }
-  // type === "daily"
   const days = schedule.weekdays;
   const timeStr = niceTime(atLocalTime(Date.now(), schedule.time));
 
@@ -102,6 +98,5 @@ export function scheduleSentence(schedule: RoutineSchedule): string {
     return `weekly on ${DAY_NAMES[days[0]!]} at ${timeStr}`;
   }
 
-  // Custom multi-day selection
   return `${days.map((day) => DAY_NAMES[day]).join(", ")} at ${timeStr}`;
 }

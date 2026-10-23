@@ -183,7 +183,6 @@ describe("cloud computer provisioning cleanup", () => {
 
     await expect(provisionBoat({ box: { token: "box_test" } } as any, botId, "Cancelled")).rejects.toThrow(/did not become ready/);
 
-    // One read saw it cancelled: no waiting out the budget, no DELETE for a sandbox that is gone.
     expect(requests.filter((request) => request.method === "GET" && request.path === "/api/v1/sandboxes/bx_3456789a")).toHaveLength(2);
     expect(requests.some((request) => request.method === "DELETE")).toBe(false);
     const journal = await import("./boat-create-idempotency.ts");

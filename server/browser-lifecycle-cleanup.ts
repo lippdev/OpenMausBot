@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 
 import { z } from "zod";
 import { writeFileAtomic } from "./atomic.ts";
-import { browserDaemonFile, closeBrowserSession, runningBrowserSessionNames } from "./browser-engine.ts";
+import { browserDaemonFile, browserProfilesRoot, closeBrowserSession, runningBrowserSessionNames } from "./browser-engine.ts";
 import { orphanedBrowsers, stopBrowserProcesses } from "./browser-processes.ts";
 import { browserRuntimeEnv } from "./browser-runtime.ts";
 
@@ -66,10 +66,7 @@ export interface BrowserCleanupIncomingMessage {
 
 type CleanupJournalWriter = (path: string, data: string, options: { mode?: number }) => void;
 
-/** Finish cleanup after the primary config mutation is already durable.
- * Journal/ACK failures are reported only after mandatory runtime effects run;
- * otherwise a failed bookkeeping write could leave a revoked feature's live
- * bearer or provider fleet active until restart. */
+/** Bookkeeping failures are reported only after the mandatory runtime effects ran, so a revoked bearer or fleet never stays live until restart. */
 export async function finalizeBrowserCleanupMutation<T>(options: {
   requests: readonly BrowserCleanupRequest[];
   referenceError?: unknown;
@@ -134,15 +131,8 @@ function validTarget(kind: BrowserCleanupKind, id: string, partitionId: string):
 }
 
 
-/**
- * Crash-safe handoff from the embedded server to Electron. A deletion is
- * journaled in the prepared phase before its durable config/store mutation.
- * The caller advances it to committed only after that mutation returns. Only
- * committed entries may be dispatched to Electron. A crash in the narrow
- * mutation-to-marker window therefore leaves a prepared entry which blocks
- * identifier reuse, but can never trigger a destructive wipe based on an
- * ambiguous or unreadable config/store snapshot.
- */
+/** Crash-safe handoff to Electron: a deletion is journaled as prepared before its config/store mutation and committed after;
+ * only committed entries are dispatched, so a crash can block id reuse but never trigger a wipe from an ambiguous snapshot. */
 export class BrowserCleanupCoordinator {
   readonly #file: string;
   readonly #send: (message: BrowserCleanupWireRequest) => boolean;
@@ -179,10 +169,7 @@ export class BrowserCleanupCoordinator {
       }
       for (const request of journal.data) this.#pending.set(request.requestId, request);
     } catch (caught) {
-      // A missing journal is the only empty state. Treat malformed JSON,
-      // invalid entries, permissions failures, directories, and I/O errors as
-      // unknown durable state: silently replacing any of them could resurrect
-      // a supposedly deleted login partition.
+      // Only a missing journal is empty; replacing any unreadable state could resurrect a deleted login partition.
       if (missingFileErrorSchema.safeParse(caught).success) return;
       const error = caught instanceof Error ? caught : new Error(String(caught));
       this.#loadFailure = unavailableJournalError(error);
@@ -217,9 +204,7 @@ export class BrowserCleanupCoordinator {
     return request;
   }
 
-  /** Mark the primary config/store deletion durable. This marker is the only
-   * authority startup replay uses; in-memory loaders are deliberately not
-   * consulted because both currently recover parse failures as empty state. */
+  /** This marker is the only authority startup replay uses: in-memory loaders recover parse failures as empty state. */
   commit(request: BrowserCleanupRequest): BrowserCleanupRequest {
     this.#assertHealthy();
     const current = this.#pending.get(request.requestId);
@@ -266,10 +251,7 @@ export class BrowserCleanupCoordinator {
       && (request.id === profileId || request.partitionId.toLowerCase() === foldedPartitionId));
   }
 
-  /** Profile references are secondary durable state. Before a committed wipe
-   * is replayed at boot, the server clears every bot that still names one of
-   * these canonical ids. Prepared entries are deliberately excluded because
-   * their primary config deletion may not have committed. */
+  /** Prepared entries are excluded: their primary config deletion may not have committed. */
   committedProfileIds(): string[] {
     this.#assertHealthy();
     return [...new Set(
@@ -280,8 +262,7 @@ export class BrowserCleanupCoordinator {
     )];
   }
 
-  /** Consume only this protocol's result. A late success still clears the
-   * durable journal even when the request's timeout already fired. */
+  /** A late success still clears the durable journal even after the request's timeout fired. */
   receive(message: BrowserCleanupIncomingMessage | undefined): boolean {
     if (message?.type !== "openmausbot:browser-lifecycle-result") return false;
     const parsed = browserCleanupResultSchema.safeParse(message);
@@ -305,9 +286,7 @@ export class BrowserCleanupCoordinator {
     try {
       this.#save();
     } catch (error) {
-      // Repeating a successful wipe is safe. Keep the in-memory item when the
-      // acknowledgement itself could not be persisted, so a later retry or
-      // restart cannot accidentally treat stale credentials as erased.
+      // Keep the item when the acknowledgement could not be persisted, so a retry never treats stale credentials as erased.
       this.#pending.set(requestId, request);
       console.error("browser cleanup: could not persist acknowledgement", error);
       return false;
@@ -397,34 +376,22 @@ export class BrowserCleanupCoordinator {
   }
 }
 
-/** How long a built-in browser may sit unused before it is closed:
- * config.json's browserEngine.idleTimeoutMinutes, 1-60. The engine's own
- * backstop closes a daemon nothing talks to after an hour. */
+/** Defaults for config.json's browserEngine.idleTimeoutMinutes (1-60); agent-browser's own backstop closes an idle daemon after an hour. */
 export const DEFAULT_BROWSER_IDLE_MINUTES = 10;
+export const CLOUD_HOME_BROWSER_IDLE_MINUTES = 3;
 
-export function browserIdleMs(cfg: { browserEngine?: { idleTimeoutMinutes?: number } }): number {
-  return (cfg.browserEngine?.idleTimeoutMinutes ?? DEFAULT_BROWSER_IDLE_MINUTES) * 60_000;
+export function browserIdleMs(cfg: { browserEngine?: { idleTimeoutMinutes?: number } }, { cloudHome = false }: { cloudHome?: boolean } = {}): number {
+  return (cfg.browserEngine?.idleTimeoutMinutes ?? (cloudHome ? CLOUD_HOME_BROWSER_IDLE_MINUTES : DEFAULT_BROWSER_IDLE_MINUTES)) * 60_000;
 }
 
-/** Whether any daemon may run under this HOME: agent-browser writes one
- * `<session>.pid` per daemon, so with none there is nothing to ask about. */
+/** agent-browser writes one `<session>.pid` per daemon, so with none there is nothing to ask about. */
 function daemonsMayRun(env: NodeJS.ProcessEnv): boolean {
   try { return readdirSync(dirname(browserDaemonFile({ ...env, AGENT_BROWSER_SESSION: "" }, ".pid"))).some((name) => name.endsWith(".pid") && name !== "dashboard.pid"); }
   catch { return false; }
 }
 
-/**
- * This data dir's browsers that nothing here uses any more. A daemon and its
- * Chrome outlive the server that started them (agent-browser detaches both),
- * so a crash or a kill left them running for the engine's one-hour idle
- * timeout. One sweep at boot closes what an earlier run left; one a minute
- * closes this run's browsers once they sat unused for the idle window, and
- * any other browser of this data dir that runs although nothing here uses it;
- * shutdown closes them all. Closing saves a browser's sign-ins for its next
- * use. A Chrome whose daemon was killed under it can never be used again and
- * is stopped. A browser attached to the person's own Chrome is never this
- * data dir's to close, and neither is anything else under the same HOME.
- */
+/** agent-browser detaches each daemon and its Chrome, so they outlive a crashed or killed server. A browser attached to the
+ * person's own Chrome, or anything else under the same HOME, is never this data dir's to close. */
 export class BrowserSweep {
   readonly #engine: () => string | null;
   readonly #owns: (session: string) => boolean;
@@ -438,16 +405,11 @@ export class BrowserSweep {
   #hadDaemons = false;
 
   constructor(options: {
-    /** The engine this server runs browsers with, or null when there is none. */
     engine: () => string | null;
-    /** This data dir's sessions: each bot's own, each built-in profile's, and its temporary ones. */
     owns: (session: string) => boolean;
-    /** Used by this server run: closed only once idle, by closeIdle. */
     live: (session: string) => boolean;
-    /** A turn holds it until it finishes, however long it goes without a
-     * browser call: never closed while one does. */
+    /** A turn holds it until it finishes: never closed while one does. */
     held: (session: string) => boolean;
-    /** Close a live browser if it has sat unused for the idle window. */
     closeIdle: (session: string) => Promise<boolean>;
     intervalMs?: number;
   }) {
@@ -459,7 +421,6 @@ export class BrowserSweep {
     this.#intervalMs = options.intervalMs ?? 60_000;
   }
 
-  /** Sweep now, for what an earlier run left, then every interval. */
   start(): this {
     void this.sweep(true);
     this.#timer = setInterval(() => void this.sweep(), this.#intervalMs);
@@ -467,13 +428,11 @@ export class BrowserSweep {
     return this;
   }
 
-  /** One pass; a pass still running is joined, never doubled. */
   sweep(boot = false): Promise<void> {
     this.#pass ??= this.#sweep(boot).catch((error) => console.warn("browser sweep:", error)).finally(() => { this.#pass = undefined; });
     return this.#pass;
   }
 
-  /** This data dir's sessions whose daemons run, or null when none can. */
   async #owned(binaryPath: string, timeoutMs?: number): Promise<string[] | null> {
     const env = browserRuntimeEnv({});
     if (!daemonsMayRun(env)) return null;
@@ -484,10 +443,8 @@ export class BrowserSweep {
     const binaryPath = this.#engine();
     if (!binaryPath) return;
     const owned = await this.#owned(binaryPath);
-    // A Chrome outlives its daemon only once a daemon ran: look at boot, while
-    // daemons run, and once more after the last of them is gone.
     if (boot || owned || this.#hadDaemons) {
-      for (const { session, tree } of await orphanedBrowsers(browserRuntimeEnv({}).HOME)) {
+      for (const { session, tree } of await orphanedBrowsers(browserRuntimeEnv({}).HOME, browserProfilesRoot())) {
         if (!this.#owns(session)) continue;
         if (await stopBrowserProcesses(tree)) console.info(`browser ${session}: stopped a browser whose engine had been killed under it`);
         else console.warn(`browser ${session}: could not stop a browser whose engine had been killed under it`);
@@ -512,7 +469,6 @@ export class BrowserSweep {
     }
   }
 
-  /** Shutdown: stop sweeping and close every browser of this data dir. */
   async closeAll(timeoutMs = 4_000): Promise<void> {
     clearInterval(this.#timer);
     this.#timer = undefined;

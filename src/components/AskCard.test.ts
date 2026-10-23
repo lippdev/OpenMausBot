@@ -18,10 +18,8 @@ describe("AskCard", () => {
     expect(html).toContain('aria-label="Plan"');
     expect(html).toMatch(/text-accent-text[^"]*"><bdi dir="auto">Choose a plan</);
     expect(html).toContain("The workspace needs one before it can start.");
-    // logical sides, so the card mirrors in a right-to-left chat
     expect(html).toContain("text-start");
     expect(html).not.toContain("text-left");
-    // the composer's surface, with no accent border or glow
     expect(html).toContain("rounded-3xl bg-composer");
     expect(html).toContain("ring-1 ring-composer-ring");
     expect(html).not.toContain("border-accent");

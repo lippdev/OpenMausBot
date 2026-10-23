@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordEvents } from "../testing/events.ts";
-import { buildTurnContext, NATIVELY_REPLAYING_DRIVER_KINDS } from "../turn-context.ts";
+import { buildTurnContext, replaysNatively } from "../turn-context.ts";
 import { instanceConfigs } from "../config.ts";
 import { OpenAICompatDriver } from "./openai-compat.ts";
 
@@ -32,6 +32,42 @@ describe("OpenAICompatDriver", () => {
     const cfg = OpenAICompatDriver.defaultConfig();
     expect(cfg.url).toBe("https://openrouter.ai/api/v1");
     expect(cfg.apiKeyEnv).toBe("OPENAI_COMPAT_API_KEY");
+  });
+
+  it.each([
+    ["I'll open the browser first.", {}, 2],
+    ["I'm working in the Cua Local VM and will launch XFCE Terminal first.", {}, 2],
+    ["The terminal is open and the task is complete.", {}, 1],
+    ["Should I open the terminal?", {}, 1],
+    ["I'll open the browser first.", { tools: false }, 1],
+  ] as const)("bounds OpenRouter announcement nudges: %s %j", async (text, config, count) => {
+    const bodies: Array<{ model: string; messages: Array<{ role: string; content: string }> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+      if (String(url).endsWith("/models")) return Response.json({ data: [] });
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: text }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+        { headers: { "content-type": "text/event-stream" } });
+    }));
+    const instance = await OpenAICompatDriver.create({
+      instanceId: "openrouter-nudge", displayName: "OpenRouter", enabled: true,
+      config: OpenAICompatDriver.decodeConfig({ model: "qwen/qwen3.5-35b-a3b", ...config }),
+      environment: { OPENAI_COMPAT_API_KEY: "synthetic-fixture-key" },
+    });
+    const recorder = recordEvents(instance.adapter);
+    try {
+      await instance.adapter.sendTurn({ threadId: "nudge", text: "Open the terminal." });
+      expect(await recorder.until(event => event.type === "turn.completed")).toMatchObject({ ok: count !== 2 });
+      expect(bodies).toHaveLength(count);
+      expect(bodies[0]!.model).toBe("qwen/qwen3.5-35b-a3b");
+      if (count === 2) {
+        expect(bodies[1]!.messages.slice(0, -2)).toEqual(bodies[0]!.messages);
+        expect(bodies[1]!.messages.at(-2)).toEqual({ role: "assistant", content: text });
+        expect(bodies[1]!.messages.at(-1)).toMatchObject({ role: "user", content: expect.stringContaining("called no tool") });
+      }
+    } finally {
+      recorder.stop();
+      await instance.dispose();
+    }
   });
 
   it("honours an explicit url and apiKeyEnv override", () => {
@@ -69,11 +105,9 @@ describe("OpenAICompatDriver", () => {
         instanceId: "openai", displayName: "OpenAI", enabled: true, config,
         environment: { OPENAI_COMPAT_API_KEY: "workspace-key" },
       });
-      // No OpenAI key: unavailable, never the workspace key against OpenAI.
       expect((await inst.snapshot()).state).toBe("unavailable");
       expect(inst.models.default).toBe("gpt-5");
       await inst.dispose();
-      // A custom key variable still falls back, as it always has.
       expect(OpenAICompatDriver.decodeConfig({ apiKeyEnv: "GROQ_KEY" }).model).toBe("meta-llama/llama-3.3-70b-instruct");
     } finally {
       if (before === undefined) delete process.env.OPENAI_COMPAT_MODEL;
@@ -97,7 +131,6 @@ describe("OpenAICompatDriver", () => {
       environment: { OMB_OPENAI_API_KEY: "sk-fixture" },
     });
     await vi.waitFor(() => expect(inst.models.options.map((option) => option.id)).toEqual(["gpt-5", "o3", "gpt-4.1"]));
-    // A provider's own list is its official catalog, not custom models.
     expect(inst.models.options.every((option) => !option.custom)).toBe(true);
     await inst.dispose();
   });
@@ -115,8 +148,6 @@ describe("OpenAICompatDriver", () => {
     await inst.dispose();
   });
 
-  // The setup card used to show a config.json sentence as an "Open install
-  // in Terminal" command. The key is saved in the app.
   it("sends setup to Settings → API keys instead of a terminal", async () => {
     expect(OpenAICompatDriver.install?.command).toBeUndefined();
     expect(OpenAICompatDriver.install?.settings).toBe("connections");
@@ -131,12 +162,6 @@ describe("OpenAICompatDriver", () => {
     await inst.dispose();
   });
 
-  // Security: before, a hand-edited instance with its own URL and no key of
-  // its own received the workspace key and sent it to that host
-  // (verified: GET https://third-party.example.test/v1/models with
-  // "Bearer sk-or-WORKSPACE").
-  // An instance naming its own key variable reads only that variable, not
-  // the server's OPENAI_COMPAT_API_KEY either.
   it.each([
     ["its own URL", { url: "https://third-party.example.test/v1" }, ["WORKSPACE"]],
     ["its own key variable", { url: "https://third-party.example.test/v1", apiKeyEnv: "THIRD_PARTY_KEY" }, ["WORKSPACE", "OPERATOR"]],
@@ -230,9 +255,7 @@ describe("OpenAICompatDriver", () => {
 
     await inst.refreshModels?.();
 
-    // Every option carries `custom: true`: this engine advertises
-    // `access: "custom"`, and the picker renders only custom-flagged options
-    // for such engines — an unflagged one is invisible in its own picker.
+    // An `access: "custom"` engine's picker shows only custom-flagged options.
     expect(inst.models).toEqual({
       default: "vendor/model-a",
       options: [
@@ -467,10 +490,7 @@ describe("OpenAICompatDriver", () => {
         );
       }),
     );
-    // Local OpenAI-compatible servers (oMLX in particular) only emit a usage
-    // object in the stream when the client explicitly requests it via
-    // stream_options.include_usage -- without it every streamed turn against
-    // such a server gets no token-usage accounting at all.
+    // Local servers (oMLX in particular) emit stream usage only with stream_options.include_usage.
     const inst = await OpenAICompatDriver.create({
       instanceId: "test-include-usage",
       displayName: "Include usage",
@@ -508,18 +528,14 @@ describe("OpenAICompatDriver", () => {
       { role: "user" as const, text: "u25-sentinel-first-message" },
       { role: "assistant" as const, text: "u25-sentinel-first-reply" },
     ];
-    // Mirrors server/index.ts's real call: buildTurnContext only inlines the
-    // transcript into turnText when the driver is NOT in
-    // NATIVELY_REPLAYING_DRIVER_KINDS. openai-compat's runtime already
-    // replays via SendTurnInput.transcript (messagesFor() in
-    // openai-chat.ts), so both must not fire for the same turn.
+    // Mirrors server/index.ts: buildTurnContext inlines the transcript only for drivers that do not replay natively.
     const { turnText } = buildTurnContext({
       text: "second message",
       transcript,
       rewound: true,
       fresh: false,
       externallyUpdated: false,
-      replaysNatively: NATIVELY_REPLAYING_DRIVER_KINDS.includes("openai-compat"),
+      replaysNatively: replaysNatively("openai-compat"),
     });
     const inst = await OpenAICompatDriver.create({
       instanceId: "test-u25",
@@ -530,9 +546,6 @@ describe("OpenAICompatDriver", () => {
     });
     const recorder = recordEvents(inst.adapter);
 
-    // index.ts ALSO passes the raw transcript on SendTurnInput, which
-    // messagesFor() in openai-chat.ts turns into its own chat messages. Both
-    // would land in the same outgoing request if replaysNatively were wrong.
     await inst.adapter.sendTurn({ threadId: "thread-u25", text: turnText, transcript });
     await recorder.until((e) => e.type === "turn.completed");
 
@@ -579,10 +592,6 @@ describe("OpenAICompatDriver", () => {
     });
     await recorder.until((e) => e.type === "turn.completed");
 
-    // The resent prefix (system + transcript) must stay byte-identical when
-    // the volatile half changes, so only the stable half may sit in the
-    // system message. The volatile half rides the newest user message
-    // whenever the replayed history does not already carry it.
     const messages: any[] = sentBody?.messages ?? [];
     expect(messages[0]).toEqual({ role: "system", content: "Standing rules." });
     expect(messages.slice(1, 3)).toEqual([
@@ -594,7 +603,6 @@ describe("OpenAICompatDriver", () => {
       content: "Context from OpenMausBot updated since this conversation started; it replaces any earlier copy:\n\nMemory: likes quiet hours.\n\nhello",
     });
 
-    // A turn without the split keeps the legacy single-block shape.
     await inst.adapter.sendTurn({
       threadId: "thread-prompt-split-legacy",
       text: "bare",
@@ -610,8 +618,7 @@ describe("OpenAICompatDriver", () => {
 
   describe("replays what each earlier user message actually carried", () => {
     const NOTE = "Context from OpenMausBot updated since this conversation started; it replaces any earlier copy:\n\n";
-    // index.ts stamps the turn text (clock, recall) but stores only what the
-    // person typed, which is what later turns get back as transcript.
+    // index.ts stamps the turn text (clock, recall) but stores only what the person typed.
     const clock = (minute: string) => `Current time when this message was sent: Friday, 2026-10-09 18:${minute} UTC (UTC+00:00).\n\n`;
 
     const fixture = async () => {
@@ -666,7 +673,6 @@ describe("OpenAICompatDriver", () => {
       });
       expect(second.slice(0, first.length)).toEqual(first);
       expect(first.at(-1)).toEqual({ role: "user", content: NOTE + "Memory: likes tea.\n\n" + clock("00") + "hello" });
-      // The note is still in the replayed history, so it is not repeated.
       expect(second.slice(first.length)).toEqual([
         { role: "assistant", content: "hi" },
         { role: "user", content: clock("01") + "next" },
@@ -684,7 +690,6 @@ describe("OpenAICompatDriver", () => {
       });
       expect(second.slice(0, first.length)).toEqual(first);
       expect(second.at(-1)).toEqual({ role: "user", content: NOTE + "Memory: likes coffee.\n\n" + clock("01") + "next" });
-      // Clearing the volatile half announces it instead of going silent.
       const third = await send({
         text: "again",
         volatile: "",
@@ -734,13 +739,10 @@ describe("OpenAICompatDriver", () => {
         const messages = await send({
           text: `${clock(minute)}${recalled}\n\n${typed}`,
           recalled,
-          // a volatile half that changes every turn puts a fresh note on each one
           volatile: `Recent work: ${"w".repeat(2000)} ${turn}`,
           transcript: [...transcript],
         });
         expect(messages.at(-1).content).toContain(recalled);
-        // Everything before the previous user message is resent unchanged;
-        // that message itself is replayed without the recall it carried.
         if (turn > 0) expect(messages.slice(0, previous.length - 1)).toEqual(previous.slice(0, -1));
         for (const message of messages.slice(1, -1)) expect(message.content).not.toContain("<recalled");
         const stored = [{ role: "system", content: "Standing rules." }, ...transcript.map((m) => ({ role: m.role, content: m.text }))];
@@ -754,7 +756,6 @@ describe("OpenAICompatDriver", () => {
     it("does not lend a record to a later identical message it did not send", async () => {
       const { send, done } = await fixture();
       await send({ text: clock("00") + "continue", volatile: "Memory: likes tea.", transcript: [] });
-      // A second "continue" went to another engine, which this runtime never saw.
       const messages = await send({
         text: clock("05") + "next",
         volatile: "Memory: likes tea.",
@@ -782,8 +783,6 @@ describe("OpenAICompatDriver", () => {
         mentionTurn: true,
       });
       expect(mention.at(-1)).toEqual({ role: "user", content: NOTE + "Tagged: @Testy\n\n@Testy again" });
-      // A thread rebuilt after a restart has no record: its transcript goes
-      // out as stored and the newest message carries the note, as before.
       const unseen = await send({
         threadId: "thread-unseen",
         text: "later",
@@ -829,8 +828,7 @@ describe("OpenAICompatDriver", () => {
     await inst.adapter.sendTurn({ threadId: "thread-g", text: "prompt", model: "vendor/model" });
     await recorder.until((e) => e.type === "turn.completed");
 
-    // Strict OpenAI-compatible endpoints (Groq et al.) reject unknown
-    // top-level fields — `provider` is OpenRouter-only routing.
+    // Strict endpoints (Groq et al.) reject unknown top-level fields; `provider` is OpenRouter-only.
     expect(sentBody).not.toBeNull();
     expect("provider" in sentBody).toBe(false);
     recorder.stop();
@@ -856,8 +854,7 @@ describe("OpenAICompatDriver", () => {
       displayName: "Lookalike host",
       enabled: true,
       config: {
-        // hostname is NOT openrouter.ai — substring matching on the whole
-        // URL would be fooled by a lookalike domain or a path segment
+          // Not openrouter.ai: a lookalike domain or path segment must not match.
         url: "https://notopenrouter.ai/api/v1",
         apiKeyEnv: "TEST_KEY",
         provider: "fireworks",
@@ -950,14 +947,11 @@ describe("OpenAICompatDriver", () => {
 
       await inst.adapter.sendTurn({ threadId: "thread-idle-fail", text: "prompt", model: "vendor/model" });
 
-      // First chunk arrives immediately
       controller!.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"part 1"}}]}\n\n'));
 
-      // Advance clock past idle timeout without any new chunks
       await vi.advanceTimersByTimeAsync(185_000);
 
       const completed = await recorder.until((e) => e.type === "turn.completed");
-      // A provider that stops delivering chunks failed; the person did not press Stop.
       expect(completed).toMatchObject({ ok: false, stopReason: "error" });
 
       recorder.stop();
@@ -1003,19 +997,15 @@ describe("OpenAICompatDriver", () => {
 
       await inst.adapter.sendTurn({ threadId: "thread-idle-renew", text: "prompt", model: "vendor/model" });
 
-      // Chunk 1 at t=0s
       controller!.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"start "}}]}\n\n'));
       await vi.advanceTimersByTimeAsync(100_000);
 
-      // Chunk 2 at t=100s (resets idle timer)
       controller!.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"middle "}}]}\n\n'));
       await vi.advanceTimersByTimeAsync(100_000);
 
-      // Chunk 3 at t=200s (resets idle timer)
       controller!.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"end"}}]}\n\n'));
       await vi.advanceTimersByTimeAsync(100_000);
 
-      // Total 300s exceeds both the old 120s limit and the new 180s idle limit.
       controller!.enqueue(encoder.encode('data: [DONE]\n\n'));
       controller!.close();
 
@@ -1056,7 +1046,6 @@ describe("OpenAICompatDriver", () => {
     }
   });
 });
-
 
 it("openai-compat preserves an explicit tools-off connection and rejects ambiguous flags", () => {
   expect(OpenAICompatDriver.decodeConfig({})).not.toHaveProperty("tools");

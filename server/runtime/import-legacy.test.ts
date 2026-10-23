@@ -44,10 +44,7 @@ describe("importLegacyHandoffs", () => {
     expect(store.get("c-done")!.reportedAt).toBeDefined();
     expect(store.get("c-queued")).toMatchObject({ status: "queued", batchKey: "b1", assignee: { destination: { kind: "room_thread", groupId: "g1" } } });
     expect(store.events("c-run").map((e) => e.kind)).toEqual(["enqueued", "started"]);
-    // A second import is a no-op: nothing to read, nothing rewritten.
     expect(importLegacyHandoffs(store, file, T0 + 200)).toBe(0);
-    // The restart policy then treats the cut turns as any other: the root
-    // handed out work, so it waits; the running child reruns once.
     const runtime = new Runtime(store, idleRunner, { clock: { now: () => T0 + 300, monotonic: () => 0 } });
     runtime.open();
     expect(store.get("gen-1")).toMatchObject({ status: "waiting", restart: "cut" });
@@ -62,14 +59,9 @@ describe("importLegacyHandoffs", () => {
   });
 });
 
-// ── the delegation ledger ──────────────────────────────────────────────
-
 const NOW = T0 + 1_000;
 const idle = { running: new Set<string>(), parked: new Set<string>() };
 
-/** Two source threads: the Chief's chat (a delegation the person approved,
- * a one-way notice into a thread the sender opened) and an external
- * runtime's thread (one item it polls for); three receipts, one denied. */
 const queued = {
   "chief-chat": [
     { id: "task-1", sourceBotId: "chief", toBotId: "builder", message: "Build it", depth: 0, queuedAt: T0 + 10, approvalAlreadyGranted: true,
@@ -110,7 +102,6 @@ describe("importLegacyDelegations", () => {
     expect(existsSync(join(dir, "delegation-receipts.json"))).toBe(false);
     expect(existsSync(join(dir, "delegation-receipts.json.migrated"))).toBe(true);
 
-    // The Chief's queue: a waiting root for the thread, requested by the Chief's own turn.
     const chiefRoot = store.get("legacy-chief-chat")!;
     expect(chiefRoot).toMatchObject({ status: "waiting", depth: 0, rootId: "legacy-chief-chat", mode: "work", reply: "resume", brief: "", executions: 1,
       origin: { kind: "person", source: "chat", ref: "chief-chat", quote: "Ship it" },
@@ -118,28 +109,21 @@ describe("importLegacyDelegations", () => {
       assignee: { botId: "chief", destination: { kind: "standing_thread", threadId: "chief-chat" } },
       budgets: { since: NOW, requests: 0, executions: 0, wakes: 0 }, createdAt: T0 + 10, lastActivityAt: NOW, level: "ask", levelSource: "own" });
     expect(store.events("legacy-chief-chat").map((e) => e.kind)).toEqual(["enqueued", "started", "waiting"]);
-    // The approved delegation: queued under it, the legacy task id kept; no
-    // thread was named and no host resolves one, so the thread id is empty.
     expect(store.get("task-1")).toMatchObject({ status: "queued", depth: 1, parentId: "legacy-chief-chat", rootId: "legacy-chief-chat", brief: "Build it",
       mode: "work", reply: "resume", approved: true, executions: 0, createdAt: T0 + 10, lastActivityAt: NOW, level: "ask", levelSource: "own",
       origin: { kind: "person", quote: "Ship it" }, requester: { kind: "bot_turn", botId: "chief", threadId: "chief-chat" },
       assignee: { botId: "builder", destination: { kind: "standing_thread", threadId: "" } } });
     expect(store.get("task-1")!.requester.runId).toBeUndefined();
     expect(store.events("task-1").map((e) => e.kind)).toEqual(["enqueued"]);
-    // The one-way notice: a notify row into the thread the sender opened; its
-    // own origin was not the user's.
     expect(store.get("task-2")).toMatchObject({ status: "queued", mode: "notify", reply: "none", brief: "FYI: shipping tonight", createdAt: T0 + 20,
       origin: { kind: "outside", source: "chat" }, assignee: { botId: "ops", destination: { kind: "work_thread", threadId: "ops-thread-7" } } });
     expect("approved" in store.get("task-2")!).toBe(false);
-    // The external runtime's queue: a poll root under the run id (= the thread), its child polled in that lane.
     expect(store.get("legacy-bridge-thread")).toMatchObject({ status: "waiting", reply: "poll",
       requester: { kind: "external_runtime", runId: "bridge-thread", botId: "bridge", threadId: "bridge-thread" },
       assignee: { botId: "bridge", destination: { kind: "standing_thread", threadId: "bridge-thread" } }, origin: { kind: "outside" } });
     expect(store.get("task-3")).toMatchObject({ status: "queued", mode: "work", reply: "poll", brief: "Test it",
       requester: { kind: "bot_turn", botId: "bridge", threadId: "bridge-thread", runId: "bridge-thread" } });
 
-    // Receipts: terminal rows, ids kept. The denied one sits under the live
-    // Chief root; the old thread gets a completed root of its own.
     expect(store.get("rcpt-denied")).toMatchObject({ status: "failed", outcome: "denied", outcomeDetail: "legacy receipt: denied", result: "Peer approval denied",
       parentId: "legacy-chief-chat", rootId: "legacy-chief-chat", depth: 1, executions: 0, finishedAt: T0 - 50, reportedAt: T0 - 50, createdAt: T0 - 50,
       brief: "", mode: "work", reply: "resume", requester: { kind: "bot_turn", botId: "chief", threadId: "chief-chat" },
@@ -158,12 +142,9 @@ describe("importLegacyDelegations", () => {
     expect(store.children("legacy-chief-chat").map((c) => c.id)).toEqual(["rcpt-denied", "task-1", "task-2"]);
     expect(checkInvariants(store, idle)).toEqual([]);
 
-    // A second call finds no files and writes nothing.
     expect(importLegacyDelegations(store, dir, NOW + 1)).toBe(0);
     expect(store.all()).toHaveLength(9);
 
-    // Restart reconciliation changes none of it: the roots wait (they were
-    // never cut mid-turn), the queued children stay queued, nothing reruns.
     const runtime = new Runtime(store, idleRunner, { clock: { now: () => NOW + 2, monotonic: () => 0 } });
     runtime.open();
     runtime.tick();
@@ -180,7 +161,7 @@ describe("importLegacyDelegations", () => {
     const dir = ledgerDir();
     const store = openRuntimeStore(":memory:");
     expect(importLegacyDelegations(store, dir, NOW)).toBe(9);
-    // The files come back (a crash before the rename): nothing is rewritten.
+    // The files come back, as after a crash before the rename.
     writeFileSync(join(dir, "delegations.json"), JSON.stringify(queued));
     writeFileSync(join(dir, "delegation-receipts.json"), JSON.stringify(receipts));
     const before = store.all();
@@ -216,17 +197,14 @@ describe("importLegacyDelegations", () => {
     expect(runs.map((a) => a.id).sort()).toEqual(["task-1", "task-2", "task-3"]);
     expect(runs.find((a) => a.id === "task-1")).toMatchObject({ status: "running", executions: 1, level: "ask" });
     runtime.tick();
-    // The Chief's root owes its resume: it runs as the Chief's own turn in its thread.
     expect(store.get("legacy-chief-chat")).toMatchObject({ status: "running", executions: 2 });
     const resume = runs.find((a) => a.id === "legacy-chief-chat");
     expect(resume).toBeDefined();
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(store.get("legacy-chief-chat")).toMatchObject({ status: "completed", outcome: "done" });
-    // The external runtime's root completed without a turn; its lane holds the result.
     expect(store.get("legacy-bridge-thread")).toMatchObject({ status: "completed", outcome: "done", executions: 1 });
     expect(runtime.poll({ runId: "bridge-thread" }).items.map((i) => i.assignmentId)).toEqual(["task-3"]);
     expect(runtime.poll({ runId: "bridge-thread" }).items).toEqual([]);
-    // The notice came back to nobody.
     expect(store.inbox({ threadId: "chief-chat" }).map((i) => i.assignmentId)).toEqual(["task-1"]);
     expect(reports).toContain("task-2");
     expect(checkInvariants(store, idle)).toEqual([]);

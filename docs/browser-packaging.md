@@ -25,6 +25,58 @@ Profiles, cookies and downloads are user data, never packaged resources.
 The npm/self-hosted distribution stays small and retains its explicit browser
 installation flow. Desktop packaging does not silently enlarge the npm tarball.
 
+## Which Chrome the bots' browser runs
+
+agent-browser still drives every bot browser, but the browser it starts is a
+real Chrome whenever this machine has one, chosen once per machine
+(`server/browser/chrome/resolve.ts`):
+
+1. The person's installed **Google Chrome**, unless an organization manages it
+   (`/Library/Managed Preferences/com.google.Chrome.plist`, the
+   `HKLM\SOFTWARE\Policies\Google\Chrome` key, or a JSON file in
+   `/etc/opt/chrome/policies/managed`). Bots get their own profiles; the
+   person's Chrome profile is never touched.
+2. Otherwise **Chrome for Testing** 153.0.8010.47, downloaded once into
+   `tools/chrome/` in the data directory at first launch, checked against its
+   pinned size and SHA-256 before it is unpacked, and moved into place in one
+   rename. Only platforms with a pin download (Apple silicon Macs today;
+   `scripts/pin-chrome-for-testing.ts` measures more). A browser call made
+   during the download waits up to 45 seconds, then says how far it got.
+3. A Linux desktop without Google Chrome, and a platform without a pin, keep
+   the bundled headless shell. That stays the machine's choice; it never
+   changes while the server runs.
+
+Servers and the Docker image name their browser with
+`AGENT_BROWSER_EXECUTABLE_PATH` (the image's Chrome for Testing), or use the
+Chrome for Testing `agent-browser install` put in place. `OMB_CHROME_PATH`
+names one explicitly. An `OMB_AGENT_BROWSER_PATH` engine keeps its own choice
+unless a Chrome is named too.
+
+**Identity.** The chosen Chrome reports exactly what it reports headed, read
+from the binary itself once per version: its own user agent without
+"HeadlessChrome", and its own client hints (brands, full version list,
+platform version, architecture). agent-browser runs a generated launcher
+(`browser/chrome-launcher.sh`, `.cmd` on Windows) that adds
+`--disable-blink-features=AutomationControlled`, that user agent, the primary
+display's size and, when OMB knows it, the language; on a server it also
+passes the server's `TZ`. A bot's Chrome never touches the person's keychain
+or keyring (`--use-mock-keychain` on macOS, `--password-store=basic` on
+Linux), and on macOS it always runs with the person's own home, so no
+"keychain cannot be found" dialog can appear. A second DevTools connection gives every page,
+cross-site frame and worker the matching client hints before it runs.
+Nothing is invented: Chrome for Testing reports Chromium brands, Google Chrome
+its own. `OMB_BROWSER_SCREEN`, `OMB_BROWSER_LANG` and `OMB_BROWSER_TIMEZONE`
+override the display, language and zone.
+
+`openmausbot browser status`, the server's startup log and the
+`browserEngine.chrome` field of its configuration status name the choice, for
+example `Google Chrome 155 (installed)`. **Rollback:** start the server with
+`OMB_BROWSER_LEGACY_SHELL=1` to run exactly the previous engine.
+
+`node --experimental-strip-types scripts/verify-browser-identity.ts --public`
+checks what sites see, in a throwaway home: the identity on a loopback probe
+page, then the four public bot-test pages, read-only.
+
 ## Signed-in sites and My Chrome
 
 Each built-in browser lists its signed-in sites (Settings → Browser profiles,
@@ -35,6 +87,61 @@ for sites that refuse the automated one, such as Google sign-in. That needs
 the desktop app and Chrome 144+ with remote debugging on at
 `chrome://inspect/#remote-debugging`; on Cloud and servers profiles stay
 built-in. Details: [the browser engine plan, step 5](plans/browser-engine.md).
+
+## What a bot's browser can reach
+
+Every Chrome OpenMausBot launches for a bot sends all of its connections
+through an egress gate: a SOCKS5 server on `127.0.0.1`, one per browser
+session, run by the OpenMausBot server (`server/browser/egress/`). The gate
+resolves names itself and checks every address a name resolves to before it
+connects, so redirects and DNS rebinding reach nothing it would refuse. It
+carries bytes only, so TLS, HTTP/2 and WebSockets are unchanged. Chrome sends
+loopback traffic through it too (`--proxy-bypass-list=<-loopback>`), and
+WebRTC sends no UDP around it. If the gate is not running, the browser
+connects nowhere.
+
+| Destination | Desktop | Self-hosted server | MausBot Cloud |
+|---|---|---|---|
+| Public internet | yes | yes | yes |
+| OpenMausBot's own ports (loopback and this machine's addresses) | no | no | no |
+| Other ports on this computer | yes, by `localhost` or an address, not by a public name | only servers a bot's own processes opened (Linux), or allowed below | only servers a bot's own processes opened |
+| Local network: 10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7 | yes, unless `browserEngine.egress.localNetwork` is `false` | only what `browserEngine.egress.allow` lists | no |
+| Link-local and cloud metadata (169.254/16, fe80::/10, `fd00:ec2::254`, 100.100.100.200) | no | no | no |
+| 0/8, 198.18/15, multicast | no | no | no |
+
+OpenMausBot's own ports are the server's and its webhook receiver's, the
+desktop client relay, the companion and its control page and gateway, the Vite
+dev server, the Local VM viewer, every port the server process has listened
+on, the ports the desktop app reports, each gate, and agent-browser's stream
+servers and Chrome DevTools ports. Servers add their HTTPS edge (8080),
+Caddy's admin API (2019) and the ports of fleet workspaces.
+
+"A bot's own processes" means a process in the session of an engine running
+a bot's turns, so a dev server the bot started keeps counting after the shell
+that started it exits. Other platforms than Linux cannot tell, so there only
+allowed destinations are reachable.
+
+A self-hosted server opens more with `config.json`:
+
+```json
+{ "browserEngine": { "egress": { "allow": ["192.168.1.0/24", "10.0.0.5:8080", "127.0.0.1:9000"] } } }
+```
+
+Each entry is an address or CIDR range with an optional `:port` (IPv6 in
+brackets for a port: `[fd12::1]:443`). OpenMausBot's own ports, metadata and
+link-local addresses stay closed whatever it lists, and MausBot Cloud ignores
+it. Every refused connection shows up in the bot's next browser result:
+`The page tried to reach "127.0.0.1:8799" (blocked: OpenMausBot's own service)`.
+
+`agent_browser_read` reads the page open in the browser. Given an address,
+agent-browser 0.37 would fetch it with its own HTTP client, around the browser
+and the gate, so OpenMausBot does not offer that parameter and refuses a call
+that passes one; the bot opens the address first.
+
+My Chrome is the person's own browser and does not go through the gate; the
+server never treats a browser as its owner (see
+[self-hosting](self-hosting.md#a-browser-signs-in)), and the companion's
+control page needs its per-launch token.
 
 ## Process hygiene
 
@@ -63,11 +170,16 @@ same rules hold on the desktop, a server and Cloud:
   read from `/proc`, so an image without `ps` works the same.
 - **Unused browsers close.** A browser nothing has used for
   `browserEngine.idleTimeoutMinutes` in `config.json` (1 to 60; 10 when
-  unset) is closed: no bot call (a tool listing counts, and so do a call
+  unset, 3 on a MausBot Cloud home, whose 4 GB fits few browsers) is closed: no bot call (a tool listing counts, and so do a call
   waiting behind another, its page-health reads and recorded step, and
   fill_login's typing; a preview frame only holds off a close while it is
-  taken), no turn that has used it and is still running, no person holding
-  it, no open Browser panel.
+  taken), no turn that has used it and is still running, and no person
+  holding it or using it through a Browser panel (opening the panel, a
+  click, a key, an address, taking or handing back control). A panel that
+  only watches does not keep it open: the panel says the browser closed
+  after it sat unused and offers to open it again, and on the new engine
+  it shows the browser again by itself once the bot's next call starts it.
+  It never reconnects on its own, which would start the browser again.
   Saved sign-ins stay, and the bot's next browser call opens it again and is
   told its pages are gone. A temporary browser saves nothing, so it starts
   fresh, and the bot is told its sign-ins went too. A profile set to My
@@ -75,7 +187,14 @@ same rules hold on the desktop, a server and Cloud:
 - **Leftovers are swept.** A crash or a kill closes nothing, so the server
   sweeps when it starts, every minute, and at shutdown. It closes only this
   data dir's browsers: each bot's own, each built-in profile's, and its
-  temporary browsers, whose names carry a tag of the data dir. A Chrome whose
+  temporary browsers, whose names carry a tag of the data dir. On a MausBot
+  Cloud home, whose HOME is the server's alone, it also closes the browser
+  of any bot that no longer exists (a `bot-` session), within a minute.
+  Deleting a bot or profile closes its browser and erases its saved
+  sign-ins with the agent-browser OpenMausBot installed, or on a Cloud home
+  the image's own; an agent-browser found only on PATH elsewhere just has
+  the running browser closed, since a wrapper there could fail the erase
+  for good. A Chrome whose
   daemon was killed under it (by the OOM killer, by hand) can never be used
   again: it is found by the session its environment names and stopped, and
   its profile folder removed. Anything else under the same HOME, such as a

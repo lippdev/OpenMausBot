@@ -1,11 +1,3 @@
-// Every hand-off path on the job runtime (docs/runtime-contract.md §9), end
-// to end: the real server, the scripted fake Claude
-// (server/testing/room-handoff-agent.ts) as every engine. A routine run,
-// a consultation, a one-way notice in a fresh thread, a standing external
-// runtime and a restart mid-hand-off, graded on runtime state
-// (DATA_DIR/runtime.db), routine receipts, the stored chats and what each
-// fake turn was told, never on model judgment. Each scenario runs on its
-// own isolated server.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,15 +13,10 @@ import { hostTimeout } from "./testing/host-timeout.ts";
 import { ownTurnText } from "./testing/room-handoff-agent.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-/** Every resume of a requester opens with this. */
 const SETTLED = "Your downstream room requests have settled.";
-/** The report envelope's opening (composeReport). */
 const REPORT_FROM_PEER = "[OpenMausBot report from @Peer";
-/** A routine turn's system prompt, present on the run's own turn and on its resume. */
 const ROUTINE_TURN = "Execute this routine now";
-/** What a requester hears about teammates a restart cut (restartNote). */
 const TEAMMATES_CUT = "A restart cut these teammates' turns";
-/** The standing bearer an external runtime presents (external-runtimes.json). */
 const TOKEN = "runtime-paths-external-fixture-token-0123456789abcdef";
 
 const jsonl = (path: string): any[] => existsSync(path)
@@ -49,7 +36,7 @@ async function scenario(test: (f: any) => Promise<void>) {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(60_000) });
       const raw = await response.text();
       let parsed: any = raw;
-      try { parsed = JSON.parse(raw); } catch { /* text */ }
+      try { parsed = JSON.parse(raw); } catch {}
       return { status: response.status, body: parsed };
     };
     const cli = (...args: string[]) => runControlOmb([...args, "--url", url]) as Promise<any>;
@@ -63,14 +50,12 @@ async function scenario(test: (f: any) => Promise<void>) {
       writeFileSync(planPath, JSON.stringify(plan));
     };
     writeFileSync(planPath, JSON.stringify(plan));
-    /** The person's own line, from the app, into a bot's conversation. */
     const say = async (botId: string, threadId: string, text: string) => {
       const sent = await api("POST", `/api/bots/${botId}/messages`, { text, threadId });
       expect(sent.status, JSON.stringify(sent.body)).toBeLessThan(300);
       return sent.body;
     };
     const rows = () => readHandoffs(dataDir);
-    /** One Assignment row as the runtime stores it (requester, origin, …). */
     const raw = (id: string): Record<string, any> | undefined => {
       const db = new DatabaseSync(join(dataDir, "runtime.db"), { readOnly: true });
       try {
@@ -80,17 +65,13 @@ async function scenario(test: (f: any) => Promise<void>) {
     };
     const roots = () => rows().filter((row) => !row.parentId);
     const children = () => rows().filter((row) => row.parentId);
-    /** Every scripted turn a fake Claude bot ran, in order. */
     const turns = (botId?: string): any[] => jsonl(`${planPath}.evidence.jsonl`).filter((turn) => !botId || turn.botId === botId);
     const turn = (key: string) => turns().find((candidate) => candidate.planKey === key);
-    /** What a turn itself was asked, after any replayed history. */
     const own = (record: any): string => ownTurnText(record?.prompt);
-    /** Everything the turn's process could read: its instructions and its prompt. */
     const told = (record: any): string => `${record?.system ?? ""}\n${JSON.stringify(record?.prompt ?? "")}`;
     const messages = async (threadId: string): Promise<any[]> => (await api("GET", `/api/threads/${threadId}/messages?limit=300`)).body.messages ?? [];
     const bot = async (botId: string) => (await api("GET", "/api/bots?messages=0")).body.bots.find((candidate: any) => candidate.id === botId);
     const runState = async (runId: string) => (await api("GET", "/api/routines")).body.runs.find((run: any) => run.id === runId);
-    /** A manual run of a fresh routine on the owner, running. */
     const startRoutine = async (name: string, prompt: string) => {
       const created = await api("POST", "/api/routines", { name, prompt, botId: owner.id, enabled: false,
         schedule: { type: "interval", everyMinutes: 60, anchorAt: Date.now() + 3_600_000 } });
@@ -100,8 +81,6 @@ async function scenario(test: (f: any) => Promise<void>) {
       await expect.poll(async () => (await runState(started.body.run.id))?.status, { timeout: 20_000 }).toBe("running");
       return { routine: created.body.routine, run: await runState(started.body.run.id) };
     };
-    /** The turn-scoped comms token of the scripted turn running in this
-     * thread, from the launch files the fake Claude dumps for its latest turn. */
     const tokenOf = async (threadId: string): Promise<string> => {
       let found = "";
       await expect.poll(() => {
@@ -120,8 +99,6 @@ async function scenario(test: (f: any) => Promise<void>) {
     const ready = (name: string) => join(dataDir, `${name}.ready`);
     const awaitReady = (name: string) => expect.poll(() => existsSync(ready(name)), { timeout: 30_000 }).toBe(true);
     const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    /** Stop this server as a quit or update would (SIGTERM) and start it
-     * again on the same data and port. */
     const restart = async () => {
       await waitForExit(server, { signal: "SIGTERM" });
       const env = verificationServerEnvironment(parentEnv, dataDir, Number(new URL(url).port));
@@ -148,8 +125,6 @@ async function scenario(test: (f: any) => Promise<void>) {
       console.error(`runtime paths fixture state:\n${JSON.stringify(summary, null, 1)}`);
       throw error;
     }
-    // No bot ever ran a turn its script did not plan: no duplicate
-    // dispatch, no resume nobody expected.
     expect(turns().filter((record) => record.unplanned).map((record) => own(record).slice(0, 300))).toEqual([]);
   } finally {
     if (restarted) await waitForExit(server, { signal: "SIGTERM" });
@@ -157,11 +132,6 @@ async function scenario(test: (f: any) => Promise<void>) {
   }
 }
 
-// R1. A routine run's turn hands work to a teammate with coordinate_bots.
-// The root records the run as its requester with routine lineage; the run
-// waits; the teammate's turn opens with the routine envelope; its result
-// resumes the run as a routine turn (the execution prompt is present), and
-// the run completes with that turn's output.
 it("R1 a routine run coordinates a teammate, waits, and completes through a routine resume turn", () => scenario(async (f) => {
   const brief = "R1-BRIEF: produce the fixture report and give the row count.";
   f.script(f.owner.id,
@@ -174,7 +144,6 @@ it("R1 a routine run coordinates a teammate, waits, and completes through a rout
   await expect.poll(async () => (await f.runState(run.id))?.status, { timeout: 30_000 }).toBe("waiting");
   expect((await f.runState(run.id)).attention).toContain("delegated");
   expect((await f.runState(run.id)).finishedAt).toBeUndefined();
-  // The record: the run is the requester, with routine lineage.
   const root = f.roots()[0];
   expect(root).toMatchObject({ threadId: run.threadId, botId: f.owner.id });
   expect(f.raw(root.id)).toMatchObject({ requester: { kind: "routine_run", runId: run.id, botId: f.owner.id, threadId: run.threadId },
@@ -182,8 +151,6 @@ it("R1 a routine run coordinates a teammate, waits, and completes through a rout
 
   f.open("r1-peer");
   await expect.poll(async () => (await f.runState(run.id))?.status, { timeout: 45_000 }).toBe("completed");
-  // The teammate's turn opened with the routine envelope (evidence is
-  // written when a scripted turn ends).
   const envelope = f.own(f.turn("P1"));
   expect(envelope).toContain(ENVELOPE_MARK);
   expect(envelope).toContain("A routine run started this work");
@@ -191,7 +158,6 @@ it("R1 a routine run coordinates a teammate, waits, and completes through a rout
   const finished = await f.runState(run.id);
   expect(finished.output).toContain("R1-FINAL");
   expect(finished.routineId).toBe(routine.id);
-  // The run's own turn, then one resume: both routine turns.
   await expect.poll(() => f.turns(f.owner.id).map((record: any) => [record.planKey, record.resumed]), { timeout: 15_000 }).toEqual([["O0", false], ["O1", true]]);
   expect(f.told(f.turn("O0"))).toContain(ROUTINE_TURN);
   const resume = f.told(f.turn("O1"));
@@ -201,15 +167,10 @@ it("R1 a routine run coordinates a teammate, waits, and completes through a rout
   await expect.poll(() => f.roots()[0]?.status, { timeout: 15_000 }).toBe("completed");
   expect(f.children()).toHaveLength(1);
   expect(f.children()[0]).toMatchObject({ status: "completed", mode: "work", reply: "resume", botId: f.peer.id, text: brief });
-  // The run's conversation shows the result once, as the person reads it,
-  // and the chip in it carries the reason the hand-off gave.
   expect((await f.messages(run.threadId)).filter((message: any) => message.tool?.name === "Peer replied")).toHaveLength(1);
   expect((await f.messages(run.threadId)).find((message: any) => message.tool?.name === "Sent to Peer")?.tool?.output).toBe("nightly check");
 }), hostTimeout(120_000));
 
-// R3. A consultation (coordinate_bots with consult: true) has no inline
-// wait: the route answers at once with the receipt; the teammate's turn opens
-// with the consultation envelope; the asker is resumed with the report.
 it("R3 a consultation reaches a teammate without waiting and resumes the asker with the answer", () => scenario(async (f) => {
   const question = "R3-QUESTION: which port does the fixture listen on?";
   f.script(f.owner.id,
@@ -224,7 +185,6 @@ it("R3 a consultation reaches a teammate without waiting and resumes the asker w
   const started = Date.now();
   const asked = await f.api("POST", "/api/internal/coordinate-bots", { botIds: [f.peer.id], message: question, consult: true }, token);
   expect(asked.status, JSON.stringify(asked.body)).toBe(200);
-  // Immediate: nothing waited for the teammate's turn.
   expect(Date.now() - started).toBeLessThan(5_000);
   expect(asked.body.deprecation).toBeUndefined();
   expect(asked.body.text).toBeUndefined();
@@ -246,10 +206,6 @@ it("R3 a consultation reaches a teammate without waiting and resumes the asker w
   expect(f.children()[0]).toMatchObject({ status: "completed", result: "R3-ANSWER: port 4242." });
 }), hostTimeout(120_000));
 
-// R4. coordinate_bots with thread "new" and reply "none" is a one-way
-// notice in a fresh thread on the teammate: the child is a notify row nobody
-// awaits, its envelope says the sender is not waiting, and the sender is
-// never resumed.
 it("R4 a one-way notice opens a notify child in a new thread and never resumes the sender", () => scenario(async (f) => {
   const notice = "R4-NOTICE: own the release QA from here.";
   f.script(f.owner.id, { key: "O0", match: ["R4-SEND"], gateFile: f.gate("r4-owner"), readyFile: f.ready("r4-owner"), reply: "O0: sent onward." });
@@ -265,7 +221,6 @@ it("R4 a one-way notice opens a notify child in a new thread and never resumes t
   expect(sent.body.message).toContain("Nothing comes back");
   const receipt = sent.body.receipts[0];
   expect(receipt).toMatchObject({ botId: f.peer.id, outcome: "queued" });
-  // A fresh thread on the teammate, titled by the message.
   expect(receipt.threadId).toEqual(expect.any(String));
   expect(receipt.threadId).not.toBe(f.peer.activeTaskId);
   const peerTasks = (await f.bot(f.peer.id)).tasks;
@@ -280,7 +235,6 @@ it("R4 a one-way notice opens a notify child in a new thread and never resumes t
   expect(envelope).toContain("will not be resumed");
   expect(envelope).toContain(notice);
   await expect.poll(() => f.children()[0]?.status, { timeout: 30_000 }).toBe("completed");
-  // The sender's turn ended on its own; nothing resumes it for a notice.
   await expect.poll(() => f.roots()[0]?.status, { timeout: 30_000 }).toBe("completed");
   await expect.poll(async () => (await f.bot(f.owner.id)).busy, { timeout: 30_000 }).toBeFalsy();
   await f.settle(2_000);
@@ -288,12 +242,6 @@ it("R4 a one-way notice opens a notify child in a new thread and never resumes t
   expect((await f.messages(job)).filter((message: any) => message.tool?.name === "Peer replied")).toHaveLength(0);
 }), hostTimeout(120_000));
 
-// R5. A standing external runtime hands work on through the route with its
-// standing capability: each call is its own root with reply "poll"; the
-// teammate's envelope says its reply waits in an inbox; assignment_status
-// long-polls the root until it completes and returns the settled child
-// once, with its inbox item, which the read marks delivered. Nothing wakes
-// the runtime's bot on its pinned thread.
 it("R5 an external runtime delegates, long-polls assignment_status for the settled child, and is never woken", () => scenario(async (f) => {
   const brief = "R5-BRIEF: count the open tickets and report the number.";
   f.script(f.peer.id, { key: "P1", match: ["R5-BRIEF"], reply: "R5-RESULT: 7 open tickets." });
@@ -306,14 +254,12 @@ it("R5 an external runtime delegates, long-polls assignment_status for the settl
   expect(handed.body.message).toContain("assignment_status");
   const requestId = handed.body.receipts[0].requestId;
   expect(handed.body.receipts[0]).toMatchObject({ botId: f.peer.id, outcome: "queued" });
-  // The root is the runtime's, outside lineage, polled rather than resumed.
   await expect.poll(() => f.roots().length, { timeout: 15_000 }).toBe(1);
   expect(f.roots()[0]).toMatchObject({ id: handed.body.rootId, threadId: gateway.threadId, botId: gateway.id, reply: "poll" });
   expect(f.raw(handed.body.rootId)).toMatchObject({ requester: { kind: "external_runtime", runId: expect.stringContaining(gateway.id) },
     origin: { kind: "outside", source: "external_runtime", ref: gateway.threadId } });
   expect(f.children()[0]).toMatchObject({ id: requestId, mode: "work", reply: "poll", text: brief });
 
-  // One long-poll of the root: it answers once the child settled.
   const polled = await f.api("GET", `/api/internal/assignment-status?id=${handed.body.rootId}&wait_ms=60000`, undefined, TOKEN);
   expect(polled.status, JSON.stringify(polled.body)).toBe(200);
   expect(polled.body.assignment).toMatchObject({ id: handed.body.rootId, status: "completed", reply: "poll" });
@@ -321,20 +267,15 @@ it("R5 an external runtime delegates, long-polls assignment_status for the settl
   expect(polled.body.children[0]).toMatchObject({ id: requestId, botId: f.peer.id, botName: "Peer", status: "completed", outcome: "done", result: "R5-RESULT: 7 open tickets.", mode: "work" });
   expect(polled.body.inbox).toHaveLength(1);
   expect(polled.body.inbox[0]).toMatchObject({ assignmentId: requestId, kind: "settled" });
-  // Read once: the lane is delivered now, and a second read says so.
   const again = await f.api("GET", `/api/internal/assignment-status?id=${handed.body.rootId}`, undefined, TOKEN);
   expect(again.status).toBe(200);
   expect(again.body.inbox[0].deliveredAt).toEqual(expect.any(Number));
-  // The child by its own id, and the conversation's outstanding list, both read.
   expect((await f.api("GET", `/api/internal/assignment-status?id=${requestId}`, undefined, TOKEN)).body.assignment.status).toBe("completed");
   expect((await f.api("GET", "/api/internal/assignment-status", undefined, TOKEN)).body.outstanding).toEqual([]);
-  // The teammate was told who asks and how the reply returns.
   const envelope = f.own(f.turn("P1"));
   expect(envelope).toContain(ENVELOPE_MARK);
   expect(envelope).toContain("reads your reply from its inbox");
   expect(envelope).toContain(brief);
-  // No wake: the runtime's bot never ran a turn here, and its pinned thread
-  // holds no engine line.
   await f.settle(1_500);
   expect(f.turns(gateway.id)).toEqual([]);
   expect((await f.bot(gateway.id)).busy).toBeFalsy();
@@ -342,10 +283,6 @@ it("R5 an external runtime delegates, long-polls assignment_status for the settl
   expect(pinned.filter((message: any) => message.role === "bot" && message.turnId && !message.from)).toEqual([]);
 }), hostTimeout(120_000));
 
-// R6. A restart while a routine's teammate works: the ledger used to lose
-// the running delegation and the run with it. On the runtime the teammate's
-// cut turn runs again once, the run stays waiting through the restart, its
-// resume says what the restart did, and the run still completes.
 it("R6 a restart while a routine's teammate runs reruns the teammate once and the run still completes", () => scenario(async (f) => {
   const brief = "R6-BRIEF: rebuild the search index and report the document count.";
   f.script(f.owner.id,
@@ -358,11 +295,9 @@ it("R6 a restart while a routine's teammate runs reruns the teammate once and th
   await expect.poll(async () => (await f.runState(run.id))?.status, { timeout: 30_000 }).toBe("waiting");
   expect(f.children()[0]).toMatchObject({ status: "running", botId: f.peer.id, executions: 1 });
 
-  // The cut turn never finishes (a cut scripted turn writes no evidence);
-  // the rerun reaches the same gate in the new process.
+  // A cut scripted turn writes no evidence; the rerun reaches the same gate in the new process.
   unlinkSync(f.ready("r6-peer"));
   await f.restart();
-  // The run goes on with its teammate's work instead of failing on restart.
   await expect.poll(async () => (await f.runState(run.id))?.status, { timeout: 20_000 }).toBe("waiting");
   expect((await f.runState(run.id)).error).toBeUndefined();
   await f.awaitReady("r6-peer");
@@ -370,7 +305,6 @@ it("R6 a restart while a routine's teammate runs reruns the teammate once and th
   f.open("r6-peer");
   await expect.poll(async () => (await f.runState(run.id))?.status, { timeout: 60_000 }).toBe("completed");
   expect((await f.runState(run.id)).output).toContain("R6-FINAL");
-  // The teammate's turn ran once per process and finished once; its row says so.
   expect(f.turns(f.peer.id).map((record: any) => record.planKey)).toEqual(["P1"]);
   expect(f.children()[0]).toMatchObject({ status: "completed", restarts: 1, executions: 2, result: "R6-RESULT: 1200 documents." });
   await expect.poll(() => f.turns(f.owner.id).map((record: any) => [record.planKey, record.resumed]), { timeout: 15_000 }).toEqual([["O0", false], ["O1", true]]);

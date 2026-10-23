@@ -395,7 +395,7 @@ describe("whole-team export (package v2)", () => {
   });
 
   it("refuses plainly when there is nothing to share, a bad version or too much", () => {
-    expect(() => createTeamPackageExport({ ...fixture(), team: "Empty" })).toThrow("Add a bot to this team before sharing it.");
+    expect(() => createTeamPackageExport({ ...fixture(), team: "Empty" })).toThrow("Add a bot to this department before sharing it.");
     expect(() => createTeamPackageExport({ ...fixture(), release: "one" })).toThrow("Use a version like 1.2.3.");
     const huge = fixture();
     huge.skillsByBot = new Map([["lead", Array.from({ length: 17 }, (_, index) => ({
@@ -404,9 +404,6 @@ describe("whole-team export (package v2)", () => {
     expect(() => createTeamPackageExport(huge)).toThrow(TEAM_TOO_LARGE_MESSAGE);
   });
 
-  // The Share dialog's first look asks for "all". A team that cannot put
-  // every skill in one file must still get a preview (and its skill boxes),
-  // so "all" shares what fits and lists the rest instead of refusing.
   describe("skills that do not all fit", () => {
     const many = (prefix: string, count: number, extra: { enabled?: boolean } = {}) =>
       Array.from({ length: count }, (_, index) => ({ ...skill(`${prefix}-${String(index + 1).padStart(2, "0")}`), ...extra }));
@@ -447,8 +444,7 @@ describe("whole-team export (package v2)", () => {
     it("keeps switched-on skills first when the team has more than 60, even one that sorts later by name", () => {
       const input = fixture();
       input.bots.push(bot("third", "Third"));
-      // 61 names: "a-off" sorts first by name but is switched off on the only
-      // bot that has it; "b-01" is off on Third but on for Morgan, so it counts as on.
+      // "a-off" sorts first but is off on its only bot; "b-01" is off on Third but on for Morgan, so it counts as on.
       const result = createTeamPackageExport({ ...input, skillSelection: "all",
         skillsByBot: new Map([["lead", many("b", 30, { enabled: true })], ["scout", many("c", 30, { enabled: true })],
           ["third", [{ ...skill("a-off"), enabled: false }, { ...skill("b-01"), enabled: false }]]]) });
@@ -461,15 +457,13 @@ describe("whole-team export (package v2)", () => {
     });
 
     it("starts the dialog's boxes on a choice that fits, so unticking any one box still fits", () => {
-      // Morgan holds s-01…s-31; Scout holds the same s-31 plus z-only. "all"
-      // puts all 32 names in the file (s-31 for Scout only).
+      // Morgan holds s-01..s-31; Scout holds the same s-31 plus z-only, so "all" puts 32 names in the file.
       const shared = many("s", 31);
       const skillsByBot = new Map([["lead", shared], ["scout", [shared[30]!, skill("z-only")]]]);
       const all = createTeamPackageExport({ ...fixture(), skillSelection: "all", skillsByBot });
       expect(includedSkills(all.document)).toHaveLength(32);
       const exactly = (names: readonly string[]) => createTeamPackageExport({ ...fixture(),
         skillsByBot: new Map([...skillsByBot].map(([id, list]) => [id, list.filter((entry) => names.includes(entry.name))])) });
-      // Ticking what the file holds would refuse after unticking z-only.
       expect(() => exactly(includedSkills(all.document).filter((name) => name !== "z-only"))).toThrow("Morgan has more than 30 skills");
       const ticks = startingTicks(all);
       expect(ticks).not.toContain("s-31");
@@ -494,7 +488,7 @@ describe("whole-team export (package v2)", () => {
       expect((crowded as Error).message).toBe("Morgan has more than 30 skills. Choose fewer skills and try again.");
       const conflict = refusal(new Map([["lead", [skill("pricing")]], ["scout", [conflicting]]]));
       expect(conflict).toBeInstanceOf(TeamExportError);
-      expect((conflict as Error).message).toBe('Two bots in this team have different skills named "pricing". Leave that skill out and try again.');
+      expect((conflict as Error).message).toBe('Two bots in this department have different skills named "pricing". Leave that skill out and try again.');
     });
   });
 

@@ -24,8 +24,7 @@ mkdirSync(out, { recursive: true });
 cpSync(join(root, "dist-server"), join(out, "dist-server"), { recursive: true });
 cpSync(join(root, "dist"), join(out, "dist"), { recursive: true });
 if (existsSync(join(root, "skills"))) cpSync(join(root, "skills"), join(out, "skills"), { recursive: true });
-// The enterprise layer, bundled by scripts/bundle-server.mjs, under the path
-// server/enterprise.ts loads from: <package>/enterprise/server/index.js.
+// The enterprise layer, under the path the server loads it from.
 // Source-available under its own license; inert without OMB_LICENSE_KEY.
 const enterpriseBundle = join(root, "dist-server", "enterprise", "server", "index.js");
 if (existsSync(enterpriseBundle)) {
@@ -50,8 +49,8 @@ writeFileSync(
       license: "Apache-2.0",
       type: "module",
       bin: { openmausbot: "cli.js" },
-      // Never bundled (server/onepassword.ts): plain JS with a WebAssembly
-      // core, the same on every platform, so npm installs it beside the server.
+      // Never bundled: plain JS with a WebAssembly core, the same on every
+      // platform, so npm installs it beside the server.
       dependencies: { "@1password/sdk": app.dependencies["@1password/sdk"] },
       files: ["cli.js", "dist-server", "dist", "skills", "enterprise", "LICENSE", "README.md"],
       engines: { node: ">=24" },

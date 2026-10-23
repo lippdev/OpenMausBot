@@ -35,7 +35,6 @@ describe("catalogSections", () => {
     const productivity = sections[1]!;
     expect(productivity.cards).toHaveLength(CATEGORY_SECTION_SIZE);
     expect(productivity.kind === "category" && productivity.more).toBe(true);
-    // a connected app is not offered again further down
     expect(sections[2]!.cards.map((entry) => entry.slug)).toEqual(["gmail"]);
     expect(sections.at(-1)!.cards.some((entry) => entry.slug === "slack")).toBe(false);
   });

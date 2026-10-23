@@ -1,7 +1,4 @@
-// Memory upkeep: capture parsing and dedupe, the tidy plan (the share limit
-// on small notebooks and the identity regressions from #1363's review),
-// About me suggestions, and the upkeep loop against a scripted engine.
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -74,7 +71,6 @@ describe("capture parsing", () => {
     expect(prompt).toContain('This is a group chat ("room") Scout is a member of.');
     expect(prompt).toContain("never aboutUser");
     expect(prompt).toContain("only an outcome that bot verified");
-    // a 1:1 batch keeps its prompt as it was
     expect(capturePrompt({ botName: "Scout", turns: [{ person: "hi", bot: "hello" }], notebook: "", today: TODAY })).not.toContain("group chat");
   });
 
@@ -203,7 +199,6 @@ describe("organizing MEMORY.md", () => {
     expect(parseMoves('{"moves":[{"i":0}]}', candidates)).toBeNull();
     expect(parseMoves("nonsense", candidates)).toBeNull();
     expect(parseMoves('{"moves":[]}', candidates)).toEqual([]);
-    // health and diet facts are never offered for moving at all
     expect(organizeCandidates("- 2026-09-26 · The user is vegetarian.\n- 2026-09-26 · Allergic to peanuts\n- 2026-09-26 · Loves Irani cafes\n", TODAY, new Set()).map((e) => e.body)).toEqual(["Loves Irani cafes"]);
     const { text: left, byTopic } = applyMoves(text, parseMoves('{"moves":[{"i":0,"topic":"x","aliases":["q"]}]}', candidates)!);
     expect(left).toBe("- 2026-09-26 · A\n- 2026-09-20 · Trip · until 2026-09-21\n");
@@ -241,7 +236,6 @@ describe("the upkeep loop", () => {
   let aboutMeAdded: string[];
   let organizeAnswer: string;
   let organizePrompts: string[];
-  /** The transcript restoreTurn reads, by turn id. */
   let transcript: Map<string, CaptureTurn>;
 
   const upkeep = () => createMemoryUpkeep({
@@ -318,8 +312,32 @@ describe("the upkeep loop", () => {
     expect(memory().split("\n").filter(Boolean)).toHaveLength(200);
     expect(readMemoryTopic(BOT.id, "archive.md")).toContain("- 2026-08-01 · old fact 0 · moved 2026-09-25\n- 2026-08-01 · old fact 1 · moved 2026-09-25\n");
     await flushMemoryJournal(BOT.id);
-    // newest first: undoing the top row puts MEMORY.md back, and the archive keeps its copy
     expect(readMemoryJournal(BOT.id, 5).filter((row) => row.via === "capture").map((row) => row.path)).toEqual(["MEMORY.md", "memory/archive.md"]);
+  });
+
+  it("forgets a deleted bot: its waiting turns and its status go", async () => {
+    ensureWorkspace(BOT.id);
+    const loop = upkeep();
+    answers.push(JSON.stringify([{ text: "The person is vegetarian", kind: "preference", aboutUser: false, confidence: 0.9 }]));
+    await loop.capture({ botId: BOT.id, threadId: "t1", turns: [{ person: "I'm vegetarian", bot: "Noted" }] });
+    expect(loop.status(BOT.id).lastCapture).toBeDefined();
+    loop.noteTurn(BOT.id, "t2", { person: "I moved to Lyon", bot: "Nice" });
+    loop.forgetBot(BOT.id);
+    loop.flushThread("t2");
+    await loop.idle();
+    expect(prompts).toHaveLength(1);
+    expect(loop.status(BOT.id).lastCapture).toBeUndefined();
+  });
+
+  it("forgets a deleted bot's turns saved at shutdown, keeping other bots'", () => {
+    const pending = join(DATA_DIR, "memory-capture-pending.json");
+    mkdirSync(DATA_DIR, { recursive: true });
+    writeFileSync(pending, JSON.stringify({ batches: [
+      { botId: BOT.id, threadId: "t1", turnIds: ["a"] },
+      { botId: "other-bot", threadId: "t2", turnIds: ["b"] },
+    ] }));
+    upkeep().forgetBot(BOT.id);
+    expect(JSON.parse(readFileSync(pending, "utf8")).batches).toEqual([{ botId: "other-bot", threadId: "t2", turnIds: ["b"] }]);
   });
 
   it("adds to About me a fact the notebook already holds, without appending it again", async () => {
@@ -346,7 +364,6 @@ describe("the upkeep loop", () => {
     expect(parseTopicHeader(food)).toEqual({ title: "food", aliases: ["restaurants", "dinner"] });
     expect(food).toContain('from chat "Plans" (noticed) · The person loves pasta');
     expect(readMemoryTopic(BOT.id, "family.md")).toContain("Sister Asha lives in Delhi");
-    // the same fact again adds nothing; a hand-made "Food.md" is reused by name
     answers.push(JSON.stringify([{ text: "The person loves pasta", kind: "preference", topic: "food" }]));
     expect((await upkeep().capture({ botId: BOT.id, threadId: "t1", turns: [{ person: "pasta again", bot: "ok" }] })).topics).toBe(0);
     await flushMemoryJournal(BOT.id);
@@ -383,7 +400,6 @@ describe("the upkeep loop", () => {
     expect(report).toMatchObject({ added: 2, aboutMe: 0 });
     expect(memory()).toContain('from room "Launch" (noticed) · The launch moved to Friday');
     expect(aboutMeAdded).toEqual([]);
-    // switched off (or the room narrowed) after the turn was queued: no model call, nothing written
     allowed = false;
     const before = prompts.length;
     expect((await roomUpkeep.capture({ botId: BOT.id, threadId: "room-thread", turns: [turn] })).note).toBe("this conversation no longer feeds the bot's memory");
@@ -425,7 +441,6 @@ describe("the upkeep loop", () => {
     await flushMemoryJournal(BOT.id);
     const rows = readMemoryJournal(BOT.id, 10);
     expect(rows.filter((row) => row.actor === "upkeep" && row.via === "tidy").map((row) => row.path)).toEqual(["MEMORY.md", "memory/archive.md"]);
-    // newest first: undoing the top row puts MEMORY.md back, and the archive keeps its copy
     expect(rows[0]!.path).toBe("MEMORY.md");
   });
 
@@ -441,7 +456,6 @@ describe("the upkeep loop", () => {
     organizeAnswer = '{"moves":[{"i":0,"topic":"Asha","aliases":["sister","family"]},{"i":1,"topic":"dining","aliases":["restaurants"]}]}';
     const report = await upkeep().tidy(BOT.id);
     expect(report.organized).toBe(2);
-    // the allergy is never even offered for moving
     expect(organizePrompts[0]).not.toContain("allergic");
     expect(organizePrompts[0]).toContain("[0] The user's sister Asha is a doctor in Delhi.");
     expect(memory()).toBe("- 2026-09-26 · from chat \"Food\" · The user is allergic to peanuts.\n");
@@ -451,7 +465,6 @@ describe("the upkeep loop", () => {
     const dining = readMemoryTopic(BOT.id, "Dining.md")!;
     expect(parseTopicHeader(dining).aliases).toEqual(["restaurants"]);
     expect(dining).toContain("The user loves Irani cafes.");
-    // nothing left to judge: no second call
     organizePrompts = [];
     await upkeep().tidy(BOT.id);
     expect(organizePrompts).toEqual([]);
@@ -603,7 +616,7 @@ describe("the upkeep loop", () => {
     const loop = upkeep();
     answers.push(JSON.stringify([{ text: "Likes jazz", kind: "preference" }]));
     loop.pause();
-    loop.noteTurn(BOT.id, "t1", { person: "I like jazz", bot: "Nice" });
+    loop.noteTurn(BOT.id, "t1", { person: "I like jazz", bot: "Nice, jazz is a great pick." });
     loop.flushThread("t1");
     await loop.idle();
     expect(prompts).toEqual([]);
@@ -614,18 +627,16 @@ describe("the upkeep loop", () => {
 
   it("keeps turns still waiting at shutdown as ids and captures them after the next start", async () => {
     const pending = join(DATA_DIR, "memory-capture-pending.json");
-    const jazz = { person: "I like jazz", bot: "Nice", turnId: "turn-1" };
+    const jazz = { person: "I like jazz", bot: "Nice, jazz is a great pick.", turnId: "turn-1" };
     transcript.set("turn-1", jazz);
     const first = upkeep();
     first.noteTurn(BOT.id, "t1", jazz);
-    // a turn with no id cannot be read back, and a deleted one reads back as null
     first.noteTurn(BOT.id, "t2", { person: "I live in Pune", bot: "Noted" });
     first.noteTurn(BOT.id, "t3", { person: "My sister is Asha", bot: "Lovely", turnId: "turn-gone" });
     first.stop();
     await first.idle();
     expect(prompts).toEqual([]);
     const saved = readFileSync(pending, "utf8");
-    // ids only: the transcript keeps the words
     expect(saved).not.toContain("jazz");
     expect(JSON.parse(saved)).toEqual({ batches: [
       { botId: BOT.id, threadId: "t1", turnIds: ["turn-1"] },
@@ -675,7 +686,7 @@ describe("the upkeep loop", () => {
     const pending = join(DATA_DIR, "memory-capture-pending.json");
     const paused = upkeep();
     paused.pause();
-    paused.noteTurn(BOT.id, "t1", { person: "I like jazz", bot: "Nice", turnId: "turn-1" });
+    paused.noteTurn(BOT.id, "t1", { person: "I like jazz", bot: "Nice, jazz is a great pick.", turnId: "turn-1" });
     paused.flushThread("t1");
     paused.stop();
     expect(JSON.parse(readFileSync(pending, "utf8"))).toEqual({ batches: [{ botId: BOT.id, threadId: "t1", turnIds: ["turn-1"] }] });

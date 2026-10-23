@@ -23,10 +23,9 @@ export function supportsApprovalMode(driverKind: string | undefined, mode: Appro
 
 /** Whether switching engines must first drop this level to Ask. A Custom
  * grant's rules belong to one provider's tool semantics, so it never crosses
- * engines. Full carries silently to any engine: the person gave this bot Full
- * access, and changing its engine must not take it back or ask again (owner
- * decision, Oct 12). Auto-accept edits stops at an engine without it.
- * Adapted from tahodev's provider-switch guard (#1120). */
+ * engines; Full carries silently to any engine; Auto-accept edits stops at an
+ * engine without it.
+ * Adapted from tahodev's provider-switch guard. */
 export function modelSwitchNeedsAsk(
   mode: ApprovalMode,
   fromDriver: string | undefined,
@@ -39,6 +38,26 @@ export function hasNativeAutoReview(driverKind: string | undefined): boolean {
   // Qwen Code's `--approval-mode auto` is an LLM classifier that approves
   // safe actions and blocks risky ones — a reviewer, not a rubber stamp.
   return ["codex", "claudeAgent", "cursorAgent", "grokAgent", "qwenAgent"].includes(driverKind ?? "");
+}
+
+const APPROVAL_RANK: Record<ApprovalMode, number> = { ask: 0, edits: 1, auto: 2, full: 3, custom: 4 };
+
+export interface ApprovalFields {
+  approvalMode?: ApprovalMode;
+  autoApprove?: boolean;
+  alwaysAllow?: string[];
+}
+
+export function threadApproval(thread: ApprovalFields, bot: ApprovalFields): ApprovalFields {
+  return {
+    approvalMode: thread.approvalMode ?? (thread.autoApprove === undefined ? bot.approvalMode : undefined),
+    autoApprove: thread.autoApprove ?? bot.autoApprove,
+    alwaysAllow: structuredClone(thread.alwaysAllow ?? bot.alwaysAllow),
+  };
+}
+
+export function approvalModeWidens(from: ApprovalMode, to: ApprovalMode): boolean {
+  return APPROVAL_RANK[to] > APPROVAL_RANK[from];
 }
 
 export function isApprovalMode(value: unknown): value is ApprovalMode {
@@ -59,10 +78,8 @@ export function setDefaultApprovalMode(mode: ApprovalMode): void {
   defaultApprovalMode = mode;
 }
 
-/** Resolve the durable mode. A bot or conversation nobody has set a level on
- * runs at the default. The legacy Auto bit, written before approvalMode
- * existed, stays safe Auto, and an unknown persisted value fails closed to
- * Ask. */
+/** An unset level runs at the default, the pre-approvalMode Auto bit reads as
+ * safe Auto, and an unknown persisted value fails closed to Ask. */
 export function approvalModeFor(bot: {
   approvalMode?: unknown;
   autoApprove?: unknown;

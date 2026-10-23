@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Model Context Protocol (MCP) Server for OpenMausBot
-// Standard JSON-RPC 2.0 stdio transport for external agent orchestration (Hermes, Claude Desktop, Cursor, etc.).
+// Model Context Protocol (MCP) server for OpenMausBot over JSON-RPC 2.0 stdio,
+// for external agents (Hermes, Claude Desktop, Cursor, etc.).
 import readline from "node:readline";
 
 export function validateBaseUrl(url: string): string {
@@ -711,7 +711,7 @@ function projectMessage(message: Record<string, any>) {
     ...(card ? { card } : {}),
     ...(connector ? { connector } : {}),
     ...(secret ? { secret } : {}),
-    ...(signIn ? { signIn } : {}), ...(message.widget ? { widget: message.widget } : {}),
+    ...(signIn ? { signIn } : {}), ...(message.widget ? { widget: message.widget } : {}), ...(message.app ? { app: message.app } : {}), ...(message.fromApp ? { fromApp: message.fromApp } : {}),
     ...(message.kind === "screen" ? { hasImage: Boolean(message.hasImage || message.png) } : {}),
   };
 }
@@ -725,7 +725,7 @@ function taskBelongsTo(owner: Record<string, any>, taskId: string): boolean {
 }
 
 function messageNeedsInput(message: Record<string, any>): boolean {
-  const card = isRecord(message.card) && message.card.requestId && !message.card.answered && !message.card.dismissed && !message.card.expired;
+  const card = isRecord(message.card) && message.card.requestId && !message.card.answered && !message.card.dismissed && !message.card.expired && !message.card.quotaSwitch; // a quota-switch offer follows a turn that already failed
   const connector = isRecord(message.connector) &&
     !message.connector.dismissed &&
     !message.connector.resumed &&
@@ -828,7 +828,7 @@ function sendReceipt(receipt: unknown) {
 
 /** Hooks a caller can give a long tool call (the openmausbot CLI streams progress). */
 export interface ToolCallHooks {
-  /** Each new state of the job a wait watches (server/job-view.ts JobView). */
+  /** Each new state of the job a wait watches. */
   onProgress?(job: Record<string, any>): void;
 }
 
@@ -1484,5 +1484,4 @@ export function runStdio(): Promise<void> {
   }));
 }
 
-// Start stdio interface when executed directly
 if (process.argv[1] && (process.argv[1].endsWith("mcp-server.ts") || process.argv[1].endsWith("mcp-server.js"))) void runStdio();

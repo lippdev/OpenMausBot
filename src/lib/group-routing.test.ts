@@ -11,7 +11,6 @@ describe("openTaskWorking", () => {
   ] as Group["tasks"];
 
   it("locks a task's composer on its own work, not a background task's", () => {
-    // the room counts the background goal; the open task is idle
     expect(openTaskWorking({ threadId: "chat", working: true, tasks })).toBe(false);
     expect(openTaskWorking({ threadId: "goal", working: true, tasks })).toBe(true);
   });

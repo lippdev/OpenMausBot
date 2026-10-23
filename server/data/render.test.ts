@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { DataColumn } from "../../shared/data-surface.ts";
 import { compileChart } from "./chart-compiler.ts";
 import { chartRenderer, coerceRows, parseTemporal } from "./render.ts";
+import { hostTimeout } from "../testing/host-timeout.ts";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 /** IHDR is the first chunk: width is the big-endian uint32 at byte 16. */
@@ -69,7 +70,6 @@ describe("chartRenderer", () => {
     expect(svg).toContain(">region</text>");
     expect(svg).toContain(">sum(amount)</text>");
     expect(svg).toContain(">north</text>");
-    // Three bars: the y strings became numbers, so each has a height.
     const bars = svg.match(/<path class="background"|role="graphics-symbol" aria-roledescription="bar"/g) ?? [];
     expect(bars.length).toBeGreaterThanOrEqual(3);
     expect(svg).toContain('font-family="&quot;Inter&quot;, -apple-system');
@@ -102,5 +102,6 @@ describe("chartRenderer", () => {
     expect(pngWidth(one)).toBe(400);
     expect(pngWidth(two)).toBe(800);
     expect(two.length).toBeGreaterThan(one.length);
-  });
+    // Each render scans the system fonts; on a loaded Windows runner two scans took over 40 s.
+  }, hostTimeout(60_000));
 });

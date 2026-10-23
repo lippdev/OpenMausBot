@@ -26,7 +26,6 @@ export function parseTableFile(text: string, delimiter: "," | "\t"): TextTable {
   for (const row of rows) {
     cells += row.length;
     if (cells > MAX_CELLS || row.length > MAX_COLUMNS) throw new Error("size");
-    // Do not silently discard extra fields or shift malformed data.
     if (row.length !== headers.length) throw new Error("columns");
   }
   return { headers, rows };
@@ -41,7 +40,6 @@ export function tableRowOrder(rows: readonly (readonly string[])[], query: strin
   const order = rows.flatMap((row, index) => !needle || row.some((cell) => cell.toLocaleLowerCase().includes(needle)) ? [index] : []);
   if (sort) order.sort((a, b) => {
     const left = rows[a]![sort.column] ?? "", right = rows[b]![sort.column] ?? "";
-    // Empty cells stay at the bottom in either direction.
     if (!left.trim() || !right.trim()) return Number(!left.trim()) - Number(!right.trim()) || a - b;
     const numeric = isTableNumber(left) && isTableNumber(right);
     let difference: number;
@@ -49,13 +47,11 @@ export function tableRowOrder(rows: readonly (readonly string[])[], query: strin
       const l = BigInt(left.trim()), r = BigInt(right.trim());
       difference = l < r ? -1 : l > r ? 1 : 0;
     } else difference = numeric ? Number(left) - Number(right) : collator.compare(left, right);
-    // Equal numeric representations still sort stably; keep the original text.
     return (Number.isFinite(difference) ? difference : collator.compare(left, right)) * (sort.descending ? -1 : 1) || a - b;
   });
   return order;
 }
 
-/** Export the whole current result, not just the rows mounted by virtualization. */
 export function tableCsv(headers: readonly string[], rows: readonly (readonly string[])[]): string {
   return Papa.unparse([headers, ...rows], { newline: "\r\n", escapeFormulae: true });
 }

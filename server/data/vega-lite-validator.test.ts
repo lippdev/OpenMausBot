@@ -25,7 +25,6 @@ describe("validateVegaLite", () => {
     expect(out.$schema).toBe("https://vega.github.io/schema/vega-lite/v6.json");
     expect(out.width).toBe("container");
     expect(out.mark).toBe("bar");
-    // The input is not touched.
     expect(bar).not.toHaveProperty("data");
   });
 
@@ -53,7 +52,6 @@ describe("validateVegaLite", () => {
   it("refuses datasets and a dataset by any other name", async () => {
     expect((await refused({ ...bar, datasets: { rows: [] } })).error.message).toContain("datasets");
     expect((await refused({ ...bar, data: { name: "rows" } })).error.message).toBe('data: data must be {name: "table"}');
-    // null is "no data", the same as absent: it becomes the table.
     expect((await validateVegaLite({ ...bar, data: null })).data).toEqual({ name: "table" });
   });
 

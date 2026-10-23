@@ -1,17 +1,4 @@
-// team apply: make the workspace match a team file, through the routes the
-// app itself uses, and print what changed. Apply compares with what the
-// server echoes back, so a second apply of the same file finds nothing to do
-// ("No changes.") and sends no write at all. It is not atomic: a refused
-// step stops the run, says what was already done, and exits 1; running it
-// again carries on from there.
-//
-// The order: engines, teams and their briefs, bots (created bare, then one
-// change with every setting that differs), skills, Chiefs (once every team
-// exists), rooms, and only with --prune, deletions in teams marked prune.
-//
-// team export: the workspace written back as a team file apply reads (skills
-// as SKILL.md files beside it, engines as placeholders), so applying an
-// export changes nothing.
+// Not atomic: a refused step stops the run, says what was already done, and exits 1; running it again carries on.
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, posix, resolve } from "node:path";
@@ -34,13 +21,11 @@ const key = (name: string | undefined) => (name ?? "").trim().toLowerCase();
 const APPROVAL_LABEL: Record<string, string> = { ask: "Ask", edits: "Accept edits", auto: "Auto", full: "Full access", custom: "Custom" };
 
 export interface ApplyOptions {
-  /** Make the changes (false: only work out what they would be). */
   apply: boolean;
   prune: boolean;
   rotateSecrets: boolean;
   waitIdleMs: number;
   env: NodeJS.ProcessEnv;
-  /** Told when a long step starts (an engine install), for a progress line. */
   progress?(event: Rec): void;
 }
 
@@ -50,12 +35,10 @@ export interface Tally {
   changed: number;
   unchanged: number;
   deleted: number;
-  /** Write requests sent (0 on a dry run, and on a second apply of the same file). */
   writes: number;
 }
 
 const sameSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((item) => b.includes(item));
-/** A tool selection in one comparable form; every way of selecting every tool reads the same. */
 const canonicalScope = (scope: Rec | null | undefined) => everyTool(scope) ? "every tool"
   : JSON.stringify(Object.fromEntries(["allow", "deny"].filter((field) => Array.isArray(scope![field])).map((field) => [field, [...new Set(scope![field] as string[])].sort()])));
 
@@ -66,7 +49,6 @@ function changedLines(before: string, after: string): number {
   return Math.max(diff.filter((line) => line.startsWith("+")).length, diff.filter((line) => line.startsWith("-")).length);
 }
 
-/** What one bot's settings change takes: the PATCH body and the words for each change. */
 export function botPatch(desired: DesiredBot, echo: Rec, team: string | undefined): { patch: Rec; changes: string[] } {
   const patch: Rec = {};
   const changes: string[] = [];
@@ -83,8 +65,6 @@ export function botPatch(desired: DesiredBot, echo: Rec, team: string | undefine
     const instanceId = desired.model?.instanceId ?? current.instanceId;
     const model = desired.model?.model ?? current.model;
     if (current.instanceId !== instanceId || current.model !== model || (desired.effort !== undefined && current.effort !== desired.effort)) {
-      // The selection is replaced whole: an effort the file leaves out stays
-      // as it was on the same engine (another engine may not offer it).
       const effort = desired.effort ?? (instanceId === current.instanceId ? current.effort : undefined);
       patch.modelSelection = { instanceId, model, ...(effort ? { effort } : {}) };
       patch.requireAvailableModel = true;
@@ -102,9 +82,7 @@ export function botPatch(desired: DesiredBot, echo: Rec, team: string | undefine
     patch.computer = desired.computer === "auto" ? null : desired.computer;
     changes.push(`computer ${computer} → ${desired.computer}`);
   }
-  // A change that leaves the bot on Auto on this computer: the file is the
-  // confirmation the server asks for, whether it names both or one of them
-  // and the bot already has the other.
+  // The file is the confirmation the server asks for to leave a bot on Auto on this computer.
   if ((patch.computer !== undefined || patch.approvalMode !== undefined) && (desired.computer ?? computer) === "local" && (desired.approval ?? approval) === "auto") {
     patch.acknowledgeLocalAuto = true;
   }
@@ -131,7 +109,6 @@ const describeNew = (bot: DesiredBot) => [
   bot.computer && bot.computer !== "auto" ? `computer ${bot.computer}` : "",
 ].filter(Boolean).join(" · ");
 
-/** One pass over the file: with `apply`, make each change as it is found; without, only say what it would be. */
 export async function reconcile(client: HeadlessClient, file: TeamFile, options: ApplyOptions): Promise<Tally> {
   const tally: Tally = { lines: [], created: 0, changed: 0, unchanged: 0, deleted: 0, writes: 0 };
   const note = (line: string, kind: "created" | "changed" | "unchanged" | "deleted" | "kept") => {
@@ -141,15 +118,11 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
   const write = async (path: string, init: RequestInit): Promise<any> => { tally.writes += 1; return client.json(path, init); };
   const tool = async (name: string, args: Rec): Promise<any> => { tally.writes += 1; return client.tool(name, args); };
   const fleet = async () => client.json<Rec>("/api/bots?messages=0");
-  // The bot a name means: of two with that name, the one already in the team
-  // the file puts it in (a bot of the same name in another team is someone
-  // else's), then a visible one before an archived one.
   const findBot = (bots: Rec[], name: string, team?: string) => {
     const inTeam = (bot: Rec) => Number(team !== undefined && key(bot.section) === key(team));
     return bots.filter((bot) => key(bot.name) === key(name)).sort((a, b) => inTeam(b) - inTeam(a) || Number(Boolean(a.hidden)) - Number(Boolean(b.hidden)))[0];
   };
 
-  // 1. engines: a key is written only when none is set, or with --rotate-secrets
   if (file.engines.length) {
     const config = await client.json<Rec>("/api/config");
     const instances: Rec[] = (await client.json<Rec>("/api/instances")).instances ?? [];
@@ -161,8 +134,7 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
       const instanceId = onlyClaudeApi ? spec.apiInstance! : spec.instance;
       const install = engine.install === true && instances.find((instance) => instance.instanceId === instanceId)?.snapshot?.state !== "available";
       const keyValue = needsKey ? readSecret(engine.key, options.env, `engine ${engine.kind} key`) : "";
-      // A base URL kept as a secret is read, like the key, only when it is written
-      // (or compared, for an engine whose address the server echoes), and never shown.
+      // A secret base URL is read only when it is written or compared, and never shown.
       const secretUrl = engine.baseUrl !== undefined && typeof engine.baseUrl !== "string";
       const baseUrl = engine.baseUrl === undefined ? undefined : typeof engine.baseUrl === "string" ? engine.baseUrl
         : needsKey || typeof status.url === "string" ? readSecret(engine.baseUrl, options.env, `engine ${engine.kind} base URL`) : undefined;
@@ -170,8 +142,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
         ...(options.progress ? { progress: options.progress } : {}) };
       const result = await applyEngine(client, request);
       if (options.apply && (result.changed.length || install)) tally.writes += (result.changed.length ? 1 : 0) + (install ? 1 : 0);
-      // The server never shows the address of a key already set, so the
-      // file's cannot be compared: say so rather than nothing.
       if (!needsKey && engine.baseUrl !== undefined && typeof status.url !== "string") {
         note(`engine ${engine.kind}: its key is already set and the server does not show its base URL, so the file's was not compared (--rotate-secrets writes both)`, "kept");
       }
@@ -181,7 +151,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
     }
   }
 
-  // 2. teams, then each team's brief
   const sections: string[] = [...((await client.json<Rec>("/api/sidebar-sections")).sections ?? [])];
   const sectionNamed = (name: string) => sections.find((section) => key(section) === key(name));
   const teamNames: string[] = [];
@@ -208,7 +177,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
   }
   const teamOf = (bot: DesiredBot) => bot.team ? sectionNamed(bot.team) ?? bot.team : undefined;
 
-  // 3. bots: created bare (no saved New bot defaults), then one change with what differs
   const instances: Rec[] = (await client.json<Rec>("/api/instances")).instances ?? [];
   for (const desired of file.bots.filter((bot) => bot.model)) {
     const { instanceId, model } = desired.model!;
@@ -222,8 +190,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
   let current = await fleet();
   const existingFor = (desired: DesiredBot): Rec | undefined =>
     (desired.was ? findBot(current.bots ?? [], desired.was, teamOf(desired)) : undefined) ?? findBot(current.bots ?? [], desired.name, teamOf(desired));
-  // Renaming onto a name another bot already has would leave two bots of one
-  // name, and every later apply (and run NAME) unable to tell them apart.
   for (const desired of file.bots.filter((bot) => bot.was)) {
     const old = findBot(current.bots ?? [], desired.was!, teamOf(desired));
     const taken = findBot(current.bots ?? [], desired.name, teamOf(desired));
@@ -232,14 +198,10 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
         "delete or rename one of them, or take was: out of the file");
     }
   }
-  // A tool selection the bot's engine cannot hold stops every turn it runs
-  // with a setup error: refuse it before anything is written, by the
-  // engine's own rule (shared/tool-scope-support.ts).
   let workspaceDefault: string | undefined;
   for (const desired of file.bots) {
     if (!desired.tools) continue;
     const existing = existingFor(desired);
-    // a new bot with no model of its own runs on the workspace's default
     if (!desired.model && !existing) workspaceDefault ??= (await client.json<Rec>("/api/bot-defaults")).modelSelection?.instanceId;
     const instanceId = desired.model?.instanceId ?? existing?.modelSelection?.instanceId ?? workspaceDefault;
     const driverKind = instances.find((instance) => instance.instanceId === instanceId)?.driverKind;
@@ -275,7 +237,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
     await write(`/api/bots/${enc(existing.id)}`, { method: "PATCH", body: JSON.stringify(patch) });
   }
   if (options.apply) current = await fleet();
-  // A bot the file renames (was:) is still under its old name until the rename is made.
   const named = (name: string) => file.bots.find((bot) => key(bot.name) === key(name));
   const botId = (name: string) => {
     const desired = named(name);
@@ -283,7 +244,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
     return (findBot(current.bots ?? [], name, team) ?? (desired?.was ? findBot(current.bots ?? [], desired.was, team) : undefined))?.id as string | undefined;
   };
 
-  // 4. skills: compared by their SKILL.md; one not in the file is kept
   for (const desired of file.bots.filter((bot) => bot.skills.length)) {
     const id = botId(desired.name);
     const listing: Rec[] = id ? (await client.json<Rec>(`/api/bots/${enc(id)}/skills`)).skills ?? [] : [];
@@ -308,7 +268,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
     }
   }
 
-  // 5. Chiefs, once every team they manage exists; the file's word is the confirmation
   for (const desired of file.bots.filter((bot) => bot.chief !== undefined)) {
     const bot = (current.bots ?? []).find((candidate: Rec) => candidate.id === botId(desired.name));
     const managed = desired.manages.map((name) => sectionNamed(name) ?? name);
@@ -323,7 +282,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
     if (options.apply) await write(`/api/bots/${enc(bot!.id)}`, { method: "PATCH", body: JSON.stringify({ chiefOfStaff: true, managedSections: managed, acknowledgePeerScope: true }) });
   }
 
-  // 6. rooms; a member the file itself makes has no id until it is applied
   const rooms: Rec[] = (current.groups ?? []).filter((group: Rec) => !group.dm);
   for (const room of file.rooms) {
     const memberIds = room.members.map((name) => botId(name) ?? (!options.apply && created.has(key(name)) ? `new:${name}` : undefined));
@@ -355,7 +313,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
     if (options.apply) await tool("update_channel", { channel_id: existing.id, ...change });
   }
 
-  // 7. bots and rooms of a listed team that the file does not name
   for (const team of file.teams) {
     const section = sectionNamed(team.name);
     if (!section) continue;
@@ -375,7 +332,6 @@ export async function reconcile(client: HeadlessClient, file: TeamFile, options:
   return tally;
 }
 
-/** A bot that is mid-turn is changed once it is idle, or reported. */
 async function waitIdle(client: HeadlessClient, bot: Rec, waitMs: number): Promise<void> {
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
@@ -427,12 +383,10 @@ export async function teamApplyVerb(ctx: VerbContext): Promise<VerbOutcome> {
 
 const countsOf = (tally: Tally) => ({ created: tally.created, changed: tally.changed, unchanged: tally.unchanged, deleted: tally.deleted });
 
-/** Where team export puts a bot's skill, as the team file names it: with /,
- * which every system reads, so a file exported on Windows applies on Linux. */
 export const skillFilePath = (botName: string, skillName: string): string =>
   posix.join("skills", botName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "bot", skillName, "SKILL.md");
 
-/** The workspace as a team file apply reads. Skills go beside it as SKILL.md files; keys never leave the server. */
+/** Keys never leave the server. */
 export async function teamExportVerb(ctx: VerbContext): Promise<VerbOutcome> {
   const out = flag(ctx.flags, "out")?.trim();
   if (!out) throw usageError("--out FILE is required (the team file to write)");
@@ -449,9 +403,7 @@ export async function teamExportVerb(ctx: VerbContext): Promise<VerbOutcome> {
     names.add(key(bot.name));
   }
   const dir = dirname(resolve(out));
-  // A team file travels (a repository, a CI secret store, a colleague), so a
-  // key written into a soul, a brief or a skill is taken out, as the app's
-  // own team export takes it out; apply leaves such a field as it is.
+  // A team file travels: a key written into a soul, a brief or a skill is taken out.
   const redacted: string[] = [];
   const clean = (text: string, where: string): string => {
     const cleaned = redactSecretsInText(text);

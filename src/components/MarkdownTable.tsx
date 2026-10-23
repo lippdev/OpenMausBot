@@ -12,8 +12,7 @@ function plain(node: ReactNode): string {
   return plain(element.props.children) || element.props.alt || "";
 }
 
-/** Retain react-markdown's already-sanitized cell children, including links,
- * code, math and scoped attachments. Never render model-authored raw HTML. */
+/** Security: keeps react-markdown's already-sanitized cell children; never renders model-authored raw HTML. */
 export function MarkdownTable({ children, direction }: { children?: ReactNode; direction?: "rtl" | "ltr" }) {
   const data = useMemo(() => {
     const sections = elements(children);

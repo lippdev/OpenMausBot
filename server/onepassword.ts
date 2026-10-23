@@ -1,43 +1,24 @@
-// 1Password as a second source of logins for fill_login (Settings → Logins →
-// Connect 1Password). The person pastes a service account token, which
-// 1Password itself limits to the vaults it was given (one, such as "Shared
-// with OMB"); the token is kept in the sealed login store
-// (server/login-store.ts), never in config.json or a log.
-//
-// Not a parallel system: a 1Password Login item with a website is one more
-// candidate in the same fill path (server/login-fill.ts) — the same exact
-// host rule, the same RFC 6238 code from its one-time-password field, the
-// same scrubbing. Its rows in Settings are read-only; it is changed in
-// 1Password. Only hosts, usernames and whether a 2FA field exists are kept
-// here; a password is read from 1Password when that login is filled.
-//
+// The service account token lives in the sealed login store, never in config.json or a log.
 // The official SDK (@1password/sdk, MIT) is a CommonJS wrapper over a 14 MB
 // WebAssembly core it reads from beside itself, so it is never bundled: it is
-// required on first use from the same staged tree as DuckDB
-// (scripts/prepare-duckdb.mjs), and only when a token exists.
-import type { LoginSummary, OnePasswordStatus } from "../shared/logins.ts";
-import { normalizeLoginHost } from "../shared/logins.ts";
+// required on first use, and only when a token exists.
+import type { LoginBots, LoginPlace, LoginSummary, OnePasswordStatus, OnePasswordVault } from "../shared/logins.ts";
+import { loginMatchesHost, loginSite, loginUsableBy, normalizeLoginHost } from "../shared/logins.ts";
 import type { FillCandidate } from "./login-fill.ts";
 import { parseTotpKey } from "./totp.ts";
 
-/** A Login item's fields, read when it is filled. */
 export interface OnePasswordItemFields {
   username: string;
   password: string;
-  /** The one-time-password field: an otpauth:// address or a bare secret. */
   totp: string | null;
 }
 
-/** The slice of 1Password used here. The SDK adapter below makes one; tests
- * pass a fake. */
 export interface OnePasswordClient {
   vaults(): Promise<Array<{ id: string; title: string }>>;
-  /** Login items with at least one website. */
   loginItems(vaultId: string): Promise<Array<{ id: string; title: string; urls: string[] }>>;
   fields(vaultId: string, itemIds: string[]): Promise<Map<string, OnePasswordItemFields>>;
 }
 
-// ── the SDK adapter ────────────────────────────────────────────────────
 
 interface SdkField { id: string; title: string; fieldType: string; value: string }
 interface SdkClient {
@@ -47,13 +28,10 @@ interface SdkClient {
     getAll(vaultId: string, itemIds: string[]): Promise<{ individualResponses: Array<{ content?: { id: string; fields: SdkField[] }; error?: unknown }> }>;
   };
 }
-/** What `@1password/sdk` exports that is used here. */
 export interface OnePasswordSdk {
   createClient(config: { auth: string; integrationName: string; integrationVersion: string }): Promise<SdkClient>;
 }
 
-/** The Login item's username, password and one-time-password fields, by
- * their built-in ids first, then by type and title. */
 export function loginFields(fields: readonly SdkField[]): OnePasswordItemFields {
   const byId = (id: string) => fields.find((field) => field.id === id && field.value);
   const username = byId("username")
@@ -63,7 +41,20 @@ export function loginFields(fields: readonly SdkField[]): OnePasswordItemFields 
   return { username: username?.value ?? "", password: password?.value ?? "", totp: totp?.value ?? null };
 }
 
-/** A client over the official SDK, signed in with a service account token. */
+/** The SDK did not load: a fault in this installation, never in the person's token, which was not even checked. */
+export class OnePasswordUnavailableError extends Error {
+  constructor() {
+    super("1Password could not start on this server, so your token was not checked: this installation is missing its 1Password part. Update OpenMausBot, then connect again.");
+    this.name = "OnePasswordUnavailableError";
+  }
+}
+
+/** Why the SDK did not load goes to the server log for whoever reads it; the person gets the plain words. */
+export function onePasswordUnavailable(error: unknown, log: (line: string) => void = (line) => console.warn(line)): OnePasswordUnavailableError {
+  log(`1Password: the SDK did not load: ${(error instanceof Error ? error.message : String(error)).split("\n", 1)[0]}`);
+  return new OnePasswordUnavailableError();
+}
+
 export async function sdkOnePasswordClient(sdk: OnePasswordSdk, token: string, version: string): Promise<OnePasswordClient> {
   const client = await sdk.createClient({ auth: token, integrationName: "OpenMausBot", integrationVersion: version });
   return {
@@ -81,38 +72,45 @@ export async function sdkOnePasswordClient(sdk: OnePasswordSdk, token: string, v
   };
 }
 
-// ── the cached index ───────────────────────────────────────────────────
 
-/** One 1Password login on one host: an item with two websites is two. */
-interface Entry {
+/** One item's website hosts on one site. */
+interface Entry extends LoginPlace {
   id: string;
   vaultId: string;
   itemId: string;
-  host: string;
   username: string;
   hasTotp: boolean;
 }
 
 const ID_PREFIX = "1password:";
-/** Items read per vault, at most. A service account meant for bots holds a
- * handful; this bounds a token given a whole company's vault. */
 const MAX_ITEMS = 500;
 const FIELDS_BATCH = 50;
-/** How old the index may get before a fill or the Settings list reads it again. */
 const STALE_MS = 10 * 60_000;
 
 export function isOnePasswordLoginId(id: string): boolean {
   return id.startsWith(ID_PREFIX);
 }
 
-/** What went wrong, in words for the person, never the token. */
+function bySite(hosts: Iterable<string>): Map<string, string[]> {
+  const sites = new Map<string, string[]>();
+  for (const host of hosts) {
+    const site = loginSite(host);
+    sites.set(site, [...(sites.get(site) ?? []), host]);
+  }
+  return sites;
+}
+
+export const ONE_PASSWORD_MALFORMED = "That is not a whole 1Password service account token. Copy all of it (it starts with ops_ and is very long), or make a new one in 1Password under Developer → Service accounts.";
+export const ONE_PASSWORD_REFUSED = "1Password did not accept the token: it may have been revoked, expired, or lost access to its vault. Make a new service account token in 1Password and paste it here.";
+
+/** Words for the person, never the token. A fault of this installation is never blamed on the token. */
 export function onePasswordProblem(error: unknown): string {
+  if (error instanceof OnePasswordUnavailableError) return error.message;
   const name = error instanceof Error ? error.name : "";
   const text = error instanceof Error ? error.message : String(error);
   if (name === "RateLimitExceededError" || /rate limit/iu.test(text)) return "1Password is limiting requests right now. Try again in a few minutes.";
-  if (name === "AuthExpiredError" || /invalid|unauthori[sz]ed|authenticat|token|forbidden|401|403/iu.test(text)) {
-    return "1Password did not accept the token. Paste a service account token (it starts with ops_), or make a new one.";
-  }
+  if (/invalid format|deserializ/iu.test(text)) return ONE_PASSWORD_MALFORMED;
+  if (name === "AuthExpiredError" || /invalid|unauthori[sz]ed|authenticat|service account token|forbidden|\b40[13]\b/iu.test(text)) return ONE_PASSWORD_REFUSED;
   if (/fetch|network|ENOTFOUND|ECONN|timed? ?out|dns/iu.test(text)) return "Could not reach 1Password. Check the internet connection and try again.";
   return "1Password could not be read. Try again, or connect it again with a new token.";
 }
@@ -120,26 +118,39 @@ export function onePasswordProblem(error: unknown): string {
 export class OnePasswordLogins {
   private readonly token: () => string | null;
   private readonly connect: (token: string) => Promise<OnePasswordClient>;
+  private readonly grants: () => Record<string, LoginBots>;
   private readonly now: () => number;
   private client: { token: string; client: OnePasswordClient } | null = null;
   private entries: Entry[] = [];
-  private vaults: string[] = [];
+  private vaults: Array<Omit<OnePasswordVault, "bots">> = [];
   private items = 0;
-  /** When the index was last read; null for never. */
   private refreshedAt: number | null = null;
   private error: string | undefined;
   private refreshing: Promise<OnePasswordStatus> | null = null;
   private readonly lastUsed = new Map<string, number>();
 
-  constructor(options: { token: () => string | null; connect: (token: string) => Promise<OnePasswordClient>; now?: () => number }) {
+  constructor(options: { token: () => string | null; connect: (token: string) => Promise<OnePasswordClient>; grants?: () => Record<string, LoginBots>; now?: () => number }) {
     this.token = options.token;
     this.connect = options.connect;
+    this.grants = options.grants ?? (() => ({}));
     this.now = options.now ?? Date.now;
   }
 
+  private botsFor(vaultId: string): LoginBots {
+    return this.grants()[vaultId] ?? "all";
+  }
+
+  private connected(): OnePasswordStatus {
+    const vaults: OnePasswordVault[] = this.vaults.map((vault) => ({ ...vault, bots: this.botsFor(vault.id) }));
+    return { connected: true, vaults, items: this.items, ...(this.error ? { error: this.error } : {}) };
+  }
+
   status(): OnePasswordStatus {
-    if (!this.token()) return { connected: false };
-    return { connected: true, vaults: [...this.vaults], items: this.items, ...(this.error ? { error: this.error } : {}) };
+    return this.token() ? this.connected() : { connected: false };
+  }
+
+  hasVault(id: string): boolean {
+    return Boolean(this.token()) && this.vaults.some((vault) => vault.id === id);
   }
 
   private async clientFor(token: string): Promise<OnePasswordClient> {
@@ -149,10 +160,6 @@ export class OnePasswordLogins {
     return client;
   }
 
-  /** Read the vaults the token reaches: every Login item with a website, by
-   * host, with its username and whether it has a one-time-password field.
-   * `token`: try this one instead of the saved one (Connect checks a token
-   * before keeping it); it throws instead of noting the problem. */
   refresh(token?: string): Promise<OnePasswordStatus> {
     if (!token && this.refreshing) return this.refreshing;
     const run = this.read(token).finally(() => { if (this.refreshing === run) this.refreshing = null; });
@@ -167,32 +174,32 @@ export class OnePasswordLogins {
       const client = await this.clientFor(token);
       const vaults = await client.vaults();
       const entries: Entry[] = [];
-      let items = 0;
+      const counted: Array<Omit<OnePasswordVault, "bots">> = [];
       for (const vault of vaults) {
+        let items = 0;
         const logins = (await client.loginItems(vault.id)).slice(0, MAX_ITEMS);
         for (let start = 0; start < logins.length; start += FIELDS_BATCH) {
           const batch = logins.slice(start, start + FIELDS_BATCH);
-          // Read for the username and whether a 2FA field exists; the
-          // password in this answer is dropped here and read again at fill.
+          // The password in this answer is dropped here and read again at fill.
           const fields = await client.fields(vault.id, batch.map((item) => item.id));
           for (const item of batch) {
             const found = fields.get(item.id);
             if (!found?.password) continue;
             items++;
-            const hosts = new Set(item.urls.flatMap((url) => normalizeLoginHost(url) ?? []));
-            for (const host of hosts) {
-              entries.push({ id: `${ID_PREFIX}${vault.id}:${item.id}:${host}`, vaultId: vault.id, itemId: item.id, host,
+            for (const [site, hosts] of bySite(new Set(item.urls.flatMap((url) => normalizeLoginHost(url) ?? [])))) {
+              entries.push({ id: `${ID_PREFIX}${vault.id}:${item.id}:${site}`, vaultId: vault.id, itemId: item.id, site, hosts, exactHost: false,
                 username: found.username, hasTotp: Boolean(found.totp && parseTotpKey(found.totp)) });
             }
           }
         }
+        counted.push({ id: vault.id, title: vault.title, items });
       }
-      this.entries = entries.sort((a, b) => a.host.localeCompare(b.host) || a.username.localeCompare(b.username));
-      this.vaults = vaults.map((vault) => vault.title).sort((a, b) => a.localeCompare(b));
-      this.items = items;
+      this.entries = entries.sort((a, b) => a.site.localeCompare(b.site) || a.username.localeCompare(b.username));
+      this.vaults = counted.sort((a, b) => a.title.localeCompare(b.title));
+      this.items = counted.reduce((sum, vault) => sum + vault.items, 0);
       this.refreshedAt = this.now();
       this.error = undefined;
-      return { connected: true, vaults: [...this.vaults], items };
+      return this.connected();
     } catch (error) {
       this.client = null;
       if (candidate) throw new Error(onePasswordProblem(error));
@@ -201,7 +208,6 @@ export class OnePasswordLogins {
     }
   }
 
-  /** Forget everything read from 1Password (Disconnect). */
   clear(): void {
     this.client = null;
     this.entries = [];
@@ -212,32 +218,33 @@ export class OnePasswordLogins {
     this.lastUsed.clear();
   }
 
-  /** Read again when the index is older than a few minutes; never throws. */
   async fresh(): Promise<void> {
     if (!this.token()) return;
     if (this.refreshedAt === null || this.now() - this.refreshedAt > STALE_MS) await this.refresh();
   }
 
-  /** Settings rows: read-only, usable by every bot (1Password scopes the vault). */
   list(): LoginSummary[] {
     if (!this.token()) return [];
     return this.entries.map((entry) => ({
-      id: entry.id, host: entry.host, username: entry.username, hasTotp: entry.hasTotp, source: "1password",
-      bots: "all", createdAt: 0, ...(this.lastUsed.has(entry.itemId) ? { lastUsedAt: this.lastUsed.get(entry.itemId)! } : {}),
+      id: entry.id, site: entry.site, hosts: [...entry.hosts], exactHost: false, username: entry.username, hasTotp: entry.hasTotp, source: "1password",
+      bots: this.botsFor(entry.vaultId), createdAt: 0, ...(this.lastUsed.has(entry.itemId) ? { lastUsedAt: this.lastUsed.get(entry.itemId)! } : {}),
     }));
   }
 
-  hosts(): Array<{ host: string; username: string }> {
-    return this.token() ? this.entries.map((entry) => ({ host: entry.host, username: entry.username })) : [];
+  /** A vault narrowed to other bots is invisible to this one. */
+  private usable(botId: string): Entry[] {
+    return this.token() ? this.entries.filter((entry) => loginUsableBy({ bots: this.botsFor(entry.vaultId) }, botId)) : [];
   }
 
-  /** The 1Password logins for exactly this host, as fill candidates. The
-   * password and the one-time-password key are read when one is filled. */
-  candidates(host: string): FillCandidate[] {
+  sitesFor(botId: string): Array<LoginPlace & { username: string }> {
+    return this.usable(botId).map((entry) => ({ site: entry.site, hosts: [...entry.hosts], exactHost: false, username: entry.username }));
+  }
+
+  candidates(pageHost: string, botId: string): FillCandidate[] {
     const token = this.token();
     if (!token) return [];
-    return this.entries.filter((entry) => entry.host === host).map((entry) => ({
-      id: entry.id, host: entry.host, username: entry.username, source: "1password" as const,
+    return this.usable(botId).filter((entry) => loginMatchesHost(entry, pageHost)).map((entry) => ({
+      id: entry.id, site: entry.site, hosts: [...entry.hosts], exactHost: false, username: entry.username, source: "1password" as const,
       secrets: async () => {
         let found: OnePasswordItemFields | undefined;
         try {

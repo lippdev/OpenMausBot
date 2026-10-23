@@ -1,4 +1,3 @@
-// bot-attachment.ts: what a bot may hand to the chat, from where, and as what.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,7 +66,6 @@ describe("saveBotAttachment", () => {
     expect(saved.attachment.kind).toBe(kind);
     expect(saved.attachment.mime).toBe(mime);
     expect(saved.bytes).toBe(bytes.byteLength);
-    // A private copy in the attachment store, not the bot's own file.
     expect(saved.attachment.path.startsWith(ATTACHMENTS_DIR)).toBe(true);
     expect(readFileSync(saved.attachment.path)).toEqual(bytes);
     if (saved.attachment.kind === "file") expect(saved.attachment.name.toLowerCase()).toBe(name.toLowerCase());
@@ -90,7 +88,6 @@ describe("saveBotAttachment", () => {
     const guest = { root: "/home/cua/workspace", host: VM_HOME };
     await expect(saveBotAttachment({ path: "/home/cua/workspace/../../secret.pdf", roots: [WORK], guest })).rejects.toMatchObject({ status: 404 });
     await expect(saveBotAttachment({ path: join(DATA_ROOT, "secret.pdf"), roots: [WORK] })).rejects.toMatchObject({ status: 403 });
-    // A path in the display name is reduced to its last segment.
     writeFileSync(join(WORK, "plain.txt"), "hello");
     const saved = await saveBotAttachment({ path: "plain.txt", name: "../../evil/notes.txt", roots: [WORK] });
     expect(saved.attachment).toMatchObject({ kind: "file", name: "notes.txt" });
@@ -228,7 +225,6 @@ describe("attachForTurn", () => {
       ...seen.hooks,
       save: () => { started += 1; return copy.promise.then(() => `file-${index}`); },
     }));
-    // Nothing has finished, yet only three may even start copying; the rest are refused at once.
     expect(started).toBe(3);
     expect(await Promise.all(calls.slice(3))).toEqual([{ status: "limit" }, { status: "limit" }, { status: "limit" }]);
     copies.slice(0, 3).forEach((copy) => copy.resolve("done"));

@@ -1,7 +1,3 @@
-// Codex's background one-shot (generateMemoryText): `codex exec` with no
-// tools, no session, no MCP and an empty folder, on the account's cheapest
-// listed model. Driven against the fake CLI's exec mode
-// (server/testing/fake-codex-app-server.ts, FAKE_CODEX_TEXT_*).
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -14,6 +10,7 @@ import { removeTempDir } from "../testing/cleanup.ts";
 import { CodexDriver } from "./codex.ts";
 import {
   CODEX_BACKGROUND_EFFORT,
+  CODEX_BACKGROUND_TIMEOUT_MS,
   codexBackgroundArgs,
   codexBackgroundModel,
   runCodexOneShot,
@@ -34,13 +31,11 @@ describe("codexBackgroundModel", () => {
   it("picks the smallest model the account lists, in the documented order", () => {
     expect(codexBackgroundModel({ default: "gpt-6-astra", options: [row("gpt-6-astra"), row("gpt-5.6-luna"), row("gpt-6-luna")] })).toBe("gpt-6-luna");
     expect(codexBackgroundModel({ default: "gpt-6-astra", options: [row("gpt-6-astra"), row("gpt-5.4-mini"), row("gpt-5.6-luna")] })).toBe("gpt-5.6-luna");
-    // a newer small model the list does not name yet still counts
     expect(codexBackgroundModel({ default: "gpt-7-sol", options: [row("gpt-7-sol"), row("gpt-7-luna")] })).toBe("gpt-7-luna");
   });
 
   it("never picks a model from the person's own providers, and falls back to the default", () => {
     expect(codexBackgroundModel({ default: "gpt-6-astra", options: [row("gpt-6-astra"), row("omlx::gpt-6-luna", true), row("omlx::tiny-mini", true)] })).toBe("gpt-6-astra");
-    // a Company list: its first approved model is the catalog default
     expect(codexBackgroundModel({ default: "company-large", options: [row("company-large"), row("company-small")] })).toBe("company-large");
     expect(codexBackgroundModel({ default: "", options: [] })).toBeNull();
   });
@@ -133,14 +128,12 @@ describe("Codex generateMemoryText (fake CLI)", () => {
     expect(call!.argv).toContain("--ignore-user-config");
     expect(call!.argv[call!.argv.indexOf("--sandbox") + 1]).toBe("read-only");
     expect(call!.argv.some((arg) => arg.startsWith("mcp_servers"))).toBe(false);
-    // an empty temporary folder, never the bot's, and gone afterwards
     const folder = call!.argv[call!.argv.indexOf("--cd") + 1]!;
     expect(realpathSync.native(dirname(folder))).toBe(realpathSync.native(dirname(call!.cwd)));
     expect(basename(folder)).toBe(basename(call!.cwd));
     expect(basename(folder)).toMatch(/^omb-codex-background-/);
     expect(call!.cwd).not.toBe(scratch);
     expect(existsSync(call!.cwd)).toBe(false);
-    // the turn's own account: same CODEX_HOME, no leaked API key
     expect(call!.env.CODEX_HOME).toBe(join(scratch, ".codex"));
     expect(call!.env.OPENAI_API_KEY).toBeUndefined();
     expect(usage).toEqual([{ model: "gpt-6-luna", input: 120, output: 7, cachedInput: 20 }]);
@@ -185,6 +178,13 @@ describe("Codex generateMemoryText (fake CLI)", () => {
     expect(usage).not.toHaveBeenCalled();
   });
 
+  it("waits as long as the caller's options say", async () => {
+    const env = { ...process.env, FAKE_CODEX_TEXT_MODE: "hang", FAKE_CODEX_TEXT_LOG: log };
+    const started = Date.now();
+    await expect(runCodexOneShot({ spawn: spawnCli, kill: killCliTree, cli: FAKE_CLI, env, prompt: "hello", model: "gpt-6-luna", providerArgs: [], options: { timeoutMs: 1_500 } })).rejects.toThrow(/timed out/);
+    expect(Date.now() - started).toBeLessThan(CODEX_BACKGROUND_TIMEOUT_MS);
+  });
+
   it("stops the process on timeout and on abort", async () => {
     const env = { ...process.env, FAKE_CODEX_TEXT_MODE: "hang", FAKE_CODEX_TEXT_LOG: log };
     const spawned: Array<ReturnType<typeof spawnCli>> = [];
@@ -203,7 +203,6 @@ describe("Codex generateMemoryText (fake CLI)", () => {
     expect(spawned).toHaveLength(2);
     for (const child of spawned) expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
     for (const call of calls()) expect(existsSync(call.cwd)).toBe(false);
-    // an already-aborted signal never starts a process
     const aborted = new AbortController();
     aborted.abort();
     await expect(runCodexOneShot({ ...base, options: { signal: aborted.signal } })).rejects.toThrow(/aborted/);

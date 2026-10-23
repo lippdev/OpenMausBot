@@ -34,15 +34,36 @@ describe("VoiceNoteBubble", () => {
     expect(markup).toContain('preload="metadata"');
   });
 
-  it("renders no player for a path that is not a parked generated mp3", () => {
+  it("plays a WAV note from the built-in Mac voices", () => {
     const markup = renderToStaticMarkup(
-      createElement(VoiceNoteBubble, { attachment: { ...note, path: "/attachments/note.wav" } }),
+      createElement(VoiceNoteBubble, { attachment: { ...note, path: "/attachments/note.wav", mime: "audio/wav" } }),
+    );
+    expect(markup).toContain('src="/api/attachments/note.wav"');
+  });
+
+  it("renders no player for a path that is not a parked generated mp3 or wav", () => {
+    const markup = renderToStaticMarkup(
+      createElement(VoiceNoteBubble, { attachment: { ...note, path: "/attachments/note.ogg" } }),
     );
     expect(markup).toBe("");
   });
 
-  // A note played over a Live call is heard by the call's microphone (and on
-  // Android it ended the call): the play button waits, and says why.
+  it("keeps the note's words behind a Transcript disclosure that starts collapsed", () => {
+    const markup = renderToStaticMarkup(
+      createElement(VoiceNoteBubble, { attachment: { ...note, text: "Deploy is green, every check passed." } }),
+    );
+    expect(markup).toMatch(/<button[^>]*data-test-voice-note-transcript=""[^>]*aria-expanded="false"/);
+    expect(markup).toContain("Transcript");
+    expect(markup).not.toContain("Deploy is green");
+  });
+
+  it("shows no disclosure for a note without words, as every note stored before the transcript field", () => {
+    const markup = renderToStaticMarkup(createElement(VoiceNoteBubble, { attachment: note }));
+    expect(markup).not.toContain("data-test-voice-note-transcript");
+    expect(markup).not.toContain("Transcript");
+    expect(renderToStaticMarkup(createElement(VoiceNoteBubble, { attachment: { ...note, text: "   " } }))).not.toContain("Transcript");
+  });
+
   it("cannot be played while this window is on a Live call, and says why", () => {
     configureLiveMedia({ getUserMedia: () => new Promise<MediaStream>(() => {}) });
     void startLiveCall({ botId: "b1", threadId: "t1" });

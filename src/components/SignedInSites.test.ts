@@ -59,7 +59,6 @@ describe("signed-in sites", () => {
     expect(host.querySelector("details")).toBeNull();
     expect(host.textContent).not.toContain("Signed-in sites");
     expect(listed()).toEqual(["example.com", "google.com"]);
-    // Signing out works the same, and does not load the list a second time.
     await click("Sign out of example.com");
     expect(fixture.api).toHaveBeenCalledTimes(2);
     expect(listed()).toEqual(["google.com"]);
@@ -72,6 +71,15 @@ describe("signed-in sites", () => {
     await click("Sign out of google.com");
     expect(fixture.api).toHaveBeenLastCalledWith("/api/browser-sites/sign-out", { method: "POST", body: JSON.stringify({ bot: "pepper", site: "google.com" }) });
     expect(listed()).toEqual(["example.com"]);
+  });
+
+  it("on a Team Cloud, reads and signs out of the browser of the conversation shown", async () => {
+    fixture.api.mockResolvedValueOnce({ running: true, sites: [example] }).mockResolvedValueOnce({ running: true, sites: [] });
+    await render({ bare: true, target: { bot: "pepper" }, scope: { threadId: "ada-chat" }, sharedBy: ["Pepper"] });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(fixture.api).toHaveBeenCalledWith("/api/browser-sites?bot=pepper&threadId=ada-chat");
+    await click("Sign out of example.com");
+    expect(fixture.api).toHaveBeenLastCalledWith("/api/browser-sites/sign-out", { method: "POST", body: JSON.stringify({ bot: "pepper", threadId: "ada-chat", site: "example.com" }) });
   });
 
   it("signs out of all, and says when nothing is left", async () => {

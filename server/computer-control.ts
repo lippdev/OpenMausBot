@@ -1,44 +1,19 @@
-// Who is driving a bot's computer — the person or the bot. One record per
-// bot, held in the harness because every consumer (the panel, the SSE
-// stream, and the per-turn computer proxies) already talks to the harness.
-//
-// The rules this module exists to enforce:
-//   - A bot can only ASK for hands (`requestHelp`, behind request_sign_in);
-//     it can never take control, and it cannot clear a hold. Only the person
-//     takes and releases, from the computer panel.
-//   - While the person holds control, the bot's computer actions are
-//     REFUSED by the proxies, not queued. A queued click would land after
-//     the person has moved on, on whatever happens to be under it. A call
-//     made during the hold waits in the harness's gate for them to hand
-//     back (so the turn goes on), and even then is answered unperformed,
-//     with a note to look at the screen again. A hold older than the wait
-//     ceiling is not waited for: the turn is told to stop and say so.
-//   - A plea is a sign-in card waiting on the person, and only that card
-//     settles it (Done or Cancel, `settleHelp`). Handing back mid-way is not
-//     an answer: the plea outlives the hold, so the banner still says what
-//     the bot is waiting for.
-//
-// State is per-boot and in-memory on purpose: a hold is a live fact about
-// who is at the screen right now, and surviving a harness restart would
-// mean a stale hold silently bricking a bot's computer. The card itself is
-// durable in the transcript; after a restart it still settles, it only has
-// no banner.
+// Who drives a bot's computer. A bot can only ask for hands (requestHelp); only the person takes and releases. While the
+// person holds control the bot's actions are refused, never queued: a queued click would land on whatever is under it later.
+// A plea is settled only by its sign-in card. In memory on purpose: a hold that survived a restart would brick the computer.
 
 import type { ComputerHelpRef } from "../shared/wire.ts";
 
 export interface ControlSnapshot {
   /** True while the person is driving; the bot's hands are refused. */
   held: boolean;
-  /** The bot's newest open plea for help, verbatim, or null when none is open. */
   helpReason: string | null;
   heldSinceMs: number | null;
-  /** The sign-in card that plea stands for; absent with no plea. */
   help?: ComputerHelpRef;
 }
 
 export interface ControlLeaseResult {
   snapshot: ControlSnapshot;
-  /** True only when this lease currently owns the hold. */
   owned: boolean;
   /** True only when this call changed an unheld record into a held one. */
   acquired: boolean;
@@ -51,7 +26,6 @@ export interface ControlLeaseReleaseResult {
 }
 
 const NO_CONTROL: ControlSnapshot = { held: false, helpReason: null, heldSinceMs: null };
-/** Keep a shouted help reason card-sized; the transcript has the rest. */
 const MAX_REASON_CHARS = 280;
 
 interface Entry {
@@ -87,8 +61,7 @@ export class ComputerControl {
     };
   }
 
-  /** The person takes the wheel. Idempotent — a second click must not
-   * reset `heldSinceMs` and make the hold look newer than it is. */
+  /** Idempotent: a second click must not reset `heldSinceMs`. */
   take(botId: string): ControlSnapshot {
     const entry = this.entries.get(botId);
     if (entry?.heldSinceMs != null) return this.snapshot(botId);
@@ -96,8 +69,7 @@ export class ComputerControl {
     return this.changed(botId);
   }
 
-  /** Atomically take or re-check a workspace-owned hold. The opaque lease is
-   * never returned in a snapshot, broadcast, or API response. */
+  /** The opaque lease is never returned in a snapshot, broadcast or API response. */
   acquireLease(botId: string, controlLeaseId: string): ControlLeaseResult {
     const entry = this.entries.get(botId);
     if (entry?.heldSinceMs != null) {
@@ -111,15 +83,12 @@ export class ComputerControl {
     return { snapshot: this.changed(botId), owned: true, acquired: true };
   }
 
-  /** Whether this workspace lease is the one holding the wheel right now.
-   * Read-only: unlike `acquireLease`, a free computer is not taken. */
   ownsLease(botId: string, controlLeaseId: string): boolean {
     const entry = this.entries.get(botId);
     return entry?.heldSinceMs != null && entry.controlLeaseId === controlLeaseId;
   }
 
-  /** The person hands the wheel back. An open plea stays: handing back is
-   * not answering the card that asked. */
+  /** An open plea stays: handing back is not answering the card that asked. */
   release(botId: string): ControlSnapshot {
     const entry = this.entries.get(botId);
     if (!entry || (entry.heldSinceMs === null && entry.pleas.length)) return this.snapshot(botId);
@@ -127,8 +96,7 @@ export class ComputerControl {
     return this.changed(botId);
   }
 
-  /** Release only the hold created by this workspace lease. A newer or legacy
-   * holder is observed but never disturbed. */
+  /** A newer or legacy holder is observed but never disturbed. */
   releaseLease(botId: string, controlLeaseId: string): ControlLeaseReleaseResult {
     const entry = this.entries.get(botId);
     if (!entry || entry.heldSinceMs === null || entry.controlLeaseId !== controlLeaseId) {
@@ -138,9 +106,7 @@ export class ComputerControl {
     return { snapshot: this.changed(botId), released: true };
   }
 
-  /** A bot's sign-in request asks the person to take over. Never grants
-   * anything by itself — it only surfaces the plea, newest first; the same
-   * card asking again replaces its own. */
+  /** Never grants anything by itself; the same card asking again replaces its own plea. */
   requestHelp(botId: string, reason: unknown, ref: ComputerHelpRef): ControlSnapshot {
     const text = typeof reason === "string" ? reason.trim().slice(0, MAX_REASON_CHARS) : "";
     const entry = this.entries.get(botId) ?? { heldSinceMs: null, pleas: [], controlLeaseId: null };
@@ -150,9 +116,6 @@ export class ComputerControl {
     return this.changed(botId);
   }
 
-  /** The card behind a plea settled (done, cancelled or superseded): its
-   * plea goes, wherever it was raised. Returns the records it left, so the
-   * caller can hand back the computers the person held for it. */
   settleHelp(messageId: string): string[] {
     const settled: string[] = [];
     for (const [botId, entry] of this.entries) {
@@ -165,12 +128,10 @@ export class ComputerControl {
     return settled;
   }
 
-  /** The bot is gone; a hold on a deleted bot's computer means nothing. */
   forget(botId: string): void {
     if (this.entries.delete(botId)) this.onChange(botId, NO_CONTROL);
   }
 
-  /** End the hold, keeping any open plea. */
   private drop(botId: string, entry: Entry): void {
     if (entry.pleas.length) this.entries.set(botId, { heldSinceMs: null, pleas: entry.pleas, controlLeaseId: null });
     else this.entries.delete(botId);

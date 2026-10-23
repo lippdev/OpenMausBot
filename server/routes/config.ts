@@ -1,19 +1,12 @@
-// GET and PUT/PATCH /api/config: the app settings (API keys never echoed
-// back, booleans only), moved out of server/index.ts's inline routes into the
-// route table (server/routes/README.md). The write validates provider keys,
-// browser profiles, the Boat and VPS accounts and the Local VM mode against
-// the running server before it saves, then rebuilds only the engines whose
-// launch config changed. The provider-settings lock (`providerConfigBusy`)
-// and the Local VM flags stay in index.ts, shared with the instance and
-// computer routes; they reach here as get/set views.
 import * as boat from "../boat.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "../boat-create-idempotency.ts";
 import { boatDeletionSnapshot } from "../boat-delete-journal.ts";
-import { browserEngineStatus, browserSessionId, closeBrowserSession } from "../browser-engine.ts";
+import { browserEngineStatus, browserSessionId } from "../browser-engine.ts";
+import { browserEngineKind } from "../browser/config.ts";
 import type { BrowserCleanupCoordinator, BrowserCleanupRequest } from "../browser-lifecycle-cleanup.ts";
 import { finalizeBrowserCleanupMutation, requireBrowserCleanupAcknowledged } from "../browser-lifecycle-cleanup.ts";
 import type { BrowserLive } from "../browser-live.ts";
-import { browserRuntimeEnv, type BrowserRuntime } from "../browser-runtime.ts";
+import type { BrowserRuntime } from "../browser-runtime.ts";
 import { boatAccountResourceChangeError, vpsAliasResourceChangeError } from "../cloud-backend.ts";
 import { CLOUD_PERSONAL_REFUSAL } from "../cloud-owner.ts";
 import * as composio from "../composio.ts";
@@ -33,11 +26,12 @@ import {
   type AppConfig,
 } from "../config.ts";
 import type { InstanceConfigMap, ModelSelection } from "../contracts.ts";
-import { deciderIncludedHere, deciderPatchKey, deciderSavePatch, type Decider } from "../decider/index.ts";
+import type { RequestAuth } from "../request-auth.ts";
+import { deciderIncludedHere, deciderPatchKey, deciderSavePatch, deciderSharedKeyUsable, type Decider } from "../decider/index.ts";
 import type { ProviderRegistry } from "../harness/registry.ts";
 import { HOSTED_PROVIDER_SETTINGS_ERROR } from "../hosted-models.ts";
 import { forgetKey } from "../key-rejections.ts";
-import type { LocalVmIdleTimer } from "../local-vm-idle.ts";
+import type { ComputerIdleTimer } from "../computer-idle.ts";
 import { PROVIDER_KEY_KINDS } from "../provider-key-check.ts";
 import type { SessionRegistry } from "../sessions.ts";
 import type { SharedComputerControl } from "../shared-computer-control.ts";
@@ -48,56 +42,43 @@ import * as tts from "../tts/index.ts";
 import * as vps from "../vps-computer.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 
-/** A `let` flag index.ts owns, seen live: the settings routes read it and
- * take or release it, index.ts keeps the variable. */
 export interface BusyFlag {
   get(): boolean;
   set(busy: boolean): void;
 }
 
-/** The remote computer providers a config write can switch accounts for
- * (index.ts's `RemoteComputerProvider`); the computer routes refuse
- * inventory changes on a provider while its account is in transition. */
 export type RemoteComputerProvider = "box" | "vps";
 
-/** What a model-selection check answers (index.ts `checkedModelSelection`). */
 export type ModelSelectionCheck = { ok: true; selection: ModelSelection } | { ok: false; status: number; error: string };
 
-/** The config frame as GET /api/config and the `config` broadcast carry it
- * (index.ts `configStatus()`); the routes only pass it on or spread it. */
 export type ConfigStatus = Record<string, unknown>;
 
 export interface ConfigRouteDeps {
   store: Pick<Store, "bots" | "patchBot" | "clearVoiceSelections">;
   cfg: AppConfig;
-  registry: Pick<ProviderRegistry, "get">;
+  registry: Pick<ProviderRegistry, "get" | "forgetSnapshots">;
   sessions: Pick<SessionRegistry, "revalidateEmailSessions">;
   browserCleanup: Pick<BrowserCleanupCoordinator, "hasPendingProfile" | "prepare" | "abort" | "commit" | "ensure">;
   browserLive: Pick<BrowserLive, "closeAll" | "closeForSession">;
   browserRuntime: Pick<BrowserRuntime, "heldBy">;
-  /** The browser sessions turns have launched, by session id (index.ts Map); a
-   * profile whose browser changed drops its entry after the close. */
   usedBrowserSessions: Pick<Map<string, { command: string; env: Record<string, string> }>, "get" | "delete">;
+  closeBrowser(session: string, spec: { command: string; env: Record<string, string> }): Promise<boolean>;
+  /** After browserEngine.engine changed: closes the viewers and the browsers the other engine ran. */
+  browserEngineSwitched(): void;
   decider: Pick<Decider, "testKey">;
   sharedComputers: Pick<SharedComputers, "close">;
   sharedComputerControl: Pick<SharedComputerControl, "close">;
-  /** Whether a hosted model policy applies here (index.ts `hostedModels`); the routes only test it. */
   hostedModels: boolean;
-  /** Whether this server is a Cloud home (index.ts `CLOUD_HOME`); the write only tests it. */
   cloudHome: boolean;
   lendingEnabled(): boolean;
-  /** The provider instance configs engines are launched from. */
   providerConfigs(): InstanceConfigMap;
   localVmIdleMs(): number;
-  /** Every Local VM idle timer, so a new idle window applies at once. */
-  localVmIdles: { values(): Iterable<Pick<LocalVmIdleTimer, "setIdleMs">> };
+  localVmIdles: { values(): Iterable<Pick<ComputerIdleTimer, "setIdleMs">> };
   localVmActiveThreads: { readonly size: number };
   localVmLifecycleBusy: { readonly size: number };
   localVmImageBusy: Pick<BusyFlag, "get">;
   localVmModeChangeBusy: Pick<BusyFlag, "set">;
-  /** The provider-settings lock, shared with the instance routes and the account routes. */
   providerConfigBusy: BusyFlag;
-  /** The remote providers whose account is being switched right now. */
   computerProviderConfigTransitions: Pick<Set<RemoteComputerProvider>, "add" | "delete">;
   managedBoatOwners(): boat.ManagedBoatOwner[];
   providerOperationConflict(provider: RemoteComputerProvider): string | null;
@@ -106,7 +87,11 @@ export interface ConfigRouteDeps {
   policyModelRefusal(instance: { instanceId: string; driverKind: string }): string | undefined;
   browserSessionSpec(binaryPath: string, session: string, profile: string | undefined): { command: string; env: Record<string, string> };
   configStatus(): ConfigStatus;
-  configForAccess(status: ConfigStatus, admin: boolean): unknown;
+  /** What this caller is shown: a client sees configured-or-not only; on a Team Cloud the profile is the caller's own. */
+  configForAccess(status: ConfigStatus, auth: RequestAuth): unknown;
+  /** A Team Cloud only: Settings → Profile saves the signed-in person's own profile, never the server's. False: nobody
+   * signed in to save it for. */
+  ownProfile?(auth: RequestAuth, profile: { name?: string; avatarUrl?: string; aboutMe?: string }): boolean;
   resyncOpenCodeProviderKeys(): void;
   revokeEngineCapabilities(engines: ReadonlySet<string>): void;
   reloadProviders(before: Record<string, unknown>): Promise<void>;
@@ -117,22 +102,31 @@ export interface ConfigRouteDeps {
 export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
   const {
     store, cfg, registry, sessions, browserCleanup, browserLive, browserRuntime, usedBrowserSessions, decider,
-    sharedComputers, sharedComputerControl, hostedModels, cloudHome: CLOUD_HOME, lendingEnabled, providerConfigs,
+    closeBrowser, browserEngineSwitched, sharedComputers, sharedComputerControl, hostedModels, cloudHome: CLOUD_HOME, lendingEnabled, providerConfigs,
     localVmIdleMs, localVmIdles, localVmActiveThreads, localVmLifecycleBusy, localVmImageBusy, localVmModeChangeBusy,
     providerConfigBusy, computerProviderConfigTransitions, managedBoatOwners, providerOperationConflict,
     perBotLocalVmCountForModeChange, checkedModelSelection, policyModelRefusal, browserSessionSpec, configStatus,
-    configForAccess, resyncOpenCodeProviderKeys, revokeEngineCapabilities, reloadProviders, broadcast, drainQueuedSends,
+    configForAccess, resyncOpenCodeProviderKeys, revokeEngineCapabilities, reloadProviders, broadcast, drainQueuedSends, ownProfile,
   } = deps;
   return async ({ req, res, url, path, method, auth, json, readBody }) => {
-    // ── app config (API keys — never echoed back, booleans only) ──
+    // API keys are never echoed back: booleans only.
     if (method === "GET" && path === "/api/config") {
-      return json(res, 200, configForAccess(configStatus(), auth.scopes.includes("admin")));
+      return json(res, 200, configForAccess(configStatus(), auth));
     }
     if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
       const body = await readBody(req);
       if (hostedModels && ["instances", "anthropic", "openai", "openrouter", "openaiCompat", "xai", "mistral", "cerebras", "groq", "meta", "opencodeGo"].some(key => Object.hasOwn(body, key))) return json(res, 403, { error: HOSTED_PROVIDER_SETTINGS_ERROR });
       const patch = parseConfigPatch(body);
-      // A Cloud home is personal: nobody is invited to sign in to it.
+      if (patch.profile && ownProfile) {
+        // The address is the verified claim's; a profile names no other.
+        const { email: _email, ...own } = patch.profile;
+        if (!ownProfile(auth, own)) return json(res, 403, { error: "Sign in to this team to have a profile." });
+        delete patch.profile;
+        if (!Object.keys(patch).length) {
+          broadcast({ kind: "config", ...configStatus() });
+          return json(res, 200, configForAccess(configStatus(), auth));
+        }
+      }
       if (CLOUD_HOME && (patch.signIn?.admins?.length || patch.signIn?.members?.length)) {
         return json(res, 403, { error: CLOUD_PERSONAL_REFUSAL, code: "cloud_personal" });
       }
@@ -162,18 +156,14 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
       }
       if (!Object.keys(patch).length) return json(res, 400, { error: "nothing to save" });
       if (patch.decider) {
-        // Saving a key is the "turn it on"; clearing it turns it off, or
-        // falls back to Cloud Pro's included decisions where there are some.
-        const planned = deciderSavePatch(patch.decider, cfg.decider, deciderIncludedHere());
+        const planned = deciderSavePatch(patch.decider, cfg.decider, { included: deciderIncludedHere(), shared: deciderSharedKeyUsable(cfg) });
         if (!planned.ok) return json(res, 400, { error: planned.error });
         patch.decider = planned.patch;
       }
       const changingVoiceProvider = patch.tts?.provider !== undefined
         && patch.tts.provider !== tts.voiceProvider(cfg);
       if (changingVoiceProvider && patch.tts?.voice === undefined) {
-        // Voice ids are provider-owned opaque values. Never carry a default
-        // from one catalog into another. A caller may explicitly supply a
-        // voice for the newly selected provider in this same atomic patch.
+        // Voice ids are provider-owned: never carry one from one catalog into another.
         patch.tts = { ...patch.tts, voice: "" };
       }
       if (providerConfigBusy.get()) return json(res, 409, { error: "provider settings are already being updated" });
@@ -184,13 +174,12 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         }
       }
       const disablingBuiltInBrowser = patch.features?.browser === false && builtInBrowserEnabled(cfg);
+      const switchingBrowserEngine = patch.browserEngine?.engine !== undefined && patch.browserEngine.engine !== browserEngineKind(cfg);
       const removedBrowserProfileIds = patch.browserProfiles === undefined
         ? []
         : (cfg.browserProfiles ?? [])
             .map((profile) => profile.id)
             .filter((id) => !patch.browserProfiles!.some((profile) => profile.id === id));
-      // Profiles whose browser changes between built-in and My Chrome: their
-      // open browser closes after the save, so the next turn uses the new one.
       const browserChoiceChanged = (patch.browserProfiles ?? []).filter((profile) => {
         const current = cfg.browserProfiles?.find((candidate) => candidate.id === profile.id);
         return current !== undefined && (current.browser ?? null) !== (profile.browser ?? null);
@@ -282,10 +271,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
           try {
             await boat.verifyBoatDeletionCredential({ box: { token: nextBoatToken } });
             replacementProvedByDeletion = true;
-            // Verification can observe a completed operation and retire both
-            // its deletion fence and matching create receipt. Never continue
-            // with the pre-verification snapshots: they would demand access
-            // to a Boat whose exact operation just proved it was deleted.
+            // Re-snapshot: verification may have retired the deletion fence and its create receipt.
             boatRecovery = boatCreateRecoverySnapshot();
             boatDeletions = boatDeletionSnapshot();
           } catch (error) {
@@ -311,9 +297,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
                 error: `${currentBoatInventory.problem ?? "cloud computer inventory is unavailable"}. Keep the current Boat account and retry`,
               });
             }
-            // A rejected old key cannot authorize its own rotation. Below,
-            // validate the replacement and prove access to remembered Boats;
-            // pending deletions retain their target-bound verification.
+            // A rejected old key cannot authorize its own rotation.
             currentBoatInventory = null;
           }
           if (currentBoatInventory) {
@@ -322,11 +306,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
             );
             for (const recovery of boatRecovery) {
               if (!recovery.boxId) continue;
-              // A failed provisioning attempt may never have reached the
-              // deterministic rename. The replacement credential already
-              // proved the exact deletion target, so its in-flight resource
-              // is governed by that stronger target-bound receipt rather
-              // than an OpenMausBot name check.
+              // The replacement credential already proved this exact deletion target.
               if (replacementProvedByDeletion && deletingBoatIds.has(recovery.boxId)) continue;
               const inspected = await boat.inspectBoatIdentity({ box: { token: currentBoatToken } }, recovery.boxId);
               if (!inspected.available) {
@@ -335,9 +315,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
                 });
               }
               if (!inspected.identity) {
-                // Reconcile exact stale receipts while the current credential is
-                // still available. Leaving one behind would make a later token
-                // addition demand access to a Boat the provider proved is gone.
+                // Reconcile stale receipts while the current credential still works.
                 retireDeletedBoatCreate(recovery.boxId);
                 continue;
               }
@@ -370,9 +348,6 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
             }
           }
         }
-      // A project key is useful only if it can create/reuse the Session that
-      // powers both the connections UI and the agent MCP. Validate it before
-      // persisting, and save the non-secret ids needed to reuse that Session.
       const requestedComposioKey = patch.composio?.apiKey;
       if (requestedComposioKey !== undefined) {
         if (requestedComposioKey.trim()) {
@@ -386,17 +361,13 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
           patch.composio = { ...patch.composio, apiKey: "", sessionId: "" };
         }
       }
-      // check a boat token against the provider before storing it: a
-      // rejected token used to save happily and only surface as a 401 in
-      // another panel later, with nothing the user could act on
       const newBoatToken = patch.box?.token;
       if (newBoatToken?.trim()) {
         const check = await boat.verifyToken(newBoatToken);
-        if (!check.ok) return json(res, 400, { error: check.message });
+        if (!check.ok) return json(res, 400, { error: check.message, ...(check.rejected ? { code: "key_rejected" } : {}) });
       }
       if (replacingRejectedBoatToken) {
-        // An expired credential cannot authorize its own replacement. Probe
-        // the new account without adopting or retiring any local identities.
+        // An expired credential cannot authorize its own replacement: probe without adopting or retiring identities.
         const replacement = await boat.listManagedBoats(
           { box: { token: nextBoatToken } }, managedBoatOwners(), { adoptLegacy: false },
         );
@@ -462,9 +433,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         );
         if (resourceError) return json(res, 409, { error: resourceError });
       }
-      // Each cloud voice provider owns its own credential. Validate the field
-      // against that provider rather than whichever provider happens to be
-      // selected, so switching engines never sends one service another's key.
+      // Validated against each voice provider's own credential, so no service is ever sent another's key.
       const newTts = patch.tts;
       if (newTts?.key?.trim()) {
         const check = await tts.verifyKey("elevenlabs", newTts.key.trim());
@@ -474,9 +443,6 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         const check = await tts.verifyKey("fish", newTts.fishKey.trim());
         if (!check.ok) return json(res, 400, { error: check.message });
       }
-      // A pasted decision-model key is tried once (one tiny yes/no call).
-      // Only a refusal blocks the save: an offline or overloaded service must
-      // not stop a person saving a key that may well be fine.
       const deciderKey = patch.decider ? deciderPatchKey(patch.decider, cfg.decider) : null;
       if (deciderKey) {
         const check = await decider.testKey(deciderKey.check);
@@ -488,11 +454,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         }
       }
       if (patch.browserProfiles !== undefined) {
-        // Provider/credential validation above may await the network. A turn
-        // can start during that window and claim a profile which looked idle
-        // at the route's first check, so validate again at the mutation
-        // boundary. Keep this check and the synchronous save/reference cleanup
-        // below free of awaits.
+        // Revalidated: the awaits above let a turn claim a profile. No awaits from here through the save.
         const retained = new Set(patch.browserProfiles.map((profile) => profile.id));
         const activeReference = store.bots.find(
           (bot) => bot.busy && bot.browserProfile && bot.browserProfile !== "guest" && !retained.has(bot.browserProfile),
@@ -502,21 +464,17 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
             error: `stop ${activeReference.name}'s turn before removing its browser profile`,
           });
         }
-        // Built-in and My Chrome are different browsers: a turn keeps the
-        // one it started with, so the switch waits for it.
         const switching = store.bots.find((bot) => bot.busy && bot.browserProfile && browserChoiceChanged.includes(bot.browserProfile));
         if (switching) return json(res, 409, { error: `stop ${switching.name}'s turn before changing its browser` });
       }
-      // Provider validation above awaits remote services. The transition flag
-      // blocks new work, while this second observation catches any operation
-      // that already held a claim at the initial boundary.
+      const browsing = switchingBrowserEngine ? store.bots.find((bot) => bot.busy && bot.browser !== false) : undefined;
+      if (browsing) return json(res, 409, { error: `stop ${browsing.name}'s turn before switching the browser` });
+      // Observed again after the awaits: catches an operation that already held a claim.
       for (const provider of transitioningProviders) {
         const conflict = providerOperationConflict(provider);
         if (conflict) return json(res, 409, { error: conflict });
       }
-      // A change names only the OpenCode provider keys it saves or removes;
-      // the rest stay. Merged with no await before the save below, so it
-      // starts from what is saved at that moment.
+      // Only the named keys change; merged with no await before the save.
       if (patch.opencodeGo?.providerKeys) {
         const merged = mergeOpenCodeProviderKeys(cfg, patch.opencodeGo.providerKeys);
         if (!merged.ok) return json(res, 400, { error: merged.error });
@@ -536,36 +494,26 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         for (const request of browserCleanupRequests) browserCleanup.abort(request);
         throw error;
       }
-      // A saved or cleared key starts over: neither it nor the key it
-      // replaced stays marked as rejected.
       const resetKeys = PROVIDER_KEY_KINDS.flatMap((kind) => {
         const next = patch[kind]?.key;
         return next === undefined ? [] : [cfg[kind]?.key, next];
       });
       const engineForSwitch = browserEngineStatus();
-      const browsersToClose = engineForSwitch.kind === "ready" ? browserChoiceChanged.flatMap((id) => {
+      const browsersToClose = browserChoiceChanged.flatMap((id) => {
         const target = browserProfilePartitionTarget(cfg, id);
         if (!target) return [];
         const session = browserSessionId("", target.partitionId);
-        return [{ session, spec: usedBrowserSessions.get(session) ?? browserSessionSpec(engineForSwitch.binaryPath, session, id) }];
-      }) : [];
+        const spec = usedBrowserSessions.get(session) ?? (engineForSwitch.kind === "ready" ? browserSessionSpec(engineForSwitch.binaryPath, session, id) : null);
+        return spec ? [{ session, spec }] : [];
+      });
       let configWriteCommitted = false;
-      // What each engine is launched with before this write (reloadProviders).
       const enginesBefore = engineLaunches(providerConfigs());
       const externalSecretStorage = url.searchParams.get("secretStorage") === "external";
       try {
-        // Provider-owned voice ids must be invalidated before the provider
-        // commit. If bots.json cannot be written, leave the old provider in
-        // place rather than committing a new provider with stale bot voices.
-        // A later config-write failure may leave voices cleared, which is the
-        // safe side of this cross-file mutation: no foreign id can be spoken.
+        // Before the provider commit, so a failed write never leaves a foreign voice id to speak.
         if (changingVoiceProvider) store.clearVoiceSelections();
         if (externalSecretStorage) {
-          // The packaged Electron caller commits supplied credentials to the
-          // OS-encrypted store before entering this route. Persist every
-          // non-secret sibling in the same request, but replace each supplied
-          // credential with an empty tombstone so an older plaintext value can
-          // never survive the merge in config.json.
+          // Supplied credentials are already in the OS-encrypted store: tombstone them so no older plaintext survives the merge.
           const persisted = structuredClone(patch);
           if (persisted.xai?.key !== undefined) persisted.xai.key = "";
           if (persisted.composio?.apiKey !== undefined) persisted.composio.apiKey = "";
@@ -578,6 +526,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
           if (persisted.imageGen?.key !== undefined) persisted.imageGen.key = "";
           if (persisted.imageGen?.customApiKey !== undefined) persisted.imageGen.customApiKey = "";
           if (persisted.live?.key !== undefined) persisted.live.key = "";
+          if (persisted.treg?.key !== undefined) persisted.treg.key = "";
           saveConfig(persisted);
           configWriteCommitted = true;
           syncCredentialEnv(patch);
@@ -585,9 +534,7 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         } else {
           saveConfig(patch);
           configWriteCommitted = true;
-          // loadConfig prefers env over the file for credentials, so the env
-          // must follow the save — otherwise the value injected at boot would
-          // shadow the new key until the next launch
+          // loadConfig prefers env over the file for credentials, so the env must follow the save.
           syncCredentialEnv(patch);
           Object.assign(cfg, loadConfig());
         }
@@ -603,8 +550,8 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         throw error;
       }
       for (const key of resetKeys) if (key) forgetKey(key);
-      // Desktops already counting down move to the new window at once, in
-      // every isolation mode; busy work still defers its expiry.
+      // A saved key reaches an engine through the environment its status read uses, often with no reload.
+      registry.forgetSnapshots();
       if (patch.localVm?.idleTimeoutMinutes !== undefined) {
         for (const idle of localVmIdles.values()) idle.setIdleMs(localVmIdleMs());
       }
@@ -618,15 +565,14 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         sharedComputerControl.close();
       }
       if (disablingBuiltInBrowser) browserLive.closeAll();
+      if (switchingBrowserEngine) browserEngineSwitched();
       for (const request of browserCleanupRequests) {
         if (request.kind === "profile") browserLive.closeForSession(browserSessionId("", request.partitionId));
       }
       for (const { session, spec } of browsersToClose) {
         browserLive.closeForSession(session);
         usedBrowserSessions.delete(session);
-        // Closing a built-in browser saves its sign-ins for when it comes
-        // back; closing an attached one only lets go of the person's Chrome.
-        void closeBrowserSession(spec.command, browserRuntimeEnv({ ...spec.env, AGENT_BROWSER_SESSION: session })).then((closed) => {
+        void closeBrowser(session, spec).then((closed) => {
           if (!closed) console.warn(`browser ${session}: could not close it after its browser changed; the next turn may still use the old one`);
         });
       }
@@ -635,33 +581,18 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
         try {
           for (const bot of store.bots) {
             if (bot.browserProfile && bot.browserProfile !== "guest" && !retained.has(bot.browserProfile)) {
-              // The profile list and every bot reference change in the same
-              // config request. Non-renderer clients therefore cannot leave a
-              // bot pointing at a deleted cookie partition.
               store.patchBot(bot.id, { browserProfile: undefined });
             }
           }
         } catch (error) {
-          // Config is already durable. Keep the cleanup intent prepared (so
-          // it cannot wipe ambiguous state and its id remains locked), but do
-          // not let this secondary write failure skip revocation/reload below.
+          // Config is already durable: this failure must not skip revocation and reload below.
           browserReferenceCleanupError = error;
         }
       }
-      // Only an engine whose launch config this write changed is rebuilt: a
-      // provider key, URL or model default reaches its own engines and no
-      // others, and a setting no driver reads (profile, language, voice, VPS,
-      // room timeout, onboarding progress), or the same values saved again,
-      // rebuilds nothing and interrupts no turn.
       const changedEngines = new Set(changedInstanceIds(enginesBefore, engineLaunches(providerConfigs())));
-      // Config is already durable. A changed engine's old children are
-      // invalid immediately, including when browser cleanup below has to
-      // await Electron before reloadProviders begins.
+      // Revoked before any await: a changed engine's old children are invalid at once.
       revokeEngineCapabilities(changedEngines);
-      // The cleanup marker becomes committed only after both pieces of durable
-      // application state agree. Commit/ACK failures are deferred until every
-      // mandatory consequence of the config write has run: no journal I/O
-      // failure may leave a two-hour bearer or stale provider fleet active.
+      // Commit failures wait until every mandatory effect has run: no journal failure may leave a bearer or stale engines active.
       const finalized = await finalizeBrowserCleanupMutation({
         requests: browserCleanupRequests,
         referenceError: browserReferenceCleanupError,
@@ -691,16 +622,12 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
           return status;
         },
       });
-      // Normal desktop deletes wait for Electron's acknowledgement. If
-      // Electron is restarting, the committed journal keeps retrying and the
-      // id-reuse guard above prevents stale logins from resurfacing. Delaying
-      // this assertion until after every mandatory post-commit effect keeps
-      // the runtime aligned with the config even on a truthful 503 response.
+      // Asserted after every mandatory post-commit effect, so the runtime matches the config even on a 503.
       requireBrowserCleanupAcknowledged(
         finalized.acknowledgements.every(Boolean),
         removedBrowserProfileIds.length === 1 ? "The browser profile" : "The browser profiles",
       );
-      return json(res, 200, finalized.value);
+      return json(res, 200, configForAccess(finalized.value, auth));
       } finally {
         for (const provider of transitioningProviders) computerProviderConfigTransitions.delete(provider);
         if (changingLocalVmMode) localVmModeChangeBusy.set(false);

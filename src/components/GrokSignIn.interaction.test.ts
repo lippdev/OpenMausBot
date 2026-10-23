@@ -1,12 +1,10 @@
-// Grok Build's sign-in card, driven like a person would: start, see the code,
-// cancel or fail, and try again, against the engine's own auth routes.
 import { Children, isValidElement, type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
 
 const fixture = vi.hoisted(() => ({
   values: [] as unknown[], index: 0, effects: [] as (() => (() => void) | undefined)[],
-  api: vi.fn(), refreshInstances: vi.fn(), refreshModels: vi.fn(), openExternal: vi.fn(),
+  api: vi.fn(), refreshInstances: vi.fn(), refreshModels: vi.fn(), openExternal: vi.fn(), track: vi.fn(),
 }));
 vi.mock("react", async (original) => ({
   ...await original<typeof import("react")>(),
@@ -16,11 +14,13 @@ vi.mock("react", async (original) => ({
     return [fixture.values[index], (next: unknown) => { fixture.values[index] = next; }];
   },
   useEffect: (effect: () => (() => void) | undefined) => { fixture.effects.push(effect); },
+  useRef: (current: unknown) => ({ current }),
 }));
 vi.mock("@/state/store", async (original) => ({
   ...await original<typeof import("@/state/store")>(), api: fixture.api,
   useStore: () => ({ refreshInstances: fixture.refreshInstances, refreshModels: fixture.refreshModels }),
 }));
+vi.mock("@/lib/analytics", () => ({ track: fixture.track }));
 const { DeviceSignIn } = await import("./DeviceSignIn");
 
 type Node = ReactElement<{ children?: ReactNode; onClick?: () => Promise<void>; "data-device-sign-in"?: string }>;
@@ -62,11 +62,12 @@ it("starts only on request on Grok's own route, and never opens a page on the pe
   expect(fixture.openExternal).not.toHaveBeenCalled();
   expect(fixture.values[0]).toMatchObject({ phase: "waiting", userCode: "WDJB-MJHT" });
   render();
-  const cleanup = fixture.effects.at(-1)!();
+  const cleanup = fixture.effects[0]!();
   await vi.advanceTimersByTimeAsync(2_000);
   expect(fixture.api).toHaveBeenCalledWith("/api/instances/grok/auth/status?flowId=grok-flow", expect.objectContaining({ signal: expect.any(AbortSignal) }));
   expect(fixture.refreshInstances).toHaveBeenCalledOnce();
   expect(fixture.refreshModels).toHaveBeenCalledWith("grok");
+  expect(fixture.track.mock.calls).toEqual([["engine_signed_in", { engine: "grok", method: "device_code" }]]);
   cleanup?.();
 });
 
@@ -82,6 +83,7 @@ it("cancels the same flow, then offers one action: try again", async () => {
   const buttons = render().filter((node) => node.type === "button");
   expect(buttons).toHaveLength(1);
   expect(text(buttons[0])).toContain("Try again");
+  expect(fixture.track).not.toHaveBeenCalled();
 });
 
 it("shows a failed start in one line and offers to try again", async () => {
@@ -96,4 +98,17 @@ it("shows a failed start in one line and offers to try again", async () => {
   await flush();
   expect(fixture.api).toHaveBeenCalledTimes(2);
   expect(fixture.api).toHaveBeenLastCalledWith("/api/instances/grok/auth/start", { method: "POST" });
+  expect(fixture.track).not.toHaveBeenCalled();
+});
+
+it("reports no sign-in when the code expires before it is used", async () => {
+  fixture.api.mockResolvedValue({ auth: { ...waiting, expiresAt: "2030-01-01T00:00:05.000Z" } });
+  await button().props.onClick!();
+  await flush();
+  render();
+  const cleanup = fixture.effects[0]!();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(fixture.values[0]).toMatchObject({ phase: "expired" });
+  expect(fixture.track).not.toHaveBeenCalled();
+  cleanup?.();
 });

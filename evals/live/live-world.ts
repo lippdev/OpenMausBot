@@ -75,7 +75,7 @@ export class LiveWorld extends BaseWorld {
     throw new Error("step " + step.kind + " is not available in the live world");
   }
 
-  /** The coordinated turns in the server's runtime.db (server/testing/handoff-rows.ts). */
+  /** The coordinated turns in the server's runtime.db. */
   protected override readHandoffs(): Array<Record<string, any>> {
     return readRuntimeHandoffs(this.dataDir);
   }

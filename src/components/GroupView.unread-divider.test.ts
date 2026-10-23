@@ -1,5 +1,3 @@
-// The New divider in a room, and the divider itself: a hairline each side,
-// a small accent label, and a separator a screen reader names.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";

@@ -6,7 +6,6 @@ import {
 } from "./control-client.ts";
 
 const options = { url: "http://control.test/state", token: "fixture-token" };
-// A check that could not be answered is held, and says so — never "a person".
 const unavailable = { held: true, helpOpen: false, blockedReason: CONTROL_UNCONFIRMED };
 
 /** A real loopback control endpoint answering `body` after `delayMs`, or
@@ -30,8 +29,7 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("computer control client", () => {
   it("waits out a harness that holds the check longer than the old 2 s, and keeps its contention reason", async () => {
-    // The gate holds a check while the computer is busy. The old 2 s abort
-    // turned exactly this answer into "A person has taken control".
+    // The gate holds a check while the computer is busy; an early client abort would turn this answer into "A person has taken control".
     const busy = { held: true, helpOpen: false, blockedReason: "Another thread is using this computer." };
     const control = await slowControl(3_000, busy);
     try {
@@ -42,8 +40,6 @@ describe("computer control client", () => {
   }, 10_000);
 
   it("outlasts the harness's longest hold", async () => {
-    // A check the harness is still legitimately holding must never be cut
-    // off and misread: the client's own abort comes after the longest hold.
     const timeout = vi.spyOn(AbortSignal, "timeout");
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ held: false, helpOpen: false }));
     await createControlClient({ ...options, fetchImpl }).state(true);

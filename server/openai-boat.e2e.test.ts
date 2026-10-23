@@ -89,9 +89,6 @@ it("keeps the selected API model for direct, group and scheduled Boat turns and 
       if (scenario === "held") await api("POST", `/api/bots/${bot.id}/computer/control`, { action: "take" });
       await api("POST", `/api/threads/${scenario === "group" ? group.threadId : bot.activeTaskId}/respond`, { requestId: card.requestId, behavior: "allow" });
       if (scenario === "held") {
-        // The screenshot waits for the person inside the call, the turn
-        // still going, and acts on nothing while they hold it; handed back,
-        // it is answered unperformed — the screen moved under their hands.
         await new Promise(resolve => setTimeout(resolve, 1_000));
         expect(commands).toHaveLength(commandsBefore);
         await api("POST", `/api/bots/${bot.id}/computer/control`, { action: "release" });
@@ -121,8 +118,6 @@ it("keeps the selected API model for direct, group and scheduled Boat turns and 
     }, { timeout: 15_000 }).not.toBe("");
     await expect.poll(() => readiness.entered).toBe(true);
     const destination = ["--bot", bot.id, "--task", routineThread];
-    // A published execution owns its task before network readiness finishes.
-    // Otherwise wait reports a completed turn while setup is still in flight.
     const preparing = (await api("GET", "/api/bots")).bots.find((item: any) => item.id === bot.id)
       .tasks.find((task: any) => task.threadId === routineThread);
     expect(preparing).toMatchObject({ busy: true, activity: "working" });
@@ -140,8 +135,6 @@ it("keeps the selected API model for direct, group and scheduled Boat turns and 
     expect(requests.slice(beforeRoutine).every(request => request.model === "chosen-vision-model")).toBe(true);
     expect(nativePrompts).toBe(0);
     expect(commands.some(command => command.includes(".model.jpg"))).toBe(true);
-    // Stop during readiness must revoke this generation before any late
-    // network response can provision a computer or dispatch the model.
     const cancelledReadiness = pauseBoatReads();
     const beforeCancel = requests.length;
     const { run: cancelled } = await api("POST", `/api/routines/${routine.id}/run`, {});
@@ -159,15 +152,16 @@ it("keeps the selected API model for direct, group and scheduled Boat turns and 
     expect(requests).toHaveLength(beforeCancel);
     const cancelledMessages = await api("GET", `/api/threads/${cancelledThread}/messages?limit=30`);
     expect(cancelledMessages.messages.some((message: any) => message.card?.requestId)).toBe(false);
-    // Readiness is checked again at dispatch, after the routine was created.
-    // An available native Boat runner must not mask the selected engine's missing key.
-    const expectBlockedRun = async (reason: RegExp) => {
+    const expectBlockedRun = async (reason: RegExp, retried?: "provider") => {
       const before = requests.length;
       const { run: blocked } = await api("POST", `/api/routines/${routine.id}/run`, {});
+      const latest = async () => (await api("GET", "/api/routines")).runs.find((entry: any) => entry.id === blocked.id);
+      // A passing failure starts the run once more after a short wait, and the second failure keeps the same reason.
+      if (retried) await expect.poll(latest, { timeout: 15_000 }).toMatchObject({ status: "queued", retried, attention: expect.stringMatching(reason) });
       await expect.poll(async () => {
-        const latest = (await api("GET", "/api/routines")).runs.find((entry: any) => entry.id === blocked.id);
-        return latest?.status === "failed" ? latest.error : "";
-      }, { timeout: 15_000 }).toMatch(reason);
+        const run = await latest();
+        return run?.status === "failed" ? run.error : "";
+      }, { timeout: retried ? 45_000 : 15_000 }).toMatch(retried ? new RegExp(`^Failed after one automatic retry: .*${reason.source}`, reason.flags) : reason);
       expect(requests).toHaveLength(before);
       expect(nativePrompts).toBe(0);
     };
@@ -175,7 +169,8 @@ it("keeps the selected API model for direct, group and scheduled Boat turns and 
     await expectBlockedRun(/target bot's model is not ready/i);
     await api("PATCH", "/api/config", { openaiCompat: { key: "synthetic-model-key", url: origin + "/v1", model: "other-default" } });
     boatOffline = true;
-    await expectBlockedRun(/cloud computer could not be checked/i);
+    // A Boat that answers 503 is a temporary outage, not something only the owner can fix.
+    await expectBlockedRun(/cloud computer could not be checked/i, "provider");
   } finally {
     boatReadsGate?.release();
     await fixture.close(); upstream.closeAllConnections();

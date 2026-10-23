@@ -1,9 +1,3 @@
-// The Data surface through the real server and the real DuckDB: a bot loads a
-// CSV, describes it, queries it, shows a table and a chart; the panel reads
-// the sheet, pages the table, renders the chart, runs its own SQL, exports,
-// renames and removes a card. The bot reaches the tools the way an engine
-// does, through the internal MCP route with a turn capability; the panel
-// uses the owner's routes. Nothing here asks anyone for approval.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -30,8 +24,7 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
     return text ? JSON.parse(text) as any : null;
   };
   try {
-    // Restart the fixture's server with the capability key the bot-side
-    // calls need; the launcher's own environment is otherwise kept.
+    // Restarted with the capability key the bot-side calls need.
     await waitForExit(fixture.child, { signal: "SIGTERM" });
     const log = openSync(logPath, "a", 0o600);
     server = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("../index.ts", import.meta.url))], {
@@ -47,7 +40,6 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
     const { bot } = await runControlOmb(["new-bot", "--name", "Data bot", "--url", url]) as { bot: { id: string; activeTaskId: string } };
     const threadId = bot.activeTaskId;
 
-    // 300 sales rows over three regions and ten days.
     const regions = ["north", "south", "west"];
     const lines = ["region,amount,day"];
     for (let i = 0; i < 300; i++) lines.push(`${regions[i % 3]},${(i % 17) + 1},2026-10-${String((i % 10) + 1).padStart(2, "0")}`);
@@ -63,7 +55,6 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
       return { isError: result.isError === true, data: result.structuredContent as Record<string, any>, text: result.content?.[0]?.text as string };
     };
 
-    // The catalog an engine sees: five tools and the dialect notes.
     const listed = await mcp("tools/list");
     expect(listed.tools.map((tool: { name: string }) => tool.name)).toEqual([...DATA_TOOL_NAMES]);
     expect(listed.instructions).toMatch(/DuckDB/);
@@ -85,7 +76,6 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
     expect(totals.data.rows).toHaveLength(3);
     expect(totals.data.table).toMatch(/^omb_results\./);
 
-    // Writes other than CREATE … AS are refused; bad SQL carries DuckDB's own words.
     const refused = await call("data_sql", { sql: "DELETE FROM sales" });
     expect(refused.isError).toBe(true);
     expect(refused.data.code).toBe("write_refused");
@@ -100,16 +90,11 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
     const chartCard = await call("data_show", { kind: "chart", title: "By region", table: "sales", chart: { type: "bar", x: "region", y: "amount", agg: "sum" } });
     expect(chartCard.isError, chartCard.text).toBe(false);
     expect(chartCard.data.sheet).toHaveLength(2);
-    // The chat receipt names the tool that ran; the card's title is the result's, so a
-    // title like "notice: …" can never be read as a status row or a failed turn.
     const receipts = ((await api("GET", `/api/threads/${threadId}/messages?limit=100`)).messages as Array<Record<string, any>>)
       .filter((message) => message.dataResult);
     expect(receipts.map((message) => [message.tool.name, message.dataResult.title, message.dataResult.cardId]))
       .toEqual([["data_show", "Totals", tableCard.data.id], ["data_show", "By region", chartCard.data.id]]);
 
-    // A message sent about the viewed result: the words are stored exactly as
-    // typed, the context as its own field, and the model gets the hint ahead
-    // of the words, on the turn and again when the same words are regenerated.
     const dump = join(dataDir, "fake-claude-dump.json");
     const providerPrompt = async () => {
       await expect.poll(() => existsSync(dump), { timeout: 20_000 }).toBe(true);
@@ -125,8 +110,7 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
     const sent = await api("POST", `/api/bots/${bot.id}/messages`, { threadId, text: "Only show north.", dataContext: { cardId: tableCard.data.id, draftSql } }, 202);
     expect(sent.message).toMatchObject({ role: "user", text: "Only show north.", dataContext: { cardId: tableCard.data.id, draftSql } });
     const prompt = await providerPrompt();
-    // The envelope opens the turn's text, directly ahead of the person's words
-    // (a fresh session may carry replayed history before the turn itself).
+    // A fresh session may carry replayed history ahead of the turn itself.
     expect(envelope(prompt), prompt).toHaveLength(1);
     expect(prompt.endsWith(`${envelope(prompt)[0]}\n\nOnly show north.`), prompt).toBe(true);
     expect(JSON.parse(envelope(prompt)[0]!.slice("<data-context>".length, -"</data-context>".length))).toMatchObject({ cardId: tableCard.data.id, draftSql, hint: expect.stringContaining("data_describe({id:cardId})") });
@@ -136,17 +120,14 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
     expect(stored.text).toBe("Only show north.");
     expect(stored.text).not.toContain("<data-context>");
     expect(stored.dataContext).toEqual({ cardId: tableCard.data.id, draftSql });
-    // Regenerate resends the same words; the server re-attaches the context itself.
     rmSync(dump, { force: true });
     await api("POST", `/api/bots/${bot.id}/messages/${sent.message.id}/edit`, { threadId, text: "Only show north." }, 202);
     const retried = await providerPrompt();
     expect(envelope(retried), retried).toEqual(envelope(prompt));
     expect(retried.endsWith(`${envelope(prompt)[0]}\n\nOnly show north.`), retried).toBe(true);
     await settled();
-    // The boundary: a table name is not a card id.
     await api("POST", `/api/bots/${bot.id}/messages`, { threadId, text: "Only show south.", dataContext: { cardId: "sales" } }, 400);
 
-    // The panel: the sheet, a page of the table card, the chart as SVG.
     const read = await api("GET", DATA_ROUTES.sheet(bot.id)) as { sheet: DataSheet; tables: Array<{ name: string }> };
     expect(read.sheet.cards.map((card) => [card.kind, card.title, card.status])).toEqual([["table", "Totals", "ready"], ["chart", "By region", "ready"]]);
     expect(read.sheet.sources.map((source) => source.name)).toEqual(["sales"]);
@@ -166,7 +147,6 @@ it("loads, queries, shows, pages, renders and exports through the real server", 
     expect(image.headers.get("content-type")).toMatch(/svg/);
     expect(await image.text()).toMatch(/<svg/);
 
-    // The person runs their own SQL, exports, renames and removes.
     await api("POST", DATA_ROUTES.run(bot.id), { sql: "SELECT count(*) AS n FROM sales", title: "Count" });
     const afterRun = (await api("GET", DATA_ROUTES.sheet(bot.id))).sheet as DataSheet;
     expect(afterRun.cards).toHaveLength(3);

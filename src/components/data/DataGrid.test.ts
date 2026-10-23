@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// Datasource contracts and real AG Grid lifecycle; the isolated fixture checks browser interactions.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, createRef, StrictMode, type RefObject } from "react";
 import { flushSync } from "react-dom";

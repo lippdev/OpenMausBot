@@ -1,14 +1,8 @@
-// One-time codes for saved logins (RFC 6238 TOTP over RFC 4226 HOTP), made
-// at fill time from the login's 2FA setup key. Small enough to own: a base32
-// decoder, one HMAC and the dynamic truncation, with the RFC's own test
-// vectors in totp.test.ts. Counter-based (HOTP) keys are refused: a code
-// that advances on use cannot be shared with the person's own app.
+// TOTP (RFC 6238 over RFC 4226 HOTP) for saved logins; counter-based keys are refused, since a code that advances on use cannot be shared with the person's own app.
 import { createHmac } from "node:crypto";
 
 export type TotpAlgorithm = "SHA1" | "SHA256" | "SHA512";
 
-/** A 2FA setup key as stored: the secret in canonical base32 and the
- * parameters an otpauth:// address may carry. */
 export interface TotpKey {
   secret: string;
   algorithm: TotpAlgorithm;
@@ -36,10 +30,6 @@ export function decodeBase32(text: string): Buffer | null {
   return Buffer.from(bytes);
 }
 
-/** A 2FA setup key from what the person pasted: an otpauth://totp/ address
- * (what a QR code holds) or the bare secret. Null for anything else,
- * including a secret shorter than 80 bits, which is a typo more often than
- * a real key. */
 export function parseTotpKey(raw: unknown): TotpKey | null {
   if (typeof raw !== "string") return null;
   const text = raw.trim();

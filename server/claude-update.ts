@@ -17,17 +17,13 @@ const FALLBACK = "Run `claude update` in Terminal, then refresh Engines.";
 /** Claude Code's npm package: the one ClaudeDriver's install descriptor names. */
 export const CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code";
 
-/** True when `cli` runs the copy Settings installed into the app's own npm
- * prefix (engine-install.ts). That copy shadows every other one on PATH, and
- * `claude update` cannot update it: Claude's updater reinstalls through the
- * first npm it finds, which updates some other copy and leaves this one as it
- * was. A configured path or wrapper is never the app's copy. */
+/** The copy Settings installed into the app's npm prefix shadows every other on PATH, and `claude update` cannot update it:
+ * Claude's updater reinstalls through the first npm it finds. A configured path or wrapper is never the app's copy. */
 export function isAppInstalledClaude(cli: string, binDir: string = enginesBinDir()): boolean {
   const resolved = findCliCandidates(cli)[0];
   return resolved !== undefined && dirname(resolved) === binDir;
 }
 
-/** How the copy the app installed is updated: the way it was installed. */
 export interface AppCopy {
   owns: (cli: string) => boolean;
   reinstall: (cli: string, env: NodeJS.ProcessEnv) => Promise<void>;
@@ -82,10 +78,7 @@ function updateFailure(error: unknown, cli: string): Error {
   return new Error(`Claude update failed${detail ? `: ${detail}` : ""}. ${FALLBACK}`);
 }
 
-/** Update the Claude Code that `cli` runs, then prove which version it now
- * reports: Claude's own updater, or npm for the copy the app installed. The
- * caller owns the environment so credentials can be stripped before the
- * executable (including a configured wrapper) is launched. */
+/** The caller owns the environment, so credentials are stripped before the executable (or a wrapper) launches. */
 export async function updateClaudeCli(
   cli: string,
   env: NodeJS.ProcessEnv,

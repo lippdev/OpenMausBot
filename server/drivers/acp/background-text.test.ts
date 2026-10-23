@@ -1,7 +1,3 @@
-// Memory upkeep's one-shot text call on the ACP engines (generateMemoryText,
-// ./background-text.ts), against the fake ACP CLI: a fresh tool-free session
-// on the engine's own CLI, refusing any tool or permission, and the usage
-// it reports. Main had no such call, so these engines never learned.
 import { chmodSync, existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +8,7 @@ import { ensureDirs } from "../../config.ts";
 import type { ProviderDriver, ProviderInstance, TextGenerationUsage } from "../../contracts.ts";
 import { removeTempDir } from "../../testing/cleanup.ts";
 import * as procs from "../../procs.ts";
+import { BACKGROUND_TEXT_TIMEOUT_MS } from "./background-text.ts";
 import { createAcpDriver, type AcpConfig, type AcpSupport } from "./core.ts";
 import { CursorAgentDriver } from "./cursor.ts";
 import { GeminiAgentDriver } from "./gemini.ts";
@@ -58,7 +55,6 @@ describe("ACP memory one-shot (generateMemoryText)", () => {
     expect(answer).toBe('[{"text":"The person likes jazz","kind":"preference"}]');
     const session = JSON.parse(readFileSync(`${process.env.FAKE_ACP_DUMP}.session.json`, "utf8"));
     expect(session.mcpServers).toEqual([]);
-    // an empty folder of its own, removed afterwards
     expect(session.cwd).toMatch(/omb-acp-memory-/);
     expect(existsSync(session.cwd)).toBe(false);
     expect(usage).toEqual([expect.objectContaining({ input: 12, output: 4 })]);
@@ -82,6 +78,14 @@ describe("ACP memory one-shot (generateMemoryText)", () => {
     process.env.FAKE_ACP_MODE = "permission";
     const engine = await create(GrokAgentDriver);
     await expect(engine.generateMemoryText!("prompt")).rejects.toThrow(/may not use|tried to use a tool/);
+  });
+
+  it("waits as long as the caller's options say", async () => {
+    process.env.FAKE_ACP_MODE = "hang";
+    const engine = await create(GrokAgentDriver);
+    const started = Date.now();
+    await expect(engine.generateMemoryText!("prompt", { timeoutMs: 500 })).rejects.toThrow(/timed out/);
+    expect(Date.now() - started).toBeLessThan(BACKGROUND_TEXT_TIMEOUT_MS);
   });
 
   it("stops on abort", async () => {

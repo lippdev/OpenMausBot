@@ -1,15 +1,7 @@
-// This repo's vitest runner: vitest's own, plus CI-only retries for the known
-// flaky tests in ci-retry-list.json. A listed test that needed a retry is
-// written to OMB_VITEST_RETRY_LOG (one JSON line each), which the vitest job's
-// next step puts in the job summary, so a flake that passed stays visible.
-// Nothing else changes: unlisted tests, and every run outside CI, get no retry.
-//
-// Retries are bounded per file: once a listed test in a file fails all its
-// attempts, that is a real failure, not a flake, and the file's later listed
-// tests get no retry. A regression that breaks a whole fixture (six listed
-// tests in delta-context) then costs one test's extra attempts, not six
-// tests' tripled wall time, which pushed the Linux shard past its job cap
-// and lost the failures' names and annotations with it.
+// vitest's own runner plus CI-only retries for the known flaky tests in
+// ci-retry-list.json; a test that needed a retry is logged to
+// OMB_VITEST_RETRY_LOG for the job summary. Retries are bounded per file: once
+// a listed test fails every attempt, the file's later listed tests get none.
 import { appendFileSync } from "node:fs";
 import type { RunnerTask, RunnerTestCase } from "vitest";
 import { VitestTestRunner } from "vitest/runners";

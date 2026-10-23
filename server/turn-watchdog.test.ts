@@ -1,10 +1,9 @@
-// Stall-watchdog contract: activity keeps a turn alive indefinitely, human
-// approvals pause the clock, silence past the ceiling stalls exactly once.
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import { EngineMemory } from "./engine-memory.ts";
 import type { Message } from "./store.ts";
 import { TurnStops, stoppedTurnOutcome } from "./turn-outcome.ts";
 import { TurnWatchdog, type WatchedTurn } from "./turn-watchdog.ts";
@@ -56,7 +55,6 @@ describe("TurnWatchdog", () => {
     tick(STALL * 100);
     dog.sweep();
     expect(stalls).toHaveLength(0);
-    // the answer restarts the clock rather than inheriting the wait
     dog.setWaitingOnHuman("t1", false);
     tick(STALL - 1);
     dog.sweep();
@@ -75,6 +73,23 @@ describe("TurnWatchdog", () => {
     expect(stalls).toHaveLength(0);
   });
 
+  it("says a turn is waiting exactly while the sweep would spare it", () => {
+    const { dog } = rig();
+    expect(dog.waiting("t1")).toBe(false);
+    dog.watch("t1", "bot1");
+    expect(dog.waiting("t1")).toBe(false);
+    dog.setWaitingOnHuman("t1", true);
+    expect(dog.waiting("t1")).toBe(true);
+    dog.setWaitingOnComputer("t1", true);
+    dog.setWaitingOnHuman("t1", false);
+    expect(dog.waiting("t1")).toBe(true);
+    dog.setWaitingOnComputer("t1", false);
+    expect(dog.waiting("t1")).toBe(false);
+    dog.setWaitingOnHuman("t1", true);
+    dog.settle("t1");
+    expect(dog.waiting("t1")).toBe(false);
+  });
+
   it("lets the computer wait's own deadline govern, then restarts the stall clock", () => {
     const { dog, stalls, tick } = rig();
     dog.watch("t1", "bot1");
@@ -82,7 +97,6 @@ describe("TurnWatchdog", () => {
     tick(STALL * 100);
     dog.sweep();
     expect(stalls).toHaveLength(0);
-    // Resolving an unrelated human ask cannot clear the resource wait.
     dog.setWaitingOnHuman("t1", false);
     tick(STALL * 100);
     dog.sweep();
@@ -110,11 +124,9 @@ describe("TurnWatchdog", () => {
   });
 });
 
-// The harness's stall handler (index.ts), run without starting a server: the
-// requester of a stalled teammate hears the stall and what the turn did, never
-// a bare "The coordinated turn was interrupted".
+// The harness's stall handler (index.ts), run without starting a server.
 describe("the stall handler", () => {
-  function load() {
+  function load(engineMemory = new EngineMemory({ enabled: false })) {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const from = source.indexOf("\nconst TURN_STALL_MS"), to = source.indexOf("\nwatchdog.start();");
     if (from < 0 || to <= from) throw new Error("Stall handler section moved");
@@ -140,6 +152,7 @@ describe("the stall handler", () => {
       settleDirectFollowup: (generation: string | undefined, outcome: { text: string }) => settled.push({ generation, text: outcome.text }),
       finalizeDelegationWatch: (_threadId: string, _ok: boolean, _reply: string, why: string) => delegations.push(why),
       setTimeout: () => ({ unref() {} }),
+      engineMemory,
     });
     vm.runInContext(code, context, { filename: "index.ts (stall handler fixture)" });
     return { context, settled, delegations };
@@ -149,15 +162,20 @@ describe("the stall handler", () => {
     const { context, settled, delegations } = load();
     context.watchdog.options.onStall({ threadId: "t1", botId: "eli" });
     const told = 'No activity for 20 minutes — the turn was stopped. Before it stopped it made 1 tool call: Bash ×1.\nIts last message, quoted: "Exporting the second half now."';
-    // delegate_bot rides the job runtime now (#2702): its requester hears a
-    // stall through the same settle as every assignment, no separate watch.
     expect(settled).toEqual([{ generation: "gen-1", text: told }]);
     expect(delegations).toEqual([]);
   });
 
-  // A harness stop that leaves its engine attached (a Company change) notes
-  // its cause first: the turn's own end, settling the requester before the
-  // harness's teardown does, reports that cause instead of "interrupted".
+  it("says when the Cloud ran out of memory while the stalled turn ran", () => {
+    const memory = new EngineMemory({ enabled: true, read: () => ({ totalBytes: 4 * 1024 ** 3, availableBytes: 0, swapFreeBytes: 0, oomKills: 0, fullStall10: 60 }),
+      groups: () => new Map(), log: () => {} });
+    memory.turnStarted("t1");
+    memory.tick();
+    const { context, settled } = load(memory);
+    context.watchdog.options.onStall({ threadId: "t1", botId: "eli" });
+    expect(settled[0]!.text).toMatch(/^No activity for 20 minutes — the turn was stopped\. This Cloud ran out of memory while 1 task ran at once \(not a problem with the AI provider\)\. Before it stopped/);
+  });
+
   it("gives a stopped turn's own end the cause the harness noted before interrupting it", () => {
     const { context } = load();
     expect(context.stoppedTurnText("t1", "turn-1", undefined, "interrupted")).toMatch(/^The turn did not complete \(interrupted\)\. /);

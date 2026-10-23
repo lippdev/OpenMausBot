@@ -89,8 +89,6 @@ describe("desktop companion endpoint", () => {
       "mausbot.si",
       "https://evilmausbot.si",
       `https://${LABEL}.evilmausbot.si`,
-      // Only the names the control plane issues: never another record in
-      // either zone, which may serve something else entirely.
       "https://www.mausbot.si",
       "https://app.mausbot.si",
       "https://accounts.openmausbot.com",
@@ -111,12 +109,10 @@ describe("desktop companion endpoint", () => {
     expect(desktopCompanionAccess({ [DESKTOP_COMPANION_FIELD]: hostedAccess })).toEqual(
       hostedAccess,
     );
-    // A saved pairing with a computer whose address is on mausbot.si loads.
     const secondDomain = { ...access, endpoint: `https://${LABEL}.mausbot.si` };
     expect(desktopCompanionAccess({ [DESKTOP_COMPANION_FIELD]: secondDomain })).toEqual(
       secondDomain,
     );
-    // One that names any other host in those zones does not.
     expect(
       desktopCompanionAccess({ [DESKTOP_COMPANION_FIELD]: { ...access, endpoint: "https://app.mausbot.si" } }),
     ).toBeNull();
@@ -194,7 +190,6 @@ describe("desktop companion pairing", () => {
       expect.objectContaining({ method: "POST" }),
     );
 
-    // Any other name in the zone never receives the pairing code.
     await expect(
       pairDesktopCompanion({
         endpoint: "https://app.mausbot.si",

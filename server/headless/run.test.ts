@@ -1,6 +1,3 @@
-// run and wait through the real command line handling, against stand-in MCP
-// tools and API reads: what is sent, how a long wait is carried across tool
-// calls, what each --on-input and --on-timeout does, and the exit codes.
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,7 +64,6 @@ describe("run", () => {
     expect(h.calls[0]!.args).toEqual({ target_type: "bot", target_id: "lead", title: "Rehearse the launch" });
     expect(h.calls[1]!.args).toEqual({ bot_id: "lead", task_id: "t1", text: "Rehearse the launch\nof example.com", send_id: expect.stringMatching(/^cli-[\w-]{16}$/) });
     expect(h.calls[2]!.args).toEqual({ target_type: "bot", target_id: "lead", task_id: "t1", timeout_seconds: 120, scope: "job", since_ms: 1_000 });
-    // the job was read (for its since) before anything was sent
     expect(h.requests.map((request) => request.path)).toEqual(["/api/bots?messages=0", "/api/threads/t1/job?"]);
     expect(result).toMatchObject({ ok: true, exitCode: 0, threadId: "t1", since: 1_000, state: "completed",
       reply: { text: expect.stringContaining("Report:"), files: ["report.md", "shots/1.png"] } });
@@ -159,13 +155,8 @@ describe("wait", () => {
     expect((await answered.run(["wait", "--bot", "lead", "--on-input", "wait", "--json"])).code).toBe(0);
     expect(answered.calls[1]!.args).toMatchObject({ after_version: "v1" });
 
-    // still waiting on the answer when the time runs out: that is a timeout
     expect((await harness([needs], { delayMs: 50 }).run(["wait", "--bot", "lead", "--on-input", "wait", "--timeout", "1", "--json"])).code).toBe(4);
 
-    // After the Stop the job is read again from the same moment: what the Stop
-    // left is stopped in each teammate's own conversation, once per
-    // conversation; queued work (dropped by the Stop) never is, since its
-    // conversation may be busy with something else.
     const left = [...needs.job.nodes,
       { id: "a4", botId: "lena", botName: "Lena", threadId: "l1", status: "queued" },
       { id: "a5", botId: "priya", botName: "Priya", threadId: "p1", status: "running" },
@@ -201,8 +192,6 @@ describe("wait", () => {
     expect((await harness([hiddenFailure]).run(["wait", "--bot", "lead", "--json"])).code).toBe(0);
     expect((await harness([hiddenFailure]).run(["wait", "--bot", "lead", "--strict", "--json"])).code).toBe(1);
     expect((await harness([waited("failed", "failed", job("failed", "v1"))]).run(["wait", "--bot", "lead", "--json"])).code).toBe(1);
-    // the exit code follows the job's own state: a lead whose work failed is
-    // "settled" in MCP's older words, and still fails the run
     expect((await harness([waited("settled", "failed", job("failed", "v1"))]).run(["wait", "--bot", "lead", "--json"])).code).toBe(1);
   });
 
@@ -214,7 +203,6 @@ describe("wait", () => {
     const { code, progress } = await first;
     expect(code).toBe(0);
     expect(progress.filter((event: Rec) => event.event === "reconnecting")).toEqual([{ event: "reconnecting", inMs: 1_000, threadId: "t1" }]);
-    // asked again for the same job from the same moment
     expect(h.calls.filter((call) => call.name === "wait_for_conversation").map((call) => call.args.since_ms)).toEqual([1_000, 1_000, 1_000]);
     expect((await harness([waited("settled", "completed", job("completed", "v1"))], { drops: [proxy] }).run(["wait", "--thread", "t1", "--json"])).code).toBe(0);
     const refused = Object.assign(new Error("OpenMausBot API error (401): {\"error\":\"unauthorized\"}"), { status: 401 });

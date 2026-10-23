@@ -1,7 +1,3 @@
-// A widget's chart: its Vega-Lite spec (shared/widget-chart.ts) drawn by
-// vega-embed with the shared config, the way the Data panel draws its charts.
-// vega-embed loads with the first chart, not with the app; until it has drawn,
-// the chart's space is held so the message does not jump.
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Result } from "vega-embed";
 import { useColorScheme } from "@/lib/color-scheme";
@@ -17,7 +13,6 @@ export function WidgetChart({ node }: { node: WidgetNode }) {
   const drawn = useRef<Result | null>(null);
   const [width, setWidth] = useState(WIDGET_CHART_WIDTH);
   const [failed, setFailed] = useState<string | null>(null);
-  // A message re-renders with an equal node; redraw only when the chart changes.
   const specText = useMemo(() => JSON.stringify(widgetChartSpec(node)), [node]);
   const height = widgetChartHeight(node, width);
   const size = useRef({ width, height });

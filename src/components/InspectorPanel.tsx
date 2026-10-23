@@ -1,16 +1,3 @@
-// The raw event inspector: what a thread's turns actually looked like on
-// the wire, for the moment a bot misbehaves and the chat view can't say
-// why. Three lenses over the same thread:
-//
-//   Run log — readable, redacted activity from the visible conversation.
-//   Events — the harness's normalized RuntimeEvent stream: turns, tool
-//            items, requests, token usage, errors. Follows the app's live
-//            stream.
-//   Raw    — the provider's own protocol messages, verbatim (the native
-//            tee). Read from disk; refreshed when a turn settles.
-//
-// Nothing here is captured for the panel's sake — both logs already exist
-// under ~/.openmausbot (server/harness/bus.ts, server/drivers/native.ts).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bug, ChevronDown, ChevronRight, RefreshCw, X } from "lucide-react";
 import { useStore, visibleMessages, type Bot } from "@/state/store";
@@ -27,7 +14,6 @@ type Lens = "run" | "events" | "raw";
 
 export function InspectorPanel({ bot }: { bot: Bot }) {
   const { dispatch } = useStore();
-  // Docked flush under the Windows caption corner: drop the header 16px.
   const { padClass, dragProps } = useCaptionChrome();
   const threadId = bot.threadId;
   const [lens, setLens] = useState<Lens>("run");
@@ -47,8 +33,7 @@ export function InspectorPanel({ bot }: { bot: Bot }) {
     try {
       const res = await fetch(`/api/threads/${threadId}/events?limit=400`, { signal: controller.signal });
       if (!res.ok) throw new Error(`${res.status}`);
-      // SAFETY: this same-version renderer calls the harness's typed
-      // inspector endpoint; malformed transport data is handled by catch.
+      // SAFETY: the same-version harness's typed inspector endpoint; malformed transport data is handled by catch.
       const next = (await res.json()) as InspectorPage;
       if (controller.signal.aborted) return;
       setPage(next);
@@ -61,7 +46,6 @@ export function InspectorPanel({ bot }: { bot: Bot }) {
     }
   }, [threadId]);
 
-  // history from disk on open / thread change
   useEffect(() => {
     setPage(null);
     setExpanded(new Set());
@@ -70,9 +54,6 @@ export function InspectorPanel({ bot }: { bot: Bot }) {
     return () => loadAbort.current?.abort();
   }, [load]);
 
-  // live: append this thread's runtime events as the app's stream carries
-  // them, and re-read the disk when a turn settles so the native tee (not on
-  // the stream) catches up.
   useEffect(() => {
     let alive = true;
     let settle: ReturnType<typeof setTimeout> | null = null;
@@ -82,8 +63,7 @@ export function InspectorPanel({ bot }: { bot: Bot }) {
 
     const appendRuntime = (runtime: RuntimeEvent) => {
       setPage((prev) => {
-        // A disk refresh and replay can overlap. eventId is canonical, so a
-        // replayed entry already present in the snapshot is an exact no-op.
+        // eventId is canonical, so a replayed entry already in the snapshot is a no-op.
         if (
           prev?.entries.some(
             (entry) => entry.kind === "runtime" && entry.data.eventId === runtime.eventId,
@@ -105,19 +85,14 @@ export function InspectorPanel({ bot }: { bot: Bot }) {
       const generation = ++refreshGeneration;
       refreshing = true;
       await load();
-      // A later refresh aborts the earlier fetch. Only its completion owns
-      // the buffered live tail, otherwise the earlier finally can flush
-      // frames immediately before the newer snapshot overwrites them.
+      // A later refresh aborts the earlier fetch, and only its completion owns the buffered live tail.
       if (!alive || generation !== refreshGeneration) return;
       refreshing = false;
-      // A failed reload keeps the previous page, so frames buffered during
-      // it still belong there; after a good one, eventId drops repeats.
       flushPendingRuntime();
     };
     const requestRefresh = () => void refresh();
     managedRefresh.current = requestRefresh;
 
-    // A gap the stream could not replay is on disk: reload it.
     const stopLive = listenLiveFrames({
       onMissedFrames: requestRefresh,
       onFrame: (frame) => {
@@ -146,7 +121,6 @@ export function InspectorPanel({ bot }: { bot: Bot }) {
   );
   const rows = useMemo(() => toRows(entries), [entries]);
 
-  // follow the tail unless the user has scrolled up to read
   useEffect(() => {
     const el = listRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;

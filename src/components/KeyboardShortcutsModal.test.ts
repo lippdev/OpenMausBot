@@ -11,7 +11,6 @@ vi.mock("@/lib/send-key", async (importOriginal) => ({
 
 import { KeyboardShortcutsModal } from "./KeyboardShortcutsModal";
 
-/** The keycaps drawn beside a row. */
 function keys(html: string, description: string): string[] {
   const row = html.slice(html.indexOf(`>${description}</span>`)).split("</div>")[0]!;
   return [...row.matchAll(/<kbd[^>]*>([^<]*)<\/kbd>/g)].map((match) => match[1]!);

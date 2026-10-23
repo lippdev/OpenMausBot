@@ -1,12 +1,3 @@
-// The one-time imports of what the server kept before the job runtime, into
-// assignment rows, so an update that lands while teammates are working loses
-// nothing: the restart policy then treats the cut turns like any other.
-//
-// Two ledgers: the room-handoff tree (room-handoffs.json, PR 2) and the
-// delegation ledger (delegations.json + delegation-receipts.json, PR 3).
-// Ids, lineage, statuses and results carry over, so an id a bot still holds
-// (a legacy task id for check_delegation) answers from the runtime; each
-// file is renamed `*.migrated`, never deleted.
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
@@ -43,9 +34,7 @@ function origin(node: LegacyNode): Origin {
   return { kind: "outside", source: "chat", ref: node.threadId };
 }
 
-/** Imports `file` into the store and renames it `<file>.migrated`. Returns
- * the rows written (0 when there is no file). Rows that already exist are
- * left alone, so a crash between the writes and the rename is harmless. */
+/** Idempotent: existing rows are left alone, so a crash between the writes and the rename is harmless. */
 export function importLegacyHandoffs(store: RuntimeStore, file: string, now: number): number {
   if (!existsSync(file)) return 0;
   const nodes = z.array(legacyNode).parse(JSON.parse(readFileSync(file, "utf8")));
@@ -55,7 +44,6 @@ export function importLegacyHandoffs(store: RuntimeStore, file: string, now: num
     for (let cur = n; cur.parentId && byId.has(cur.parentId) && d < 64; cur = byId.get(cur.parentId)!) d += 1;
     return d;
   };
-  // Parents before children, so every row's lineage exists when it lands.
   const ordered = [...nodes].sort((a, b) => depth(a) - depth(b) || a.createdAt - b.createdAt);
   let written = 0;
   store.transaction(() => {
@@ -100,12 +88,6 @@ export function importLegacyHandoffs(store: RuntimeStore, file: string, now: num
   return written;
 }
 
-// ── the delegation ledger (delegations.json, delegation-receipts.json) ──
-
-/** How the host names what the ledger did not record: the thread a bot's
- * work lands in when an item named none (its standing thread), and the bot
- * a source thread belongs to. Without it those rows carry an empty thread
- * id (types.ts, Assignee) or an unknown bot. */
 export interface LegacyThreadResolver {
   standingThreadOf(botId: string): string | undefined;
   botOfThread(threadId: string): string | undefined;
@@ -116,14 +98,11 @@ export interface LegacyLedgerOptions {
   log?: (line: string) => void;
 }
 
-/** The ledger's own origin record (peer-provenance.ts workOriginSchema). */
 const legacyWorkOrigin = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("user"), request: z.string().min(1) }),
   z.object({ kind: z.literal("outside") }),
 ]);
 
-/** delegations.ts PendingDelegationItem, as written: the task id, the
- * target, the words, and the marks that decide the row's mode and reply. */
 const legacyItem = z.object({
   id: z.string().min(1),
   sourceBotId: z.string().default(""),
@@ -138,7 +117,6 @@ const legacyItem = z.object({
 }).passthrough();
 type LegacyItem = z.infer<typeof legacyItem>;
 
-/** delegations.ts DelegationReceipt: the terminal record a bot reads back. */
 const legacyReceipt = z.object({
   id: z.string().min(1),
   sourceThreadId: z.string().min(1),
@@ -149,11 +127,8 @@ const legacyReceipt = z.object({
 }).passthrough();
 type LegacyReceipt = z.infer<typeof legacyReceipt>;
 
-/** Receipt statuses whose turn ran; the rest never started (a denied or
- * expired approval, a cancel, a drop). */
 const RAN: ReadonlySet<string> = new Set(["done", "failed", "error"]);
 
-/** When the ledger recorded no source bot and the host cannot name one. */
 const UNKNOWN_BOT = "unknown";
 
 const legacyRootId = (sourceThreadId: string): string => `legacy-${sourceThreadId}`;
@@ -163,8 +138,6 @@ function ledgerOrigin(origin: LegacyItem["origin"], threadId: string): Origin {
   return { kind: "outside", source: "chat", ref: threadId };
 }
 
-/** A receipt's outcome as the runtime types it: done; a refused or elapsed
- * approval; the person's stop; anything else is the provider's failure. */
 function receiptEnd(status: string): { status: Status; outcome: Outcome } {
   switch (status) {
     case "done": return { status: "completed", outcome: "done" };
@@ -175,8 +148,6 @@ function receiptEnd(status: string): { status: Status; outcome: Outcome } {
   }
 }
 
-/** The file's JSON, or undefined when it is missing or unreadable: the
- * legacy loader started empty on a corrupt file, and so does the import. */
 function readJson(file: string, log: (line: string) => void): unknown {
   if (!existsSync(file)) return undefined;
   try {
@@ -187,16 +158,7 @@ function readJson(file: string, log: (line: string) => void): unknown {
   }
 }
 
-/** Imports `<dataDir>/delegations.json` (queued hand-offs, per source
- * thread) and `<dataDir>/delegation-receipts.json` (terminal records) into
- * the store and renames each `*.migrated`. Returns the rows written.
- *
- * Every source thread with queued items gets one root in `waiting` (or
- * `completed` when it awaits nothing, as end() would leave it) and one
- * queued child per item, the child's id the legacy task id; a receipt is a
- * terminal row under the thread's root, created `completed` when none is
- * live. Rows that already exist are left alone, so a crash between the
- * writes and the rename is harmless, and a second call writes nothing. */
+/** Idempotent: existing rows are left alone, so a crash between the writes and the rename is harmless. */
 export function importLegacyDelegations(store: RuntimeStore, dataDir: string, now: number, options: LegacyLedgerOptions = {}): number {
   const log = options.log ?? (() => {});
   const threads = options.threads;
@@ -229,7 +191,6 @@ export function importLegacyDelegations(store: RuntimeStore, dataDir: string, no
   const botOf = (threadId: string, recorded?: string): string => recorded || threads?.botOfThread(threadId) || UNKNOWN_BOT;
   let written = 0;
   store.transaction(() => {
-    // Queued items: one root per source thread, one child per item.
     for (const [threadId, items] of queues) {
       const rootId = legacyRootId(threadId);
       const sourceBotId = botOf(threadId, items.find((item) => item.sourceBotId)?.sourceBotId);
@@ -276,8 +237,6 @@ export function importLegacyDelegations(store: RuntimeStore, dataDir: string, no
         written += 1;
       }
     }
-    // Receipts: terminal rows under the thread's root, created completed
-    // when no live root exists for the thread.
     for (const receipt of receipts) {
       if (store.get(receipt.id)) continue;
       const rootId = legacyRootId(receipt.sourceThreadId);

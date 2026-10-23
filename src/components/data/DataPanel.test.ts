@@ -1,6 +1,4 @@
 // @vitest-environment happy-dom
-// The Data tab shows one result, with earlier results in History and
-// a single live SQL field and quiet table references in the bottom dock.
 import { act, createElement } from "react";
 import { EditorView } from "codemirror";
 import { flushSync } from "react-dom";
@@ -61,7 +59,6 @@ const type = (text: string) => {
   flushSync(() => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } }));
 };
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-/** Type, then wait out the pause after which the text runs. */
 const typeAndRun = async (text: string) => {
   type(text);
   await pause(LIVE_RUN_DELAY_MS + 10);
@@ -329,7 +326,6 @@ describe("DataPanel", () => {
     expect(runRequests()).toHaveLength(1);
     expect(JSON.parse(runRequests()[0]![1].body)).toEqual({ sql: "select 1" });
     expect(host.querySelector('[data-testid="data-result-footer"]')?.textContent).toContain("Running…");
-    // Typed before the card arrives: no second card, the text waits for it.
     await typeAndRun("select 1 + 1");
     expect(runRequests()).toHaveLength(1);
     const created = card("c_new", { by: "person", status: "running", result: null, rowCount: undefined, sql: "select 1" });
@@ -339,7 +335,6 @@ describe("DataPanel", () => {
     expect(host.querySelector("article")?.getAttribute("data-card-id")).toBe("c_new");
     expect(editorValue()).toBe("select 1 + 1");
     expect(viewedResult()).toEqual({ botId: "pepper", threadId: "thread-1", cardId: "c_new", draftSql: "select 1 + 1" });
-    // The waiting text runs on the new card; with no result yet it is a plain re-run, not a live edit.
     expect(runRequests()).toHaveLength(2);
     expect(JSON.parse(runRequests()[1]![1].body)).toEqual({ cardId: "c_new", sql: "select 1 + 1" });
     answerCreate({ card: { id: "c_new" }, result: { id: "c_new" } });
@@ -383,7 +378,6 @@ describe("DataPanel", () => {
     expect(host.querySelectorAll("article")).toHaveLength(1);
     expect(host.querySelector("article")?.getAttribute("aria-label")).toBe("Reading");
     expect(host.querySelector("article h3, article header")).toBeNull();
-    // A text result has no SQL: the box is there, empty, for a new query.
     expect(editorValue()).toBe("");
     expect(host.querySelector('[data-testid="sources-strip"]')?.textContent).toContain("sales");
     expect(host.querySelector('[data-testid="markdown"]')?.textContent).toBe("**Up** 12%");
@@ -402,7 +396,6 @@ describe("DataPanel", () => {
     expect(host.querySelector('[data-testid="data-result-footer"] [aria-label="Export"]')).not.toBeNull();
     expect(host.querySelector('[data-testid="data-result-footer"] [aria-label="Enter fullscreen"]')).not.toBeNull();
     expect(strip.querySelectorAll("button")).toHaveLength(0);
-    // The table card paged its rows from the server; the text card did not.
     expect(fixture.api).toHaveBeenCalledWith("/api/bots/pepper/data/page", expect.objectContaining({ method: "POST" }));
     expect(host.querySelector('[data-testid="data-card-table"]')?.textContent).toContain("3 rows");
     expect(fixture.embedLoaded).toBe(false);
@@ -440,7 +433,6 @@ describe("DataPanel", () => {
     await settle();
     expect(cancelRequests().map(([, init]) => JSON.parse(init.body))).toEqual([{ cardId: "slow" }]);
     expect(editorValue()).toBe("select * from slow");
-    // Still editable: with no result to keep, an edit re-runs the card outright.
     const editor = editorDom();
     await typeAndRun("select 5");
     expect(JSON.parse(runRequests()[0]![1].body)).toEqual({ cardId: "slow", sql: "select 5" });
@@ -470,9 +462,7 @@ describe("DataPanel", () => {
     holdRuns();
     render();
     await settle();
-    // Five keystrokes inside the pause: one run, with the final text.
-    // Checked before any await: the pause is real time, and a slow runner's
-    // settle() can outlast it.
+    // Checked before any await: the pause is real time, and a slow runner's settle() can outlast it.
     for (const text of ["s", "se", "sel", "sele", "select 42"]) type(text);
     expect(runRequests()).toHaveLength(0);
     await pause(LIVE_RUN_DELAY_MS + 10);
@@ -481,7 +471,6 @@ describe("DataPanel", () => {
     expect(JSON.parse(runRequests()[0]![1].body)).toEqual({ cardId: "orders", sql: "select 42", live: true });
     const firstSignal = runRequests()[0]![1].signal as AbortSignal;
     expect(firstSignal.aborted).toBe(false);
-    // Two edits further apart than the pause: two runs, the first interrupted.
     await typeAndRun("select 43");
     expect(runRequests()).toHaveLength(2);
     expect(firstSignal.aborted).toBe(true);
@@ -687,7 +676,6 @@ describe("DataPanel", () => {
     await settle();
     expect(fixture.embed).toHaveBeenCalledTimes(2);
     expect(fixture.embed.mock.calls[1]![1]).toMatchObject({ datasets: { table: [{ n: 9 }, { n: 8 }, { n: 7 }] } });
-    // Unrelated broadcasts leave the active chart alone.
     fixture.sheets = { pepper: { ...fixture.sheets.pepper!, updatedAt: "2026-10-09T12:00:00Z" } };
     render();
     await settle();

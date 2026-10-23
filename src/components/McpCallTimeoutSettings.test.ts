@@ -1,8 +1,4 @@
 // @vitest-environment happy-dom
-// Settings → General → MCP calls. A server older than the setting (a remote
-// server or a Cloud this app is newer than) sends a config with no `mcp`
-// section; the card shows the 10 minutes that server uses instead of
-// crashing Settings, and a save still sends the shape the server expects.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -21,7 +17,6 @@ vi.mock("@/state/store", () => ({
   useStore: () => ({ state: { config: fixture.config }, dispatch: fixture.dispatch }),
 }));
 
-// A config as a server from before the setting sends it: everything else, no `mcp`.
 const olderServerConfig = { rooms: { turnTimeoutMinutes: 5 }, composio: { configured: false }, box: { configured: false }, vps: { configured: false, sshAlias: "" } };
 
 let host: HTMLDivElement;
@@ -39,7 +34,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   setLocale("en");
   fixture.config = undefined;
-  // as the real store does: the server's reply becomes the config Settings reads
   fixture.dispatch.mockImplementation((action: { type: string; config?: Record<string, unknown> }) => {
     if (action.type === "configStatus") fixture.config = action.config;
   });

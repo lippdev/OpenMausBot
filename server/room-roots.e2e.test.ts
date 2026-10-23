@@ -1,15 +1,3 @@
-// Every room member's turn a root of the job runtime (docs/runtime-contract.md
-// §10 PR 5), end to end: the real server, the scripted fake Claude
-// (server/testing/room-handoff-agent.ts) as the engine. A person's room
-// message runs each responder as a root in the room thread; a member's
-// coordinate_bots lands under its own root; a member's card parks its root
-// while the room keeps taking messages; Stop in the room settles the card;
-// a restart reruns a cut member turn once (never one that acted outward,
-// never a goal step); the computer seat parks a member's turn and the root
-// continues when the seat frees; a chained @mention is a root of its own.
-// Graded on runtime state (DATA_DIR/runtime.db), the stored chats and what
-// each fake turn was told, never on model judgment. Each scenario runs on
-// its own isolated server (runtime-roots.e2e's harness).
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,19 +14,12 @@ import { hostTimeout } from "./testing/host-timeout.ts";
 import { ownTurnText } from "./testing/room-handoff-agent.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-/** The first line of a turn a restart cut and ran again (tree.ts restartNote). */
 const RERUN_NOTE = "OpenMausBot restarted while your previous turn here was running";
-/** The chip a root's rerun writes where it runs (index.ts runRoomRootTurn). */
 const RERUN_CHIP = "Resuming after a restart";
-/** The lane line a member's answered execution carries (index.ts). */
 const SECRET_PROVIDED = "OpenMausBot credential update: the user securely provided";
-/** The continuation a freed computer seat opens with (index.ts COMPUTER_FREE_NOTE). */
 const SEAT_FREE = "the computer this conversation waited for is free again";
-/** How a cut turn ends when a restart finds it already acted outward (runtime/tree.ts INTERRUPTED_OUTWARD). */
 const INTERRUPTED_OUTWARD = "Interrupted by an OpenMausBot restart after it already";
-/** Every resume of a requester opens with this (envelope.ts composeResume). */
 const SETTLED = "Your downstream room requests have settled.";
-/** What a goal step's root ends with when a restart ended its run (index.ts runRoomRootTurn). */
 const GOAL_RUN_ENDED = "The goal run this step belonged to ended with the restart.";
 const INTERRUPTED_LINE = "turn interrupted — OpenMausBot restarted";
 
@@ -51,8 +32,6 @@ interface RuntimeDb {
   events: Array<{ assignmentId: string; kind: string; detail?: string }>;
 }
 
-/** One read-only snapshot of DATA_DIR/runtime.db: every assignment record
- * (the json column, as the runtime stores it) and every event. */
 function readRuntimeDb(dataDir: string): RuntimeDb {
   const path = join(dataDir, "runtime.db");
   if (!existsSync(path)) return { assignments: [], events: [] };
@@ -68,14 +47,10 @@ function readRuntimeDb(dataDir: string): RuntimeDb {
   }
 }
 
-/** Every text a chat row carries: its label, its output, its words. */
 const chipText = (message: any): string => [message.tool?.name, message.tool?.output, message.text].filter(Boolean).join("\n");
 
 type Responder = { kind: "member"; botId: string } | { kind: "mentions" } | { kind: "everyone" };
 
-/** `fake`: the fake engine's knobs (FAKE_CLAUDE_*), also on every restart.
- * `scripted: false`: the plain fake engine (its mode and tool calls from
- * `fake`) instead of the scripted agent. */
 async function scenario(test: (f: any) => Promise<void>, options: { fake?: Record<string, string>; scripted?: boolean } = {}) {
   const parentEnv: NodeJS.ProcessEnv = { ...process.env, ...options.fake };
   const session = await launchVerificationServer(parentEnv, undefined, undefined, undefined, undefined, { scripted: options.scripted !== false });
@@ -84,9 +59,6 @@ async function scenario(test: (f: any) => Promise<void>, options: { fake?: Recor
   let server: ChildProcess = session.child;
   let restarted = false;
   let roomThread: string | undefined;
-  /** Stop this server as a quit or update would (SIGTERM) and start it
-   * again on the same data and port; `before` runs on the stopped data
-   * (what the operator's grant does to the stored bots). */
   const restart = async (signal: NodeJS.Signals, extraEnv: Record<string, string> = {}, before?: () => void) => {
     await waitForExit(server, { signal });
     before?.();
@@ -105,7 +77,7 @@ async function scenario(test: (f: any) => Promise<void>, options: { fake?: Recor
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000) });
       const raw = await response.text();
       let parsed: any = raw;
-      try { parsed = JSON.parse(raw); } catch { /* text */ }
+      try { parsed = JSON.parse(raw); } catch {}
       return { status: response.status, body: parsed };
     };
     const cli = (...args: string[]) => runControlOmb([...args, "--url", url]) as Promise<any>;
@@ -119,31 +91,25 @@ async function scenario(test: (f: any) => Promise<void>, options: { fake?: Recor
     };
     writeFileSync(planPath, JSON.stringify(plan));
 
-    /** A room, set up (no setup card), with the responder rule given. */
     const room = async (name: string, memberIds: string[], defaultResponder: Responder) => {
       const created = await api("POST", "/api/groups", { name, memberIds, setup: { bulletin: "", defaultResponder } });
       expect(created.status, JSON.stringify(created.body)).toBeLessThan(300);
       roomThread = created.body.group.threadId;
       return created.body.group as { id: string; threadId: string };
     };
-    /** The person's own line, from the app, into the room. */
     const post = async (group: { id: string; threadId: string }, text: string, extra: Record<string, unknown> = {}) => {
       const sent = await api("POST", `/api/groups/${group.id}/messages`, { text, threadId: group.threadId, ...extra });
       expect(sent.status, JSON.stringify(sent.body)).toBeLessThan(300);
       return sent.body;
     };
-    /** The room as the app reads it (working, busyBotId). */
     const roomView = async (groupId: string) => ((await api("GET", "/api/bots?messages=0")).body.groups as any[]).find((group) => group.id === groupId);
     const bots = async () => (await api("GET", "/api/bots?messages=0")).body.bots as any[];
     const db = () => readRuntimeDb(dataDir);
     const roots = () => db().assignments.filter((row) => !row.parentId);
-    /** The roots whose turn ran in this room thread, oldest first. */
     const roomRoots = (threadId: string) => roots().filter((row) => row.assignee?.destination?.threadId === threadId);
     const eventsOf = (id: string) => db().events.filter((event) => event.assignmentId === id).map((event) => event.kind);
-    /** Every scripted turn a fake Claude bot ran, in order. */
     const turns = (botId?: string): any[] => jsonl(`${planPath}.evidence.jsonl`).filter((turn) => !botId || turn.botId === botId);
     const turn = (key: string) => turns().find((candidate) => candidate.planKey === key);
-    /** What a turn itself was asked, after any replayed history. */
     const own = (record: any): string => ownTurnText(record?.prompt);
     const messages = async (threadId: string): Promise<any[]> => (await api("GET", `/api/threads/${threadId}/messages?limit=300`)).body.messages ?? [];
     const chips = async (threadId: string, text: string) => (await messages(threadId)).filter((message) => chipText(message).includes(text));
@@ -173,8 +139,6 @@ async function scenario(test: (f: any) => Promise<void>, options: { fake?: Recor
       console.error(`room roots fixture state:\n${JSON.stringify(summary, null, 1)}`);
       throw error;
     }
-    // No bot ever ran a turn its script did not plan: no duplicate
-    // dispatch, no resume nobody expected, nothing after a Stop.
     expect(turns().filter((record) => record.unplanned).map((record) => own(record).slice(0, 300))).toEqual([]);
   } finally {
     if (restarted) await waitForExit(server, { signal: "SIGTERM" });
@@ -182,12 +146,8 @@ async function scenario(test: (f: any) => Promise<void>, options: { fake?: Recor
   }
 }
 
-/** The room's rows: every root in its thread and every row under them. */
 const nothingLive = (f: any) => f.db().assignments.filter((row: any) => !["completed", "failed", "cancelled"].includes(row.status));
 
-// R1. A person's room message runs each responder as a root in the room
-// thread: one root per member turn, the person as requester, their words
-// as the origin, destination room_thread; each completes, nothing lingers.
 it("R1 runs each responder of a person's room message as a root in the room thread", () => scenario(async (f) => {
   const mira = await f.bot("Mira", "Engineering");
   const room = await f.room("Engineering", [f.clive.id, mira.id], { kind: "mentions" });
@@ -215,16 +175,10 @@ it("R1 runs each responder of a person's room message as a root in the room thre
   expect(f.turns().map((record: any) => record.planKey).sort()).toEqual(["C0", "M0"]);
 }), hostTimeout(60_000));
 
-// R2. A member's coordinate_bots lands under the member's own root (no root
-// of its own, no lazy one): the hand-off is the root's child in the same
-// room thread, its result resumes the member, and the row carries the level
-// the teammate's turn really runs with — a Chief's Full flows into the room
-// with the hand-off (invariant I6).
 it("R2 a member's coordinate_bots reuses its turn's root, and a Chief's Full reaches the teammate's row and turn", () => scenario(async (f) => {
   const mira = await f.bot("Mira", "Engineering");
   expect((await f.api("PATCH", `/api/bots/${f.clive.id}`, { chiefOfStaff: true, managedSections: ["Engineering"], acknowledgePeerScope: true })).status).toBe(200);
-  // Full on the Chief is the operator's grant, seeded on the stored record
-  // while the server is down (as full-access-workflows.e2e seeds it).
+  // Full on the Chief is the operator's grant, seeded on the stored record while the server is down.
   await f.restart("SIGTERM", {}, () => {
     const stored = JSON.parse(readFileSync(join(f.dataDir, "bots.json"), "utf8"));
     const chief = stored.find((candidate: any) => candidate.id === f.clive.id);
@@ -248,15 +202,12 @@ it("R2 a member's coordinate_bots reuses its turn's root, and a Chief's Full rea
     assignee: { botId: mira.id, destination: { kind: "room_thread", groupId: room.id, threadId: room.threadId } },
     requester: { kind: "bot_turn", botId: f.clive.id, threadId: room.threadId, chief: true } });
   expect(f.db().events.find((event: any) => event.assignmentId === child.id && event.kind === "started")?.detail).toContain("level full");
-  // The engine ran both turns at Full (the fake records its permission mode).
   expect(f.turn("C0").permissionMode).toBe("bypassPermissions");
   expect(f.turn("M0").permissionMode).toBe("bypassPermissions");
   expect(f.turns().map((record: any) => record.planKey)).toEqual(["C0", "M0", "C1"]);
   expect(nothingLive(f)).toEqual([]);
 }), hostTimeout(120_000));
 
-/** A member's turn that asks the person for a credential and ends: its root
- * is parked on the card, the park holds nothing. Returns the card and root. */
 const parkOnCredential = async (f: any, room: { id: string; threadId: string }, job: string) => {
   f.script(f.clive.id, { key: "C0", match: [job], steps: [{ tool: "request_credential", arguments: { credential_id: "xaiApiKey", reason: `${job} fixture model` } }], reply: `${job}-ASKED: waiting for the key.` });
   await f.post(room, `${job}: set up the Grok model; ask me for the key you need.`);
@@ -269,8 +220,6 @@ const parkOnCredential = async (f: any, room: { id: string; threadId: string }, 
   const parked = f.roomRoots(room.threadId)[0];
   expect(parked).toMatchObject({ status: "needs_input", cards: [card.id], executions: 1, question: expect.stringContaining("provide") });
   expect(f.eventsOf(parked.id)).toContain("parked");
-  // The park holds nothing: the member is idle, the room is not working
-  // (its composer stays open), nothing runs for it.
   await expect.poll(async () => (await f.roomView(room.id)).working, { timeout: 15_000 }).toBe(false);
   expect((await f.roomView(room.id)).busyBotId).toBeNull();
   expect((await f.bots()).find((candidate: any) => candidate.id === f.clive.id).busy).toBe(false);
@@ -279,20 +228,14 @@ const parkOnCredential = async (f: any, room: { id: string; threadId: string }, 
   return { card, parked };
 };
 
-// R3. A member's credential card parks its root; the room keeps taking
-// messages meanwhile (a second person line runs as a root of its own);
-// providing the key resumes that member, opening with the credential line.
 it("R3 parks a member's root on its credential card, keeps the room taking messages, and resumes the member with the provided line", () => scenario(async (f) => {
   const room = await f.room("Engineering", [f.clive.id], { kind: "member", botId: f.clive.id });
   const { card, parked } = await parkOnCredential(f, room, "R3-JOB");
-  // A second line runs as a new root at once; the parked root stays parked.
   f.script(f.clive.id, { key: "C-TYPED", match: ["R3-TYPED"], reply: "R3-TYPED-DONE: hello back." }, { key: "C1", match: [SECRET_PROVIDED], reply: "R3-DONE: the model is set up." });
   await f.post(room, "R3-TYPED: hello while the card waits.");
   await f.final(room.threadId, "R3-TYPED-DONE");
   await expect.poll(() => f.roomRoots(room.threadId).map((row: any) => row.status), { timeout: 15_000 }).toEqual(["needs_input", "completed"]);
   expect(f.roomRoots(room.threadId)[0]).toMatchObject({ id: parked.id, cards: [card.id], executions: 1 });
-  // The desktop saved the key, then tells the server the card is provided:
-  // the member's root runs again, opening with the provided line.
   expect((await f.api("PUT", "/api/config", { xai: { key: "xai-fixture-key" } })).status).toBe(200);
   const provided = await f.api("POST", `/api/bots/${f.clive.id}/secret-cards/${card.id}/provided`, { threadId: room.threadId });
   expect(provided.status, JSON.stringify(provided.body)).toBe(200);
@@ -306,7 +249,6 @@ it("R3 parks a member's root on its credential card, keeps the room taking messa
   expect(f.turns(f.clive.id).map((record: any) => record.planKey)).toEqual(["C0", "C-TYPED", "C1"]);
   expect(f.own(f.turn("C1"))).toContain(SECRET_PROVIDED);
   expect((await f.messages(room.threadId)).find((message: any) => message.id === card.id).secret).toMatchObject({ provided: true, resumed: true });
-  // A second resolution is idempotent: nothing starts.
   expect((await f.api("POST", `/api/bots/${f.clive.id}/secret-cards/${card.id}/provided`, { threadId: room.threadId })).status).toBe(200);
   await f.settle(500);
   expect(f.turns(f.clive.id).map((record: any) => record.planKey)).toEqual(["C0", "C-TYPED", "C1"]);
@@ -314,8 +256,6 @@ it("R3 parks a member's root on its credential card, keeps the room taking messa
   expect((await f.roomView(room.id)).working).toBe(false);
 }), hostTimeout(90_000));
 
-// R4. Stop in the room settles the parked member's root as stopped and the
-// card as stopped; a key provided afterwards is saved and starts nothing.
 it("R4 Stop in the room cancels the parked root and stops the card; providing afterwards saves but starts nothing", () => scenario(async (f) => {
   const room = await f.room("Engineering", [f.clive.id], { kind: "member", botId: f.clive.id });
   const { card, parked } = await parkOnCredential(f, room, "R4-JOB");
@@ -326,8 +266,6 @@ it("R4 Stop in the room cancels the parked root and stops the card; providing af
   expect(stopped).toMatchObject({ stopped: true });
   expect(stopped.resumed).toBeUndefined();
   expect(stopped.provided).toBeUndefined();
-  // The desktop saved the key, then tells the server: the card says
-  // provided, nothing resumed, no execution, no line.
   expect((await f.api("PUT", "/api/config", { xai: { key: "xai-fixture-key" } })).status).toBe(200);
   const provided = await f.api("POST", `/api/bots/${f.clive.id}/secret-cards/${card.id}/provided`, { threadId: room.threadId });
   expect(provided.status, JSON.stringify(provided.body)).toBe(200);
@@ -344,11 +282,7 @@ it("R4 Stop in the room cancels the parked root and stops the card; providing af
   expect((await f.bots()).find((candidate: any) => candidate.id === f.clive.id).busy).toBe(false);
 }), hostTimeout(60_000));
 
-// R5. The computer wait ceiling (#1651) fires on a seat another turn holds:
-// the member's turn parks, its root is queued on that seat with the parked
-// chip naming the holder, FIFO behind a direct root that parked first on the
-// same seat, and runs again once the seat frees, opening with the computer
-// line. The host desktop fallback exists on macOS and Windows only (T7).
+// The host desktop fallback exists on macOS and Windows only.
 const itHost = process.platform === "linux" ? it.skip : it;
 itHost("R5 queues a member's root on the computer seat at the wait ceiling, FIFO with a direct root, and continues it when the seat frees", async () => {
   const CEILING_MS = 1_500;
@@ -423,13 +357,11 @@ itHost("R5 queues a member's root on the computer seat at the wait ceiling, FIFO
       try { return (await fetch(base + "/api/health")).ok; } catch { return false; }
     }, Boolean);
 
-    // The holder's first screen call claims the host desktop and keeps it.
     const { bot: holder } = await apiOk("POST", "/api/bots", { name: "Seat Holder" });
     const { task: held } = await apiOk("POST", `/api/bots/${holder.id}/tasks`, {});
     await apiOk("POST", `/api/bots/${holder.id}/messages`, { text: "Hold the screen slowly.", threadId: held.threadId });
     await until(() => taskOf(holder.id, held.threadId), (task) => task?.busy === true);
     expect(await gate(await dumpFor(holder.id))).toEqual({ held: false, helpOpen: false });
-    // A direct root parks first on the seat (arrival order is what FIFO reads).
     const { bot: waiter } = await apiOk("POST", "/api/bots", { name: "Seat Waiter" });
     const { task: wait } = await apiOk("POST", `/api/bots/${waiter.id}/tasks`, {});
     await apiOk("POST", `/api/bots/${waiter.id}/messages`, { text: "R5-DIRECT: use the screen too.", threadId: wait.threadId });
@@ -438,12 +370,8 @@ itHost("R5 queues a member's root on the computer seat at the wait ceiling, FIFO
     const direct = (await until(() => rootIn(wait.threadId), (row) => row?.status === "queued"))!;
     expect(direct).toMatchObject({ status: "queued", continuation: { note: expect.stringContaining(SEAT_FREE), count: 1 } });
     rmSync(dumpFile, { force: true });
-    // The room member's first screen call waits past the ceiling: its turn
-    // parks, its root is queued on the seat, the room shows the parked chip
-    // naming the holder, the member is idle, the room keeps no speaker.
     const { bot: member } = await apiOk("POST", "/api/bots", { name: "Seat Member" });
-    // A room turn reaches a desktop only through the member's own setting
-    // (no Auto fallback in a room): This computer.
+    // A room turn reaches a desktop only through the member's own setting (no Auto fallback in a room).
     await apiOk("PATCH", `/api/bots/${member.id}`, { computer: "local" });
     const { group: room } = await apiOk("POST", "/api/groups", { name: "Screen room", memberIds: [member.id], setup: { bulletin: "", defaultResponder: { kind: "member", botId: member.id } } });
     await apiOk("POST", `/api/groups/${room.id}/messages`, { text: "R5-ROOM: use the screen in the room.", threadId: room.threadId });
@@ -462,13 +390,9 @@ itHost("R5 queues a member's root on the computer seat at the wait ceiling, FIFO
     expect(parkedChip, JSON.stringify((await chat(room.threadId)).map(chipText))).toBeDefined();
     expect(chipText(parkedChip)).toContain("Seat Holder");
     expect((await roomOf(room.id)).busyBotId).toBeNull();
-    // The seat stays held: neither queued root runs, and nothing but the
-    // seat bounds them (no clock: nothing settles or expires them).
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect([rootIn(wait.threadId)!.status, rootIn(room.threadId)!.status]).toEqual(["queued", "queued"]);
     for (const id of [direct.id, root.id]) expect(eventsOf(id).filter((kind) => ["settled", "cancelled", "budget", "refused"].includes(kind))).toEqual([]);
-    // The holder finishes: the seat frees, the direct root runs again first
-    // (FIFO), then the member's, each with the computer line, and both complete.
     writeFileSync(finishFile, "finish");
     await until(() => taskOf(holder.id, held.threadId), (task) => task?.busy === false);
     const continuedDirect = await until(() => rootIn(wait.threadId), (row) => row?.status === "completed", 45_000);
@@ -481,13 +405,7 @@ itHost("R5 queues a member's root on the computer seat at the wait ceiling, FIFO
       && events.slice(0, index).some((prior) => prior.assignmentId === id && prior.kind === "started"));
     expect(secondStart(direct.id)).toBeGreaterThan(-1);
     expect(secondStart(direct.id)).toBeLessThan(secondStart(root.id));
-    // The member ran twice in the room (the parked execution and the
-    // continued one: two provider turns), and the continued one opened with
-    // the computer line: the fake echoes its prompt ("reply to: …") into the
-    // room once it finishes. Read from the transcript, not from the fake's
-    // launch dump: the dump keeps only the latest launch, and the two
-    // continuations (the direct waiter's, the member's) launch in parallel
-    // threads, so whichever launches last owns it.
+    // Read from the transcript, not the fake's launch dump: the dump keeps only the latest launch, and the continuations launch in parallel.
     const rows = await chat(room.threadId);
     const replies = rows.filter((message) => message.role === "bot" && message.kind === "text" && message.from?.botId === member.id);
     const shown = JSON.stringify(rows.map((message) => [message.kind, message.from?.name, message.turnId, chipText(message).slice(0, 80)]));
@@ -506,9 +424,6 @@ itHost("R5 queues a member's root on the computer seat at the wait ceiling, FIFO
   }
 }, hostTimeout(120_000));
 
-// R6. A quit or update (SIGTERM) cuts a member's turn. After the restart the
-// member's root runs again exactly once, in the room, told to check what it
-// already did, with the member's "resuming" chip; no "turn interrupted" line.
 it("R6 reruns a member's cut turn once after a restart, in place, with the restart note and the member's resuming chip", () => scenario(async (f) => {
   const room = await f.room("Engineering", [f.clive.id], { kind: "member", botId: f.clive.id });
   f.script(f.clive.id,
@@ -539,18 +454,12 @@ it("R6 reruns a member's cut turn once after a restart, in place, with the resta
   expect((await f.roomView(room.id))).toMatchObject({ working: false, busyBotId: null });
 }), hostTimeout(90_000));
 
-// R6, the other half. A restart that finds the member's cut turn already
-// acted outward (a shell push) does not run it again (contract §5): the
-// root ends failed(interrupted) with what it did, the room gets the one
-// failed-turn line from the member, no "resuming" and no "turn interrupted".
 it("R6 does not rerun a member's cut turn that already pushed: the root ends with what it did, said once in the room", async () => {
   const home = mkdtempSync(join(tmpdir(), "omb-room-roots-outward-"));
   try {
     await scenario(async (f) => {
       const room = await f.room("Engineering", [f.clive.id], { kind: "member", botId: f.clive.id });
       await f.post(room, "R6B-JOB: push the release branch.");
-      // The turn pushed (an ok Bash row of the member's) and is still
-      // running at its gate when the restart cuts it.
       await expect.poll(async () => (await f.messages(room.threadId)).some((message: any) => message.kind === "activity" && message.tool?.name === "Bash" && message.tool.ok === true), { timeout: 30_000 }).toBe(true);
       await expect.poll(() => f.roomRoots(room.threadId)[0]?.status, { timeout: 15_000 }).toBe("running");
       const cut = f.roomRoots(room.threadId)[0];
@@ -583,11 +492,6 @@ it("R6 does not rerun a member's cut turn that already pushed: the root ends wit
   }
 }, hostTimeout(90_000));
 
-// R7. A goal step's turn is a root too, marked with its run; after a restart
-// it is not run again: the run ended with the restart (its card says so),
-// the step's root ends with that reason, silently, and the member never
-// runs a second time. (A step parked on the seat is routed around by the
-// run and ends plainly: hostTurnResult's goal-step rule.)
 it("R7 does not rerun a cut goal step after a restart: its run ended with the restart, the step ends with that reason, silently", () => scenario(async (f) => {
   const mira = await f.bot("Mira", "Engineering");
   const room = await f.room("Engineering", [f.clive.id, mira.id], { kind: "member", botId: f.clive.id });
@@ -605,8 +509,6 @@ it("R7 does not rerun a cut goal step after a restart: its run ended with the re
   const after = f.roomRoots(room.threadId)[0];
   expect(after).toMatchObject({ id: step.id, status: "failed", restarts: 1, result: GOAL_RUN_ENDED });
   expect(f.eventsOf(step.id)).toContain("restart_reconciled");
-  // The run itself ended with the restart; nothing of it runs again, and
-  // the room says nothing more about the step.
   expect((await f.messages(room.threadId)).find((message: any) => message.id === card.id).goalRun.status).not.toBe("working");
   await f.settle(1_500);
   expect(f.turns(f.clive.id).filter((record: any) => record.planKey !== "C-STEP")).toEqual([]);
@@ -618,9 +520,28 @@ it("R7 does not rerun a cut goal step after a restart: its run ended with the re
   expect(nothingLive(f)).toEqual([]);
 }), hostTimeout(90_000));
 
-// R8. A member's reply that @mentions a teammate summons it for one hop:
-// the teammate's turn is a root of its own in the room thread, its brief
-// saying who mentioned it and at which hop, the person's line as origin.
+it("R7 a goal step the watchdog stops after it posted a credential card fails as stalled and stops the card", () => scenario(async (f) => {
+  const mira = await f.bot("Mira", "Engineering");
+  const room = await f.room("Engineering", [f.clive.id, mira.id], { kind: "member", botId: f.clive.id });
+  f.script(f.clive.id, { key: "C-STEP", match: ["R7S-GOAL"], steps: [{ tool: "request_credential", arguments: { credential_id: "xaiApiKey", reason: "R7S fixture model" } }],
+    gateFile: f.gate("step"), reply: "R7S-LATE: never shown." });
+  await f.post(room, "R7S-GOAL: set up the Grok model; ask me for the key you need.", { mode: "goal" });
+  const messages = (): Promise<Array<{ id: string; kind: string; secret?: { stopped?: boolean }; goalRun?: { status: string } }>> => f.messages(room.threadId);
+  await expect.poll(async () => (await messages()).find((message) => message.kind === "secret")?.id, { timeout: 30_000 }).toBeTruthy();
+  const card = (await messages()).find((message) => message.kind === "secret")!;
+  const step = f.roomRoots(room.threadId)[0];
+  expect(step).toMatchObject({ status: "running", goalRunId: expect.any(String) });
+  writeFileSync(join(f.dataDir, "stall-turns"), "now");
+  try { await expect.poll(() => f.roomRoots(room.threadId)[0]?.status, { timeout: 20_000 }).toBe("failed"); } finally { rmSync(join(f.dataDir, "stall-turns"), { force: true }); }
+  expect(f.roomRoots(room.threadId)[0]).toMatchObject({ id: step.id, status: "failed", outcome: "stalled", executions: 1 });
+  expect(f.roomRoots(room.threadId)[0].cards).toBeUndefined();
+  expect((await messages()).find((message) => message.id === card.id)?.secret).toMatchObject({ stopped: true });
+  // The run retries a stalled step once: that attempt ends without a decision, and so does the run.
+  f.open("step");
+  await expect.poll(async () => (await messages()).find((message) => message.kind === "goal.run")?.goalRun?.status, { timeout: 30_000 }).not.toBe("working");
+  expect(nothingLive(f)).toEqual([]);
+}, { fake: { OMB_TEST_STALL_CLOCK: "1" } }), hostTimeout(60_000));
+
 it("R8 runs a chained @mention as a root of its own, with the hop recorded", () => scenario(async (f) => {
   const mira = await f.bot("Mira", "Engineering");
   const room = await f.room("Engineering", [f.clive.id, mira.id], { kind: "member", botId: f.clive.id });

@@ -1,14 +1,9 @@
-// One cheap, read-only request with a short timeout, from the server that
-// will use the key. OpenRouter's model catalog is public, so authenticate
-// there through /key. Other compatible servers retain their models probe,
-// whose success proves only catalog access, not authentication or chat.
-// The answer is a verdict and, on success, a few model ids; never the key,
-// never the raw response. Keys travel only over TLS, except to a loopback
-// test double.
+// OpenRouter's catalog is public, so /key proves the key there; elsewhere /models proves only catalog access. Keys go only over TLS (or loopback).
 export type ProviderKeyKind = "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta";
 
 export type ProviderKeyVerdict =
-  | { ok: true; check: "authentication" | "models"; models: string[] }
+  /** `freeTier`: OpenRouter's /key says the account never bought credit, so paid models refuse it. */
+  | { ok: true; check: "authentication" | "models"; models: string[]; freeTier?: boolean }
   | { ok: false; reason: "rejected" | "unreachable" | "unexpected"; status?: number };
 
 export const PROVIDER_KEY_KINDS: readonly ProviderKeyKind[] = ["anthropic", "openai", "openrouter", "openaiCompat", "xai", "mistral", "cerebras", "groq", "meta"];
@@ -33,12 +28,10 @@ export function isLoopback(hostname: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.startsWith("127.");
 }
 
-/** A provider's base URL: the configured one, or its default. */
 export function providerBaseUrl(provider: ProviderKeyKind, base?: string | null): string {
   return (base?.trim() || DEFAULT_URLS[provider]).replace(/\/+$/, "");
 }
 
-/** The models endpoint for a provider, from its base URL or the default. */
 export function providerModelsUrl(provider: ProviderKeyKind, base?: string | null): string {
   const root = providerBaseUrl(provider, base);
   if (provider === "anthropic") return root.endsWith("/v1") ? `${root}/models` : `${root}/v1/models`;
@@ -83,8 +76,7 @@ export async function checkProviderKey(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    // A redirect is never followed: the key must not be replayed to
-    // whichever host the provider's front door points at today.
+    // Never follow a redirect: the key must not be replayed to whichever host the front door points at.
     const response = await fetchImpl(url, { headers, signal: controller.signal, redirect: "manual" });
     if (response.status === 401 || response.status === 403) return { ok: false, reason: "rejected", status: response.status };
     if (!response.ok) return { ok: false, reason: "unexpected", status: response.status };
@@ -92,12 +84,9 @@ export async function checkProviderKey(
     if (!body || typeof body !== "object") return { ok: false, reason: "unexpected", status: response.status };
     if (authenticate) {
       const data = (body as { data?: unknown }).data;
-      if (!data || typeof data !== "object" || Array.isArray(data)
-        || typeof (data as { is_free_tier?: unknown }).is_free_tier !== "boolean") {
-        return { ok: false, reason: "unexpected", status: response.status };
-      }
-      // /key also returns account and usage details; none belong in this verdict.
-      return { ok: true, check: "authentication", models: [] };
+      const freeTier = data && typeof data === "object" && !Array.isArray(data) ? (data as { is_free_tier?: unknown }).is_free_tier : undefined;
+      if (typeof freeTier !== "boolean") return { ok: false, reason: "unexpected", status: response.status };
+      return { ok: true, check: "authentication", models: [], freeTier };
     }
     return { ok: true, check: "models", models: modelIds(body) };
   } catch {

@@ -6,17 +6,13 @@ import { t } from "@/lib/i18n";
 interface SignedInSite { site: string; cookies: number; storage: number }
 interface SignedInSitesAnswer { running: boolean; sites: SignedInSite[] }
 
-/** The sites one browser is signed in to (its cookies and storage), with
- * Sign out per site and Sign out of all. Loads each time it is opened; the
- * server reads and clears the browser itself, running or not, and keeps the
- * key. */
-export function SignedInSites({ target, sharedBy, disabled = false, bare = false }: {
+/** Security: the server reads and clears the browser itself, running or not, and keeps the key. */
+export function SignedInSites({ target, scope = {}, sharedBy, disabled = false, bare = false }: {
   target: { profile: string } | { bot: string };
-  /** Every bot that uses this browser, so the person knows who signs out. */
+  /** Which conversation's browser is meant, on a Team Cloud. */
+  scope?: Readonly<Record<string, string>>;
   sharedBy: string[];
   disabled?: boolean;
-  /** No fold and no title: the caller heads the list (the bot panel's
-   * Logins), and it loads as soon as it is shown. */
   bare?: boolean;
 }) {
   const [sites, setSites] = useState<SignedInSite[] | null>(null);
@@ -30,16 +26,15 @@ export function SignedInSites({ target, sharedBy, disabled = false, bare = false
     catch (cause) { setError(cause instanceof Error && cause.message ? cause.message : t("settings.sites.error")); }
     finally { setBusy(false); }
   };
-  const load = () => run(() => api(`/api/browser-sites?${new URLSearchParams(target).toString()}`));
+  const load = () => run(() => api(`/api/browser-sites?${new URLSearchParams({ ...target, ...scope }).toString()}`));
   const signOut = (site?: string) => run(() => api("/api/browser-sites/sign-out", {
     method: "POST",
-    body: JSON.stringify({ ...target, ...(site ? { site } : {}) }),
+    body: JSON.stringify({ ...target, ...scope, ...(site ? { site } : {}) }),
   }));
 
-  const key = "bot" in target ? `bot:${target.bot}` : `profile:${target.profile}`;
+  const key = `${"bot" in target ? `bot:${target.bot}` : `profile:${target.profile}`}${scope.threadId ? `:${scope.threadId}` : ""}`;
   useEffect(() => {
     if (bare) void load();
-    // Loads once per browser; `load` closes over the same target.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bare, key]);
 

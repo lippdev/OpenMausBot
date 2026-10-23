@@ -38,7 +38,6 @@ describe("switching one app on or off for a bot", () => {
     const scoped = { apps: { gmail: "read" as const } };
     expect(withBotApp(scoped, connected, "slack", true)).toEqual({ apps: { gmail: "read", slack: "write" } });
     expect(withBotApp({ apps: { gmail: "read", slack: "write" } }, connected, "slack", false)).toEqual({ apps: { gmail: "read" } });
-    // the caller's record is never edited in place
     expect(scoped).toEqual({ apps: { gmail: "read" } });
   });
 

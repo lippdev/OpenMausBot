@@ -1,18 +1,7 @@
 #!/usr/bin/env node
-// Fake of the Antigravity `agy` CLI's print-mode stdio surface, for driver
-// tests of drivers/antigravity.ts. On `--version` it prints a version; in
-// stream-json input mode it reads one user event from stdin, then emits a
-// canned NDJSON turn: init → tool
-// step (ACTIVE then DONE) → agent_response step with usage → result with
-// status SUCCESS. Deterministic, no network.
-//
-//   FAKE_AGY_MODE=ask-peer
-//     reads OpenMausBot's temporary `openmausbot-agents` entry from agy's
-//     global MCP config, calls list_bots then coordinate_bots(consult: true),
-//     and returns the tool's receipt (the peer's answer resumes the bot in a
-//     later turn). This pins the Antigravity/Gemini comms path end to end.
-//
-// Keep this file dependency-free — it runs as a bare `node` subprocess.
+// Fake of the Antigravity `agy` CLI's print-mode stdio surface for antigravity.ts tests: `--version`,
+// or one stream-json user event in and a canned NDJSON turn out. Env knobs:
+//   FAKE_AGY_MODE=ask-peer  call list_bots then coordinate_bots(consult: true) via agy's global MCP config
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,7 +34,6 @@ function agentsMcpEntry(): McpEntry | null {
   }
 }
 
-/** Minimal MCP stdio client matching the real config shape used by agy. */
 function driveMcp(
   entry: McpEntry,
   calls: Array<{ name: string; args: (previous: string) => object }>,
@@ -176,7 +164,6 @@ if (streamInput) {
         : undefined;
   } catch {}
 } else {
-  // Retained for tests of old callers; production prompt paths use stdin.
   const printIdx = Math.max(argv.indexOf("--print"), argv.indexOf("-p"));
   prompt = printIdx !== -1 ? argv[printIdx + 1] : undefined;
 }

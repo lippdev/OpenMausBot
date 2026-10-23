@@ -189,7 +189,6 @@ describe("optional desktop Organisation settings", () => {
     expect(fixture.store.dispatch).toHaveBeenCalledExactlyOnceWith({ type: "setModel", botId: "stuck-bot", selection: { instanceId: "company.fixture.anthropic", model: "model-a" } });
     button("Disconnect…").props.onClick!(); button("Disconnect from organization").props.onClick!(); await flush();
     expect(bridge.disconnect).toHaveBeenCalledOnce();
-    // Disconnecting changes no bot: the only model change is the one clicked above.
     expect(fixture.store.dispatch).toHaveBeenCalledOnce();
     expect(fixture.store.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ botId: "personal-bot" }));
   });

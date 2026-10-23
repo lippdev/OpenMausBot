@@ -10,6 +10,16 @@ A bot is a durable agent identity. A thread is one conversation with that bot an
 
 Use separate threads when you want fresh context or independent work without duplicating the bot. Messages sent to a busy thread are queued, and supported providers can be steered while they work. Other threads can continue independently. See [Bots, folders, and threads](/docs/features/bots-and-tasks) for limits and shared-resource behavior.
 
+## Reactions
+
+Point at a bot's message (or press and hold it on a touch screen) and choose the smiley to react with 👍, 👎, ❤️, 😂, 🎉 or 👀. Everyone in that conversation or group sees the reaction under the message, with who chose it. Each person has one reaction per message: picking another replaces yours, and choosing yours again takes it away.
+
+A 👍 or 👎 on a bot's message is your answer to it. When a bot asks "Shall I send it?", a 👍 means yes and the bot carries on by itself; a 👎 means no. In a group, the answer goes to the bot that wrote the message. If the bot is still working, your answer waits for it, and taking the reaction back before the bot gets to it takes the answer back too. The bot hears each change of answer once: putting back a 👍 it already has does not repeat it.
+
+On an open approval card, a 👍 allows and a 👎 denies, the same as tapping the card. That decision stays made even if you take the reaction back.
+
+The other reactions never start any work: the bot reads them with your next message.
+
 ## Token usage
 
 Hover over the usage chip in a bot's chat header to see the totals and the latest message's usage. Input and output are separate:
@@ -53,6 +63,8 @@ Choose **New bot** inside this dialog to open bot creation for that team. The ne
 Bots can hand work to other bots. Delegated runs carry explicit status back into the parent conversation, including completion, failure, and cancellation.
 
 ### Creating a specialist with a chosen model
+
+A Chief also adds a specialist on its own when a job needs one: an ongoing area of work, a different skill set, or work to run in parallel. The bot is created at once, the Chief tells you in one line, and the change has an **Undo**. When what you want matches a ready-made team in the library, the Chief reads its roles with `list_team_library` and creates them the same way.
 
 A Chief of Staff can create a specialist in its own team with `create_bot`. Ask for a particular engine, model and reasoning effort if you want to choose them. The Chief can look up exact available choices with `list_team_setup` and pass `modelSelection` with `instanceId`, `model`, and optionally `effort` or a supported `variant` (not both).
 

@@ -1,7 +1,3 @@
-// A saved key looks Ready until the provider refuses it. One refused turn
-// (or a failed Test) marks it, so Model providers and the picker show it
-// needs a new key; a rate limit does not, and saving a key or a later
-// success clears it. The key never appears in the snapshot, events or logs.
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
@@ -58,8 +54,6 @@ it("a key the provider rejects stops showing Ready until it changes or works aga
     chat = "limit";
     expect((await turn()).status).toBe("failed");
     expect(await snapshot()).toMatchObject({ state: "available", authenticated: true });
-    // Nor is a rate limit a spent budget: no `Continue:` task
-    // starts an unattended turn that hits the limit again.
     const afterLimit = await control(["messages", "--bot", bot.id, "--limit", "1"]);
     expect(afterLimit.bot.tasks.map((task: { title: string }) => task.title)).toHaveLength(1);
 
@@ -74,18 +68,15 @@ it("a key the provider rejects stops showing Ready until it changes or works aga
       state: "available", authenticated: false, reason: "The provider rejected this key. Change it in Settings → API keys.",
     }));
 
-    // Saving a key, even the same one, starts over; its failed Test marks it again.
     await api("PUT", "/api/config", { openaiCompat: { key: BAD } });
     expect(await snapshot()).toMatchObject({ authenticated: true });
     expect(await api("POST", "/api/keys/test", { provider: "openaiCompat" })).toMatchObject({ ok: false, reason: "rejected" });
     expect(await snapshot()).toMatchObject({ authenticated: false });
 
-    // The provider takes the same key again: a passing Test clears the mark.
     accepted.add(`Bearer ${BAD}`);
     expect(await api("POST", "/api/keys/test", { provider: "openaiCompat" })).toMatchObject({ ok: true });
     expect(await snapshot()).toMatchObject({ authenticated: true });
 
-    // ...and so does a later turn that works.
     accepted.delete(`Bearer ${BAD}`);
     expect((await turn()).status).toBe("failed");
     expect(await snapshot()).toMatchObject({ authenticated: false });
@@ -93,7 +84,6 @@ it("a key the provider rejects stops showing Ready until it changes or works aga
     expect((await turn()).status).toBe("settled");
     expect(await snapshot()).toMatchObject({ authenticated: true });
 
-    // A different key is never shown as rejected.
     accepted.delete(`Bearer ${BAD}`);
     expect((await turn()).status).toBe("failed");
     expect(await snapshot()).toMatchObject({ authenticated: false });

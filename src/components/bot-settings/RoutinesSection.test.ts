@@ -5,11 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { Bot } from "@/state/store";
 import type { Routine, RoutineRun } from "@/lib/routines";
 
-// RoutinesSection mounts RoutineEditor from RoutineCalendarPage.tsx (only
-// when "New schedule" is clicked, which these tests never do) but that
-// module's top-level import of DesktopCapabilities reads `window.ogb` at
-// import time; the src test suite runs under vitest's "node" environment
-// (no window), so it must be stubbed as SidebarBotListItem.test.ts does.
+// RoutineCalendarPage imports DesktopCapabilities, which reads window.ogb at import time; the node environment has no
+// window.
 vi.mock("@/components/DesktopCapabilities", () => ({
   useDesktopCapabilities: () => ({ capabilities: { host: { homeDir: undefined } } }),
 }));
@@ -20,8 +17,7 @@ vi.mock("@/state/store", () => ({
   useStore: () => ({ state: { routinesLoadState: "ready" }, dispatch }),
 }));
 
-// The real list, with the props the section handed it kept for the tests
-// that call its handlers.
+// The real list, its props kept for the tests that call its handlers.
 const listProps = vi.hoisted(() => ({ last: null as null | { onToggle?: (routine: Routine) => void } }));
 vi.mock("../routines/RoutineList", async (importOriginal) => {
   const real = await importOriginal<typeof import("../routines/RoutineList")>();
@@ -116,7 +112,6 @@ describe("RoutinesSection", () => {
     const markup = render([activeRoutine, pausedRoutine], []);
     expect(markup).toMatch(/aria-label="Run Morning brief on its schedule"[^>]*role="switch" aria-checked="true"/);
     expect(markup).toMatch(/aria-label="Run Weekly digest on its schedule"[^>]*role="switch" aria-checked="false"/);
-    // The switch took the badge's place; the state still reads in words.
     expect(markup).not.toContain(">Active<");
     expect(markup).toContain(">Paused<");
   });

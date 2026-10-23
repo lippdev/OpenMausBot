@@ -1,9 +1,4 @@
-// Durable, exact grants for read-shaped tools from configured MCP servers.
-//
-// The key binds the person's approval to the provider instance, the exact
-// MCP server/tool pair and that server's current configuration. Editing the
-// server invalidates the grant instead of silently transferring authority to
-// a different endpoint or command that happens to reuse the same name.
+// The grant key binds approval to the instance, the exact MCP server/tool and that server's config, so editing the server invalidates it.
 import { createHash } from "node:crypto";
 
 import { isReadOnlyTool } from "../shared/outbound.ts";
@@ -21,7 +16,6 @@ export function providerMcpTool(name: string): ProviderMcpTool | null {
   return { server: parts[1], tool: parts.slice(2).join("__") };
 }
 
-/** A grant candidate exists only for an exact read-shaped MCP tool. */
 export function providerToolAllowKey(
   providerInstanceId: string,
   name: string,

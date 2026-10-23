@@ -1,20 +1,6 @@
-// The browser step store: one line per recorded browser step, and its
-// screenshot, kept with the conversation the step happened in.
-//
-//   DATA_DIR/evidence/<threadId>/<generation>/steps.jsonl
-//   DATA_DIR/evidence/<threadId>/<generation>/step-001042.jpg
-//   DATA_DIR/evidence/state.json   {"nextStep": 1101}
-//
-// Folders are 0700 and files 0600. A step number is unique across the whole
-// instance, so a report can cite "step 1042" whichever bot took it. The
-// folder goes when its conversation is deleted, after 30 days, or when a
-// workspace backup is made (never: evidence is excluded). Screenshots stop,
-// and the steps carry on without them, when a conversation holds 200 MB, all
-// evidence holds the smaller of 2 GB and a quarter of the free space, or the
-// disk has less than 1 GB free; the oldest other conversations' screenshots
-// are evicted first. Steps themselves stop once a conversation's step lines
-// reach 50 MB (some 55,000 steps), so a bot stuck in a loop cannot fill the
-// disk. The exported tar is the copy that lasts.
+// Browser step evidence: DATA_DIR/evidence/<threadId>/<generation>/steps.jsonl and step-NNNNNN.jpg; folders 0700, files
+// 0600, never in a workspace backup. Screenshots stop at 200 MB a conversation, the smaller of 2 GB and a quarter of free
+// space overall, or under 1 GB free; step lines stop at 50 MB a conversation, so a looping bot cannot fill the disk.
 import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, constants, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { open, readFile, stat, statfs as statfsAsync } from "node:fs/promises";
@@ -25,15 +11,13 @@ import { Header } from "tar";
 
 import { writeFileAtomic } from "./atomic.ts";
 
-/** One recorded step (schema v1), as browser-steps.ts writes it. */
 export interface StepRecord {
   v: 1;
   step: number;
   at: number;
   threadId: string;
   generation: string;
-  /** The screenshot's file name in the generation folder, or the earlier
-   * one this step's screenshot repeats (sameAsStep); null: none taken. */
+  /** This step's screenshot, or the earlier one it repeats (sameAsStep); null when none was taken. */
   image: string | null;
   sha256?: string;
   bytes?: number;
@@ -62,9 +46,7 @@ const STEPS_FILE = "steps.jsonl";
 type Statfs = (path: string) => Promise<{ bavail: number | bigint; bsize: number | bigint }>;
 
 export interface EvidenceDeps {
-  /** Store changes: a deleted conversation takes its evidence with it. */
   onChange(listener: (change: { type: string; threadId?: string }) => void): () => void;
-  /** Whether a conversation exists, for the sweep of folders left behind. */
   threadExists(threadId: string): boolean;
 }
 
@@ -94,14 +76,10 @@ export class BrowserEvidence {
   private statfs: Statfs;
   private now: () => number;
   private counter: { next: number; reserved: number } | null = null;
-  /** Screenshot bytes per conversation, read from disk on first use. */
   private threadBytes = new Map<string, number>();
-  /** Step-line bytes per conversation, read from disk on first use. */
   private stepBytes = new Map<string, number>();
-  /** All screenshot bytes; unknown until the first sweep has measured them. */
   private totalBytes: number | null = null;
   private budget = { cap: EVIDENCE_LIMITS.totalBytes as number, low: false };
-  /** Each generation's last screenshot, so an unchanged page is stored once. */
   private lastImage = new Map<string, { step: number; file: string; sha256: string }>();
   /** Generations written by this process recently: never evicted. */
   private active = new Map<string, number>();
@@ -116,8 +94,6 @@ export class BrowserEvidence {
     this.now = options.now ?? Date.now;
   }
 
-  /** Start keeping the store tidy: deleted conversations, the boot sweep
-   * of folders whose conversation is gone, and the hourly sweep. */
   attach(deps: EvidenceDeps): this {
     this.deps = deps;
     this.unsubscribe?.();
@@ -139,15 +115,14 @@ export class BrowserEvidence {
 
   private ensureDir(path: string): void { mkdirSync(path, { recursive: true, mode: 0o700 }); }
 
-  /** The next step number, unique across this instance and its restarts:
-   * numbers are reserved on disk a block at a time. */
+  /** Unique across this instance and its restarts: numbers are reserved on disk a block at a time. */
   nextStep(): number {
     if (!this.counter) {
       let saved = 1;
       try {
         const value = (JSON.parse(readFileSync(join(this.root, "state.json"), "utf8")) as { nextStep?: unknown }).nextStep;
         if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) saved = value;
-      } catch { /* first step */ }
+      } catch {}
       this.counter = { next: saved, reserved: saved };
     }
     if (this.counter.next >= this.counter.reserved) {
@@ -155,7 +130,7 @@ export class BrowserEvidence {
       try {
         this.ensureDir(this.root);
         writeFileAtomic(join(this.root, "state.json"), `${JSON.stringify({ nextStep: this.counter.reserved })}\n`, { mode: 0o600 });
-      } catch { /* numbers stay unique in this run */ }
+      } catch {}
     }
     return this.counter.next++;
   }
@@ -186,14 +161,11 @@ export class BrowserEvidence {
     return bytes;
   }
 
-  /** Whether a conversation takes another step: its step lines stay under
-   * their cap. Asked before a step is numbered or pictured. */
   accepts(threadId: string): boolean {
     return THREAD_ID.test(threadId) && this.threadStepSize(threadId) < EVIDENCE_LIMITS.threadStepBytes;
   }
 
-  /** Where this step's screenshot may be written, created empty and 0600 so
-   * the engine's write keeps that mode; or why no screenshot is taken. */
+  /** Created empty and 0600 first, so the engine's write keeps that mode. */
   imageTarget(threadId: string, generation: string, step: number): { path: string } | { skipped: string } {
     if (!THREAD_ID.test(threadId) || !GENERATION.test(generation)) return { skipped: "capture-failed" };
     if (this.budget.low) return { skipped: "disk-low" };
@@ -212,15 +184,13 @@ export class BrowserEvidence {
     return { path };
   }
 
-  /** Write a step: its screenshot checked (non-empty, at most 1.5 MB,
-   * hashed, stored once when it repeats the previous one), then its line. */
   async commit(record: StepRecord, imagePath: string | null): Promise<StepRecord> {
     const { threadId, generation } = record;
     if (!THREAD_ID.test(threadId) || !GENERATION.test(generation)) throw new Error("Invalid evidence location.");
     if (!this.accepts(threadId)) throw new Error("This conversation keeps no more browser steps.");
     const out: StepRecord = { ...record, image: null };
     if (imagePath) {
-      const drop = (reason: string) => { try { unlinkSync(imagePath); } catch { /* already gone */ } out.imageSkipped = reason; };
+      const drop = (reason: string) => { try { unlinkSync(imagePath); } catch {} out.imageSkipped = reason; };
       const bytes = await stat(imagePath).then((value) => value.size, () => 0);
       if (bytes === 0) drop("capture-failed");
       else if (bytes > EVIDENCE_LIMITS.imageBytes) drop("too-large");
@@ -229,7 +199,7 @@ export class BrowserEvidence {
         const key = `${threadId}/${generation}`;
         const previous = this.lastImage.get(key);
         if (previous?.sha256 === sha256) {
-          try { unlinkSync(imagePath); } catch { /* already gone */ }
+          try { unlinkSync(imagePath); } catch {}
           Object.assign(out, { image: previous.file, sha256, sameAsStep: previous.step });
         } else {
           const file = imagePath.slice(imagePath.lastIndexOf("step-"));
@@ -249,8 +219,6 @@ export class BrowserEvidence {
     return out;
   }
 
-  /** Every step of a conversation, or of one of its generations, in step
-   * order: each step file read once. */
   private readSteps(threadId: string, generation?: string): StepRecord[] {
     if (!THREAD_ID.test(threadId)) return [];
     const dir = join(this.root, threadId);
@@ -264,13 +232,12 @@ export class BrowserEvidence {
         try {
           const step = JSON.parse(line) as StepRecord;
           if (typeof step.step === "number" && step.generation === name) steps.push(step);
-        } catch { /* a torn last line */ }
+        } catch {}
       }
     }
     return steps.sort((a, b) => a.step - b.step);
   }
 
-  /** A step with its screenshot's URL, or why the screenshot is gone. */
   private withImageUrl(threadId: string, step: StepRecord): StepRecord & { imageUrl: string | null; imageGone?: "evicted" } {
     if (!step.image || !IMAGE_FILE.test(step.image)) return { ...step, imageUrl: null };
     return this.imageFile(threadId, step.generation, step.image) !== null
@@ -278,8 +245,6 @@ export class BrowserEvidence {
       : { ...step, imageUrl: null, imageGone: "evicted" as const };
   }
 
-  /** A conversation's steps in step order, `after` a step number, with each
-   * screenshot's URL, or why it is gone. */
   list(threadId: string, options: { generation?: string; after?: number; limit?: number } = {}): { steps: Array<StepRecord & { imageUrl: string | null; imageGone?: "evicted" }>; nextAfter: number | null } {
     const limit = Math.min(500, Math.max(1, options.limit ?? 200));
     const after = options.after ?? 0;
@@ -288,8 +253,7 @@ export class BrowserEvidence {
     return { steps: page.map((step) => this.withImageUrl(threadId, step)), nextAfter: steps.length > limit ? page.at(-1)!.step : null };
   }
 
-  /** A screenshot's path, only for well-formed names of a regular file
-   * inside the store (no symbolic links, nothing outside the root). */
+  /** Only well-formed names of a regular file inside the store: no symbolic links, nothing outside the root. */
   imageFile(threadId: string, generation: string, file: string): string | null {
     if (!THREAD_ID.test(threadId) || !GENERATION.test(generation) || !IMAGE_FILE.test(file)) return null;
     const path = join(this.root, threadId, generation, file);
@@ -301,12 +265,8 @@ export class BrowserEvidence {
     } catch { return null; }
   }
 
-  /** The conversation's evidence as one tar: `index.json` (every step, each
-   * screenshot by its path in the archive) and the screenshots, regular
-   * files only, under POSIX paths. */
+  /** Regular files only, under POSIX paths. */
   async exportTar(threadId: string, out: Writable): Promise<void> {
-    // One read of every step file: paging through list() re-read them all for
-    // each 500 steps, a long stall of the server for a big conversation.
     const all = this.readSteps(threadId).map((step) => this.withImageUrl(threadId, step));
     const files = new Map<string, string>();
     const steps = all.map((step) => {
@@ -355,11 +315,10 @@ export class BrowserEvidence {
     await write(Buffer.alloc(1024));
   }
 
-  /** Delete a conversation's evidence. */
   removeThread(threadId: string): void {
     if (!THREAD_ID.test(threadId)) return;
     const bytes = this.threadSize(threadId);
-    try { rmSync(join(this.root, threadId), { recursive: true, force: true }); } catch { /* the sweep retries */ }
+    try { rmSync(join(this.root, threadId), { recursive: true, force: true }); } catch {}
     this.threadBytes.delete(threadId);
     this.stepBytes.delete(threadId);
     for (const key of [...this.lastImage.keys(), ...this.active.keys()]) {
@@ -368,8 +327,7 @@ export class BrowserEvidence {
     if (this.totalBytes !== null) this.totalBytes = Math.max(0, this.totalBytes - bytes);
   }
 
-  /** Remove screenshots of the oldest generations, never one being written
-   * now or `keep`'s, until all evidence fits its cap. Their steps stay. */
+  /** Never a generation being written now or `keep`'s; their steps stay. */
   private evict(keep: string | null): void {
     if (this.totalBytes === null || this.totalBytes < this.budget.cap) return;
     const recent = this.now() - 10 * 60_000;
@@ -389,7 +347,7 @@ export class BrowserEvidence {
       for (const name of files(dir)) {
         if (!IMAGE_FILE.test(name)) continue;
         const bytes = size(join(dir, name));
-        try { unlinkSync(join(dir, name)); freed += bytes; } catch { /* still there */ }
+        try { unlinkSync(join(dir, name)); freed += bytes; } catch {}
       }
       this.lastImage.delete(`${candidate.thread}/${candidate.generation}`);
       this.totalBytes = Math.max(0, this.totalBytes - freed);
@@ -398,9 +356,6 @@ export class BrowserEvidence {
     }
   }
 
-  /** Hourly and at boot: free space and the cap it allows, conversations
-   * that no longer exist, generations past 30 days, every total measured
-   * again, and eviction down to the cap. */
   sweep(): Promise<void> {
     this.sweeping ??= this.runSweep().finally(() => { this.sweeping = null; });
     return this.sweeping;
@@ -411,7 +366,7 @@ export class BrowserEvidence {
       const fs = await this.statfs(this.root).catch(() => this.statfs(join(this.root, "..")));
       const free = Number(fs.bavail) * Number(fs.bsize);
       this.budget = { cap: Math.min(EVIDENCE_LIMITS.totalBytes, Math.floor(free * EVIDENCE_LIMITS.freeShare)), low: free < EVIDENCE_LIMITS.freeFloor };
-    } catch { /* keep the last measure */ }
+    } catch {}
     const expired = this.now() - EVIDENCE_LIMITS.retentionMs;
     let total = 0;
     for (const thread of directories(this.root)) {
@@ -426,7 +381,7 @@ export class BrowserEvidence {
       for (const generation of directories(dir)) {
         const gen = join(dir, generation);
         if (Math.max(modified(join(gen, STEPS_FILE)), modified(gen)) < expired) {
-          try { rmSync(gen, { recursive: true, force: true }); } catch { /* next sweep */ }
+          try { rmSync(gen, { recursive: true, force: true }); } catch {}
           this.lastImage.delete(`${thread}/${generation}`);
           continue;
         }
@@ -435,7 +390,7 @@ export class BrowserEvidence {
           if (IMAGE_FILE.test(name)) threadTotal += size(join(gen, name));
         }
       }
-      if (!directories(dir).length) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* next sweep */ } }
+      if (!directories(dir).length) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
       this.threadBytes.set(thread, threadTotal);
       this.stepBytes.set(thread, stepTotal);
       total += threadTotal;

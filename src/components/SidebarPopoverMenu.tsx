@@ -1,66 +1,32 @@
-// The popover shared by the sidebar's profile row and the chat header's More
-// button: a trigger that opens a list of items. Only the trigger's shape, the
-// side the menu opens on and the open gesture differ, so the keyboard
-// handling, the outside-click close and the item chrome live here once.
-//
-// More opens on hover. The profile menu opens on click only, because a menu
-// that appears under the cursor when you are aiming at nothing in particular
-// is startling on a row you pass over constantly.
-//
-// The profile menu ("above") is one fixed-width sheet anchored to its
-// trigger and kept inside the window, so it is the same menu whether the
-// sidebar is wide, narrow or collapsed to avatars. It is drawn in a portal
-// with fixed coordinates: the sidebar's own width and overflow do not reach
-// it. An item can open a submenu beside it, and the keyboard moves through
-// both (arrows, Home, End, Escape).
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useMenuMotion } from "./MenuMotion";
-import { usePopoverDismiss } from "@/hooks/use-popover-dismiss";
+import { popoverClosesOnKey, usePopoverDismiss } from "@/hooks/use-popover-dismiss";
 
 export interface SidebarMenuItem {
   key: string;
   label: string;
-  /** a second, quieter line under the label (where "Connect your phone" connects to) */
   subtitle?: string;
-  /** a third, quieter line still: a short note (why something is not offered yet) */
   note?: string;
   icon?: React.ReactNode;
   active?: boolean;
-  /** the item wants attention (an update ready to install, or one that
-   * failed); drawn as a dot on the item */
   attention?: boolean;
-  /** what the attention means — something went wrong (default) or something
-   * good is waiting */
   attentionTone?: "danger" | "accent";
   disabled?: boolean;
-  /** draw a hairline above this item — the Grok-style trailing group */
   separatorBefore?: boolean;
-  /** a small caps label above this item, naming the group it starts (the
-   * chat menu's "Share" over the two export actions) */
   heading?: string;
-  /** rendered at the trailing edge (a spinner, a status dot) */
   trailing?: React.ReactNode;
-  /** a short value at the trailing edge, in the quieter ink */
   value?: string;
-  /** the menu normally closes on select; an item that reports progress in
-   * place (the update check) keeps it open */
   keepOpen?: boolean;
-  /** the item opens these beside the menu instead of acting itself; it
-   * draws a chevron and its onSelect is not called */
   submenu?: SidebarMenuItem[];
   onSelect: () => void;
-  /** `data-tour` id, so the guided tour can point at this item */
   tourId?: string;
 }
 
-/** Opening is quick enough to feel like a hover, closing is slow enough to
- * forgive a diagonal path from the trigger to the menu. */
 const OPEN_DELAY_MS = 80;
 const CLOSE_DELAY_MS = 250;
-/** The anchored sheet's width, whatever the trigger's. */
 export const ANCHORED_MENU_WIDTH = 280;
 const EDGE_MARGIN = 8;
 const ANCHOR_GAP = 6;
@@ -68,9 +34,6 @@ const ANCHOR_GAP = 6;
 type Box = { left: number; right: number; top: number; bottom: number };
 type Size = { width: number; height: number };
 
-/** Where the anchored sheet goes: above the trigger, its start edge on the
- * trigger's start edge (the left in LTR, the right in RTL), below it when
- * there is no room above, and always inside the window. */
 export function anchoredMenuPosition(anchor: Box, menu: Size, viewport: Size, rtl = false): { left: number; top: number } {
   const maxLeft = Math.max(EDGE_MARGIN, viewport.width - menu.width - EDGE_MARGIN);
   const left = Math.min(Math.max(rtl ? anchor.right - menu.width : anchor.left, EDGE_MARGIN), maxLeft);
@@ -80,9 +43,6 @@ export function anchoredMenuPosition(anchor: Box, menu: Size, viewport: Size, rt
   return { left, top: Math.min(Math.max(top, EDGE_MARGIN), maxTop) };
 }
 
-/** Where a submenu goes: beside its parent menu on the inline end side,
- * lined up with the row that opened it, flipped to the other side when the
- * window has no room, and always inside the window. */
 export function submenuPosition(menu: Box, row: Box, submenu: Size, viewport: Size, rtl = false): { left: number; top: number } {
   const gap = 4;
   const after = rtl ? menu.left - gap - submenu.width : menu.right + gap;
@@ -100,11 +60,9 @@ export function submenuPosition(menu: Box, row: Box, submenu: Size, viewport: Si
 const isRtl = (element: Element | null) =>
   typeof getComputedStyle === "function" && element ? getComputedStyle(element).direction === "rtl" : false;
 
-/** The enabled items of one menu, in order. */
 const menuItems = (menu: HTMLElement | null) =>
   menu ? [...menu.querySelectorAll<HTMLElement>(':scope > div > [role="menuitem"]:not(:disabled)')] : [];
 
-/** Arrow keys, Home and End move focus among a menu's items, wrapping. */
 export function nextMenuIndex(key: string, current: number, count: number): number | null {
   if (count === 0) return null;
   switch (key) {
@@ -195,6 +153,9 @@ function MenuRows({
   );
 }
 
+const closesOnEscape = (event: ReactKeyboardEvent) =>
+  popoverClosesOnKey({ key: event.key, defaultPrevented: event.defaultPrevented, isComposing: event.nativeEvent.isComposing });
+
 export function SidebarPopoverMenu({
   items,
   ariaLabel,
@@ -204,15 +165,10 @@ export function SidebarPopoverMenu({
   triggerTitle,
   renderTrigger,
 }: {
-  /** "above" is a fixed-width sheet anchored over the trigger's start edge,
-   * opening upward and kept inside the window (the sidebar's profile menu);
-   * "below" hangs a fixed-width sheet under the trigger's right edge (a
-   * header icon). */
   placement?: "above" | "below";
   items: SidebarMenuItem[];
   ariaLabel: string;
   openOnHover?: boolean;
-  /** the trigger button's own classes (an avatar-only trigger is not full width) */
   triggerClassName?: string;
   triggerTitle?: string;
   renderTrigger: (state: { open: boolean }) => React.ReactNode;
@@ -263,22 +219,19 @@ export function SidebarPopoverMenu({
     if (refocus) triggerRef.current?.focus();
   }, []);
 
-  // The anchored sheet lives in a portal, so "inside" is the trigger's root
-  // or either sheet.
   const insideRef = useRef({
     contains: (target: unknown) =>
       [rootRef.current, menuRef.current, subRef.current].some((node) => node?.contains(target as Node)),
   });
-  usePopoverDismiss(open, anchored ? insideRef : rootRef, () => close(anchored));
+  usePopoverDismiss(open, insideRef, () => close(anchored));
 
-  // Place the sheet against the trigger, and again when the window moves under it.
   useLayoutEffect(() => {
-    if (!anchored || !motion.shown) return;
+    if (!motion.shown) return;
     const place = () => {
       const trigger = triggerRef.current, menu = menuRef.current;
       if (!trigger || !menu) return;
       const viewport = { width: window.innerWidth, height: window.innerHeight };
-      setPosition(anchoredMenuPosition(trigger.getBoundingClientRect(), { width: menu.offsetWidth, height: menu.offsetHeight }, viewport, isRtl(trigger)));
+      if (anchored) setPosition(anchoredMenuPosition(trigger.getBoundingClientRect(), { width: menu.offsetWidth, height: menu.offsetHeight }, viewport, isRtl(trigger)));
       const sub = subRef.current, row = subRowRef.current;
       if (sub && row) {
         setSubPosition(submenuPosition(menu.getBoundingClientRect(), row.getBoundingClientRect(), { width: sub.offsetWidth, height: sub.offsetHeight }, viewport, isRtl(trigger)));
@@ -293,8 +246,7 @@ export function SidebarPopoverMenu({
     };
   }, [anchored, motion.shown, submenu, items.length]);
 
-  // A keyboard open lands on the first item, once the anchored sheet is
-  // placed (a hidden sheet cannot take focus).
+  // Focus waits until the anchored sheet is placed: a hidden sheet cannot take focus.
   useEffect(() => {
     if (!open || !focusFirst.current || (anchored && !position)) return;
     focusFirst.current = false;
@@ -343,10 +295,16 @@ export function SidebarPopoverMenu({
       event.preventDefault();
       openSub(item, focused, true);
     } else if (inSubmenu && (event.key === back || event.key === "Escape")) {
-      // closes only the submenu; the window's Escape handler sees it handled
+      // preventDefault tells the window's Escape handler this press is handled.
       event.preventDefault();
       event.stopPropagation();
       closeSub(true);
+    } else if (!inSubmenu && closesOnEscape(event)) {
+      // The menu, not the panel or dialog around it, owns this Escape: an anchored sheet's keys bubble through the
+      // portal to the trigger's ancestors before the window ever sees them.
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
     } else if (event.key === "Tab" && anchored) {
       event.preventDefault();
       close(true);
@@ -408,8 +366,8 @@ export function SidebarPopoverMenu({
       data-sidebar-popover-submenu
       onKeyDown={(event) => onMenuKey(event, true)}
       onPointerEnter={() => subTimer.current && clearTimeout(subTimer.current)}
-      style={{ position: "fixed", left: subPosition?.left ?? 0, top: subPosition?.top ?? 0, minWidth: 220, width: "max-content", maxWidth: `min(${ANCHORED_MENU_WIDTH + 40}px, calc(100vw - ${EDGE_MARGIN * 2}px))`, visibility: subPosition ? undefined : "hidden" }}
-      className={cn(sheetClass, "z-[61] animate-pop-in")}
+      style={{ position: "fixed", left: subPosition?.left ?? 0, top: subPosition?.top ?? 0, minWidth: 220, width: "max-content", maxWidth: `min(${ANCHORED_MENU_WIDTH + 40}px, calc(100vw - ${EDGE_MARGIN * 2}px))`, maxHeight: `calc(100vh - ${EDGE_MARGIN * 2}px)`, visibility: subPosition ? undefined : "hidden" }}
+      className={cn(sheetClass, "z-[61] animate-pop-in overflow-y-auto")}
     >
       <MenuRows
         items={openItem.submenu}
@@ -428,11 +386,10 @@ export function SidebarPopoverMenu({
       className="relative"
       onPointerEnter={hoverOpen}
       onPointerLeave={hoverClose}
-      // a keyboard user tabbing in gets the same menu a pointer gets
       onFocus={() => openOnHover && setOpen(true)}
       onBlur={(event) => {
         if (pinned) return;
-        if (!event.relatedTarget || !rootRef.current?.contains(event.relatedTarget as Node)) setOpen(false);
+        if (!event.relatedTarget || !insideRef.current.contains(event.relatedTarget)) setOpen(false);
       }}
     >
       <button
@@ -447,13 +404,20 @@ export function SidebarPopoverMenu({
           clearTimers();
           if (open && (pinned || !openOnHover)) close();
           else {
-            // Enter and Space click with no pointer: land on the first item
+            // event.detail is 0 for a click from Enter or Space: land on the first item.
             focusFirst.current = anchored && event.detail === 0;
             setPinned(true);
             setOpen(true);
           }
         }}
         onKeyDown={(event) => {
+          if (open && closesOnEscape(event)) {
+            // A menu opened with the mouse leaves focus here; Escape closes it before anything around it.
+            event.preventDefault();
+            event.stopPropagation();
+            close(true);
+            return;
+          }
           if (!anchored || open || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
           event.preventDefault();
           focusFirst.current = true;
@@ -467,7 +431,7 @@ export function SidebarPopoverMenu({
 
       {anchored
         ? typeof document !== "undefined" && sheet ? createPortal(<>{sheet}{subSheet}</>, document.body) : null
-        : sheet}
+        : <>{sheet}{typeof document !== "undefined" && subSheet ? createPortal(subSheet, document.body) : null}</>}
     </div>
   );
 }

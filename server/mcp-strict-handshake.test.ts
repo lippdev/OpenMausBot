@@ -1,9 +1,4 @@
-// A URL MCP server that deserializes initialize strictly (a Voluum
-// server: "Unrecognized field 'schemaValidation'") against the
-// handshakes the engines really send. The payloads below were captured from
-// the real binaries (Oct 8 2026) talking to testing/fake-http-mcp-server.ts
-// with `strictInitialize`; OMB's own client and its stdio proxy send the
-// minimal handshake and pass.
+// Initialize payloads captured from the real engine binaries, against a server that deserializes initialize strictly.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { createServer, request as httpRequest, type Server } from "node:http";
@@ -25,8 +20,7 @@ const CLAUDE = {
 };
 /** grok 1.0.25 (`grok mcp doctor`; a session needs a grok.com sign-in) */
 const GROK = { protocolVersion: "2025-11-25", capabilities: { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } } }, clientInfo: { name: "grok-shell-voluum", version: "1.0.25" } };
-/** rmcp's FormElicitationCapability with schema validation turned on: the
- * field a Voluum server named */
+/** rmcp's FormElicitationCapability with schema validation on: the field a Voluum server named */
 const SCHEMA_VALIDATION = { ...CODEX, capabilities: { elicitation: { form: { schemaValidation: true }, url: {} } } };
 
 const TOOLS = [{ name: "report", inputSchema: { type: "object" } }, { name: "campaigns", inputSchema: { type: "object" } }];
@@ -42,22 +36,19 @@ async function post(url: string, params: unknown) {
 
 type Reply = { id?: unknown; result?: any; error?: { code: number; message: string } };
 
-/** This test process's environment without any proxy setting of its own. */
 function withoutProxies(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const name of ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy", "NODE_USE_ENV_PROXY"]) delete env[name];
   return env;
 }
 
-/** Every AbortSignal.timeout in the proxy fifty times shorter, so its two
- * minutes take 2.4 s here and a three-second call stands for 150 s. */
+/** Every AbortSignal.timeout in the proxy fifty times shorter: its two minutes take 2.4 s here. */
 const FAST_CLOCK = ["--import", `data:text/javascript,${encodeURIComponent("const t = AbortSignal.timeout.bind(AbortSignal); AbortSignal.timeout = (ms) => t(ms / 50);")}`];
 
 describe("strict initialize fixture", () => {
   let fake: FakeHttpMcp | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
   let forwarder: Server | undefined;
-  /** Start the proxy `descriptor` names, the way an engine does. */
   const startProxy = (descriptor: StdioServer, flags: string[] = [], env: NodeJS.ProcessEnv = process.env) => {
     child = spawn(descriptor.command, ["--experimental-strip-types", "--no-warnings", ...flags, ...descriptor.args!], { stdio: "pipe", env: { ...env, ...descriptor.env } });
     const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
@@ -126,17 +117,12 @@ describe("strict initialize fixture", () => {
       child!.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params ? { params } : {}) })}\n`);
       return JSON.parse((await lines.next()).value as string) as { result?: any; error?: unknown };
     };
-    // the engine's own handshake would be refused upstream; the proxy's is not
     expect((await ask(1, "initialize", handshake)).result.serverInfo.name).toBe("fake-http-mcp");
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     expect((await ask(2, "tools/list")).result.tools.map((tool: { name: string }) => tool.name)).toEqual(["report", "campaigns"]);
     expect(fake.initializes).toEqual([{ protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "OpenMausBot tool proxy", version: "1" } }]);
   });
 
-  // The proxy cannot tell an OpenMausBot sign-in from a key typed into a
-  // header: both arrive as headers. So a 401 names both ways out, and first
-  // the one that needs nobody: a sign-in that ran out mid-turn is refreshed
-  // when the next message starts.
   it.each([
     ["a sign-in token", { Authorization: "Bearer expired-token" }],
     ["an API key header", { "x-api-key": "rotated-api-key-0001" }],
@@ -152,9 +138,6 @@ describe("strict initialize fixture", () => {
     expect(message).not.toMatch(/please (?:log out and )?sign in again/i);
   });
 
-  // A strict server reports a bad argument as a JSON-RPC error (MCP
-  // 2025-06-18): the model needs its code and words to fix the call, but
-  // never the server's address or a header value echoed in them.
   it("relays a server's own error for a call with its code, address and header values removed", async () => {
     const key = "voluum-access-key-7f3a9c";
     let url = "";
@@ -180,10 +163,6 @@ describe("strict initialize fixture", () => {
     expect((await ask(4, "tools/call", { name: "report", arguments: { campaignId: "c-1" } })).result.content[0].text).toBe("remote execution recorded");
   });
 
-  // An ACP agent that connected to a URL server by itself waited as long as
-  // its own MCP timeout (Gemini CLI, Qwen Code: ten minutes). Through the
-  // proxy a long call must not be cut at the proxy's old two minutes; only
-  // the tool directory keeps them. The clock runs fifty times fast here.
   it("lets a long call finish through an ACP mount; only the tool directory keeps its two minutes", async () => {
     fake = await startFakeHttpMcp({ tools: TOOLS, callDelayMs: 3_000 });
     const acp = startProxy(mcpStdioServer({ type: "http", url: fake.url, headers: {} }, { nodeEnv: { ELECTRON_RUN_AS_NODE: "1" } })!, FAST_CLOCK);
@@ -195,9 +174,6 @@ describe("strict initialize fixture", () => {
     expect((await searched(2, "tools/call", { name: "report", arguments: {} })).error).toEqual({ code: -32800, message: "MCP request cancelled" });
   }, 20_000);
 
-  // An internal http:// server reachable only through the person's
-  // HTTP_PROXY: an engine's own client went through it, so the proxy must too
-  // (in absolute form; Node's env-proxy switch stays off for http://).
   it("reaches a plain http server through HTTP_PROXY, never directly", async () => {
     fake = await startFakeHttpMcp({ tools: TOOLS });
     const upstream = new URL(fake.url);

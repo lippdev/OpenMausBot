@@ -14,11 +14,6 @@ type Phase =
   | { kind: "manual" }
   | { kind: "failed"; error: string };
 
-/** Offered under a failed turn whose Claude Code is too old for the model.
- * The bot runs Claude Code's own updater through the same route as Engines
- * (which refuses while another Claude turn is running), or the person takes
- * the command and runs it themselves. Retry follows either path, because the
- * update alone does not resend the message that failed. */
 export function ClaudeUpdatePrompt({
   instance,
   onRetry,

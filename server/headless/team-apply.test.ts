@@ -1,6 +1,3 @@
-// team apply against a stand-in server that echoes back what it stores:
-// the plan, the writes it takes, and that a second apply of the same file
-// finds nothing to do and sends no write. botPatch is checked field by field.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
@@ -18,7 +15,6 @@ import { loadTeamFile, type DesiredBot, type TeamFile } from "./team-file.ts";
 
 type Rec = Record<string, any>;
 
-/** A workspace in memory, served through the routes apply uses. */
 function workspace(seed: { bots?: Rec[]; groups?: Rec[]; sections?: string[]; config?: Rec } = {}) {
   const state = {
     bots: (seed.bots ?? []).map((bot) => ({ busy: false, title: "", description: "", modelSelection: { instanceId: "claude", model: "claude-sonnet-5" }, ...bot })) as Rec[],
@@ -131,7 +127,6 @@ describe("team apply", () => {
     ]);
     expect(state.bots.find((bot) => bot.name === "Priya")).toMatchObject({ section: "Launch Room", computer: "browser",
       browserProfile: "guest", toolScope: { deny: ["mcp:mail:*"] } });
-    // A new bot is at Full access already, so the file's `approval: full` writes nothing.
     expect(approvalModeFor(state.bots.find((bot) => bot.name === "Priya")!)).toBe("full");
     expect(state.bots.find((bot) => bot.name === "Room Lead")).toMatchObject({ chiefOfStaff: true, managedSections: [], soul: "Lead the rehearsal.", cwd: "/work/room" });
 
@@ -207,8 +202,6 @@ describe("team apply", () => {
     const first = await reconcile(client, file({ engines: [engine] }), options({ env }));
     expect(first.lines[0]).toBe("engine claude: key «redacted 32 chars» · base URL set");
     expect(JSON.stringify(first)).not.toContain("team-7f3a9c");
-    // set up already: a run without the gateway's variable has nothing to read,
-    // and the plan says the address was not compared instead of nothing
     const again = await reconcile(client, file({ engines: [engine] }), options({ env: {} }));
     expect(again.lines).toEqual(["engine claude: its key is already set and the server does not show its base URL, so the file's was not compared (--rotate-secrets writes both)"]);
     expect(again).toMatchObject({ created: 0, changed: 0, writes: 0 });
@@ -224,7 +217,6 @@ describe("team apply", () => {
     expect(state.bots.find((bot) => bot.id === "sales-priya")).toEqual({ id: "sales-priya", name: "Priya", section: "Sales", title: "Account manager", soul: "Sell.",
       busy: false, description: "", modelSelection: { instanceId: "claude", model: "claude-sonnet-5" } });
     expect(state.bots.find((bot) => bot.id === "room-priya")).toMatchObject({ title: "Skeptical buyer", approvalMode: "full" });
-    // and the next apply finds the team's Priya as it left her
     writes.length = 0;
     expect(await reconcile(client, file(), options())).toMatchObject({ lines: [], writes: 0 });
   });
@@ -256,7 +248,6 @@ describe("team apply", () => {
     const { client, writes } = workspace();
     // Claude limits MCP tools only: a built-in one in the selection would stop every turn it runs
     for (const visitor of [{ ...priya, tools: { deny: ["native:Bash"] } }, { ...priya, model: { instanceId: "claude", model: "claude-haiku-5" }, tools: { deny: ["native:Bash"] } }]) {
-      // on the workspace's default engine, or on one the file names
       await expect(reconcile(client, file({ bots: [lead, visitor] }), options({ apply: false })))
         .rejects.toThrow('bot "Priya": claudeAgent: native tool selection is not supported by this engine');
     }
@@ -277,7 +268,6 @@ describe("botPatch", () => {
   const echo = { id: "b1", name: "Priya", section: "Launch Room", title: "Skeptical buyer", description: "", approvalMode: "full",
     computer: "browser", browserProfile: "guest", toolScope: { deny: ["native:Bash", "native:Write"] }, modelSelection: { instanceId: "claude", model: "claude-sonnet-5", effort: "high" } };
 
-  // the same bot as the echo, its tool selectors in another order
   const same: DesiredBot = { ...priya, tools: { deny: ["native:Write", "native:Bash"] } };
 
   it("finds nothing to change when the echo already matches, whatever the order of tool selectors", () => {
@@ -287,11 +277,9 @@ describe("botPatch", () => {
 
   it("reads every way of selecting every tool as the same, and clears a selection to get there", () => {
     const everything: DesiredBot = { ...same, tools: null };
-    // a bot with no selection, or an empty one stored by an earlier client, is already there
     expect(botPatch(everything, { ...echo, toolScope: undefined }, "Launch Room")).toEqual({ patch: {}, changes: [] });
     expect(botPatch(everything, { ...echo, toolScope: { deny: [] } }, "Launch Room")).toEqual({ patch: {}, changes: [] });
     expect(botPatch(everything, echo, "Launch Room")).toEqual({ patch: { toolScope: null }, changes: ["tools: every tool"] });
-    // allowing nothing is a selection, not every tool
     expect(botPatch({ ...same, tools: { allow: [] } }, { ...echo, toolScope: undefined }, "Launch Room").patch).toEqual({ toolScope: { allow: [] } });
   });
 
@@ -299,8 +287,6 @@ describe("botPatch", () => {
     expect(botPatch({ ...same, computer: "local", approval: "auto" }, echo, "Launch Room").patch).toMatchObject({
       computer: "local", approvalMode: "auto", applyToAllThreads: true, acknowledgeLocalAuto: true });
     expect(botPatch({ ...same, computer: "local" }, echo, "Launch Room").patch).not.toHaveProperty("acknowledgeLocalAuto");
-    // the file names one, and the bot already has the other: the server asks
-    // for the confirmation all the same, and the file is it
     expect(botPatch({ ...same, approval: "auto", computer: undefined }, { ...echo, computer: "local" }, "Launch Room").patch)
       .toEqual({ approvalMode: "auto", applyToAllThreads: true, acknowledgeLocalAuto: true });
     expect(botPatch({ ...same, approval: undefined, computer: "local" }, { ...echo, approvalMode: "auto" }, "Launch Room").patch)
@@ -309,11 +295,9 @@ describe("botPatch", () => {
   });
 
   it("changes the model, keeps an effort the file does not name, and moves a bot to Auto computer with null", () => {
-    // the selection is replaced whole, so the effort goes with it on the same engine
     expect(botPatch({ ...same, model: { instanceId: "claude", model: "claude-haiku-5" } }, echo, "Launch Room")).toEqual({
       patch: { modelSelection: { instanceId: "claude", model: "claude-haiku-5", effort: "high" }, requireAvailableModel: true },
       changes: ["model claude/claude-sonnet-5 (high) → claude/claude-haiku-5 (high)"] });
-    // another engine may not offer it
     expect(botPatch({ ...same, model: { instanceId: "codex", model: "gpt-6" } }, echo, "Launch Room").patch.modelSelection).toEqual({ instanceId: "codex", model: "gpt-6" });
     expect(botPatch({ ...same, effort: "low" }, echo, "Launch Room").patch.modelSelection).toEqual({ instanceId: "claude", model: "claude-sonnet-5", effort: "low" });
     expect(botPatch({ ...same, computer: "auto" }, echo, "Launch Room")).toEqual({ patch: { computer: null }, changes: ["computer browser → auto"] });
@@ -344,7 +328,6 @@ describe("team export", () => {
       const written = [readFileSync(out, "utf8"), readFileSync(join(dir, "skills/room-lead/launch-report/SKILL.md"), "utf8")].join("\n");
       expect(written).not.toContain(KEY);
       expect(written).toContain("«redacted");
-      // applied back: nothing is written over the secrets the server keeps
       const back = loadTeamFile(out);
       expect(back.bots.find((bot) => bot.name === "Room Lead")).not.toHaveProperty("soul");
       expect(back.bots.find((bot) => bot.name === "Room Lead")!.skills).toEqual([]);

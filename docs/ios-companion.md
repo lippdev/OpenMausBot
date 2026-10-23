@@ -123,7 +123,11 @@ There are three deliberately separate trust surfaces:
 
 The desktop app owns the sidecar lifecycle through
 `electron/companion.mjs`. The renderer only receives narrow IPC operations; it
-does not fetch the control port directly.
+does not fetch the control port directly. Every control route needs a token
+the app makes for each sidecar launch and hands over Electron's private port,
+so a page served from `127.0.0.1:8811` itself, as a bot's browser could open
+it, cannot start pairing or change a device's access. A standalone sidecar
+prints its pairing page link with that token.
 
 ## SQLite compatibility
 
@@ -216,6 +220,11 @@ fixed loopback gateway and `cloudflared`. If Electron or that sidecar exits,
 the guardian first makes forwarding unavailable, confirms the connector is
 dead, and only then releases the gateway. Another process that later binds a
 local port cannot inherit the public route.
+
+The hop from this computer to Cloudflare runs on the home upload,
+uncompressed, so the sidecar gzips JSON replies of 1 KB or more on that
+private socket when the phone accepts gzip. The event stream, file downloads
+and the LAN port are sent as they always were.
 
 ## Pairing and device security
 

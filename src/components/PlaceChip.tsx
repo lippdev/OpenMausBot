@@ -13,17 +13,11 @@ import { PlaceIcon } from "./PlaceIcon";
 
 export type PlaceAvailability = Record<Place, boolean>;
 
-/** Each place's view (shared/place-view.ts) for this bot, and whether a
- * conversation can be pinned there: the same view the Works on cards and
- * the Simple grid read, so the chip never offers a place the panel would
- * grey out, and names a problem in the same few words. */
 export function usePlaceViews(bot: Bot): Record<Place, { view: PlaceView; reachable: boolean; policy: boolean }> {
   const { state } = useStore();
   const { capabilities } = useDesktopCapabilities();
   const seat = usePlaceSeat(state.config, capabilities.host.platform);
   const backend = bot.cloudBackend === "vps" ? "vps" : "box";
-  // Places the enrolled organisation disallows, or this server never
-  // offers (an OMB Cloud home), are not reachable.
   const allowed = state.config?.managedPolicy?.computers ?? { thisComputer: true, localVm: true, box: true, vps: true };
   const providerSupportsLocal = instanceSupportsLocalComputer(state.instances, bot);
   const local = {
@@ -48,11 +42,6 @@ const DESCRIPTION: Record<Place, "computer.dest.cloudDesc" | "computer.dest.vmDe
   cloud: "computer.dest.cloudDesc", vm: "computer.dest.vmDesc", local: "computer.dest.localDesc", browser: "computer.dest.browserDesc",
 };
 
-/** Where this conversation works, beside the send button in Advanced mode
- * (Simple leaves every conversation on its bot's Works on). Shows the
- * effective place (the conversation's pin, else the bot's Works on), pulses
- * while a turn is acting there, and pins another place for this
- * conversation only. No confirmation card: choosing is the whole gesture. */
 export function PlaceChip({ bot, task, live, disabled = false, onPin }: {
   bot: Bot;
   task?: Pick<Task, "surface"> | null;
@@ -83,8 +72,6 @@ export function PlaceChip({ bot, task, live, disabled = false, onPin }: {
 
   const choose = (surface: Place | null) => { setOpen(false); if (surface !== (task?.surface ?? null)) onPin(surface); };
   const botDefault = bot.computer ?? "auto";
-  // A bot on Auto offers Auto itself as the unpinned default, rather than
-  // "follow this bot's setting" spelled out to end in the same word.
   const followsAuto = botDefault === "auto";
 
   return (
@@ -130,8 +117,6 @@ export function PlaceChip({ bot, task, live, disabled = false, onPin }: {
             {PLACES.filter((place) => placeOffered(place, state.config)).map((place) => {
               const selected = task?.surface === place;
               const { view, reachable, policy } = places[place];
-              // A problem is named in the panel's own few words; a place
-              // the organisation or this server never offers stays plain.
               const detail = !policy ? t("place.unavailable") : placeHasIssue(view) ? view.short : t(DESCRIPTION[place]);
               return (
                 <button

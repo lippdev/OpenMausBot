@@ -138,7 +138,6 @@ describe("managed companion credentials", () => {
 
   it("drops a planned release with the address it belonged to", () => {
     const credentials = { composioApiKey: "keep-me", [MANAGED_COMPANION_RELEASE_AT_FIELD]: 1_700_000_000_000 };
-    // A fresh address (or the same one again) starts with nothing planned.
     const provisioned = withManagedCompanionTunnelAccess(credentials, {
       endpoint: { url: ENDPOINT },
       connectorToken: TOKEN,
@@ -318,8 +317,7 @@ describe("managed connector lifecycle", () => {
       runtimeExecutable: RUNTIME,
       runtimeRoot: path.join(temporaryDirectory(), "runtime"),
       spawnProcess,
-      // Deliberately ignore AbortSignal: cancellation must wake the lifecycle
-      // even if a fetch implementation or network stack never settles.
+      // Ignores AbortSignal: cancellation must wake the lifecycle even if a fetch never settles.
       fetchImpl: vi.fn(() => new Promise(() => {})),
       onChange: (state) => states.push(state),
     });
@@ -328,9 +326,7 @@ describe("managed connector lifecycle", () => {
     await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledOnce());
 
     const stopping = manager.stop();
-    // This assertion is intentionally before either lifecycle promise is
-    // awaited: stop intent must signal the owned process synchronously rather
-    // than sitting behind the 15-second verification transition.
+    // Before either lifecycle promise is awaited: stop intent must signal the process synchronously.
     expect(child.stdin.end).toHaveBeenCalledOnce();
     expect(child.kill).not.toHaveBeenCalled();
     await expect(stopping).resolves.toMatchObject({ status: "stopped", ready: false });

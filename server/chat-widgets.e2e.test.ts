@@ -1,9 +1,4 @@
-// A chat widget through a real server on an isolated fixture: a turn's own
-// capability shows and replaces a widget on the internal card route, a press
-// on POST /api/bots/:id/messages reaches the engine as a reply to it, and a
-// retry of that press neither sends nor settles twice. The fixture's engine
-// resumes its session (a CLI new enough for strictResume), so the press turn
-// also shows what a resumed session is handed: not its own widget again.
+// The fixture's engine resumes its session (a CLI new enough for strictResume), so the press turn also shows what a resumed session is handed.
 import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +30,6 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
     return result;
   };
   const dump = () => JSON.parse(readFileSync(fixture.fixtureDumpPath, "utf8"));
-  /** The words of the turn the fake engine was last given. */
   const turnPrompt = (): string => {
     const content = dump().prompt?.message?.content;
     return Array.isArray(content) ? content.map((block: { text?: string }) => block.text ?? "").join("\n") : String(content ?? "");
@@ -47,7 +41,6 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
     const transcript = async (): Promise<any[]> => (await api("GET", `/api/threads/${bot.threadId}/messages`)).messages;
     const card = (body: unknown, expected: number, token: string) => api("POST", "/api/internal/options-card", body, expected, token);
 
-    // ── a turn shows a widget, then replaces it ────────────────────────
     await control("send", "--bot", bot.id, "--task", bot.threadId, "--text", "What is open?");
     let token = "";
     await expect.poll(() => {
@@ -65,7 +58,6 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
     expect(await card({ tool: "update_widget", widget_id: draft.messageId, widget: WIDGET_SAMPLES.routineForm }, 201, token)).toEqual({ messageId: draft.messageId });
     expect(await card({ tool: "update_widget", widget_id: "no-such-message", widget: WIDGET_SAMPLES.routineForm }, 404, token))
       .toEqual({ error: "No widget with that id in this conversation." });
-    // The legacy body (no `tool`) still lands on the options card, which only the Watcher may create.
     expect(await card({ title: "Deploy now?", subtitle: "The build is green.", options: ["Yes", "No"] }, 403, token))
       .toEqual({ error: "create_options_card is not enabled for this bot." });
     writeFileSync(gate, "finish");
@@ -74,7 +66,6 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
     const shown = (await transcript()).find((message) => message.id === draft.messageId);
     expect(shown).toMatchObject({
       role: "bot", kind: "widget",
-      // Replaced once since it was shown.
       widget: { v: 1, rev: 1, root: { type: "Card", id: "n1", title: "New routine: release check", confirm: { label: "Create routine" } } },
     });
     expect(shown).not.toHaveProperty("from");
@@ -82,7 +73,6 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
     expect(shown.text.split("\n")[0]).toBe("**New routine: release check** · Scout proposes this. Change anything before you create it.");
     expect((await transcript()).filter((message) => message.kind === "widget")).toHaveLength(1);
 
-    // ── typed words in reply to the widget are not a press, whatever they say ──
     await api("POST", `/api/bots/${bot.id}/messages`, { threadId: bot.threadId, text: "Create routine", replyToId: draft.messageId }, 202);
     await expect.poll(turnPrompt, { timeout: 15_000 }).toContain("The person typed it; they did not press anything on the widget.");
     const typedPrompt = turnPrompt();
@@ -93,11 +83,9 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
     await settledTurn();
     expect((await transcript()).find((message) => message.id === draft.messageId).widget).not.toHaveProperty("settled");
 
-    // ── the person answers it ──────────────────────────────────────────
     unlinkSync(gate);
     const sendId = "widget-press-0123456789";
     const press = { threadId: bot.threadId, sendId, widgetAction: { messageId: draft.messageId, ref: "confirm", rev: 1, values: { days: "mon,tue,wed,thu,fri,sat,sun", report: "discord:releases", stopOnRed: false } } };
-    // A press made on the tree the bot has since replaced (no rev is revision 0) is refused.
     for (const stale of [{ messageId: draft.messageId, ref: "confirm" }, { messageId: draft.messageId, ref: "confirm", rev: 0 }]) {
       expect(await api("POST", `/api/bots/${bot.id}/messages`, { threadId: bot.threadId, sendId, widgetAction: stale }, 409)).toEqual({ error: "This widget changed. Check it and press again." });
     }
@@ -108,8 +96,7 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
     const text = "Create routine\nRuns on: Every day\nStarts: 2026-10-14\nAt: 09:00\nReport to: Discord · #releases";
     const first = await api("POST", `/api/bots/${bot.id}/messages`, press, 202);
     expect(first).toMatchObject({ ok: true, threadId: bot.threadId, message: { role: "user", kind: "text", text, replyToId: draft.messageId, sendId } });
-    // The engine is handed the press as the answer to its widget, with the action it attached.
-    // (The engine stays warm between these turns, so its dump is rewritten in place.)
+    // The engine stays warm between these turns, so its dump is rewritten in place.
     await expect.poll(turnPrompt, { timeout: 15_000 }).toContain('pressed: "Create routine"');
     const prompt = turnPrompt();
     evidence.push({ prompt });
@@ -120,9 +107,7 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
       "--- widget ---",
       "**New routine: release check** · Scout proposes this. Change anything before you create it.",
     ].join("\n"));
-    // What was pressed sits inside the fence, the label quoted.
     expect(prompt).toContain(`\npressed: "Create routine"\naction: routine.create\npayload: {"name":"release-check"}\n--- end widget ---\nCurrent message:\n${text}`);
-    // The session that showed the widget resumes: it is not handed its own widget back as a message it has not seen.
     expect(prompt).not.toContain("your session has not seen yet");
     expect(prompt.split("**New routine: release check**")).toHaveLength(2);
 
@@ -132,15 +117,12 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
       values: { days: "mon,tue,wed,thu,fri,sat,sun", starts: "2026-10-14", at: "09:00", report: "discord:releases", stopOnRed: false },
     });
 
-    // The same press again: the same receipt, no second message, no second settle.
     const retry = await api("POST", `/api/bots/${bot.id}/messages`, press, 202);
     expect(retry.message.id).toBe(first.message.id);
-    // Anything else on an answered widget is refused.
     for (const widgetAction of [press.widgetAction, { messageId: draft.messageId, ref: "cancel" }]) {
       expect(await api("POST", `/api/bots/${bot.id}/messages`, { threadId: bot.threadId, sendId: "widget-press-another-01", widgetAction }, 409))
         .toEqual({ error: "This was already answered." });
     }
-    // And the bot can no longer replace it, though its new turn may show another.
     token = dump().mcpConfig.mcpServers.agents.env.OMB_COMMS_TOKEN;
     expect(await card({ tool: "update_widget", widget_id: draft.messageId, widget: WIDGET_SAMPLES.buildStatus }, 409, token))
       .toEqual({ error: "The person already answered that widget. Show a new one." });
@@ -151,12 +133,10 @@ it("shows, replaces and answers a widget on a bot's own conversation, once per p
 
     const after = await transcript();
     expect(after.filter((message) => message.role === "user").map((message) => [message.text, message.replyToId, message.sendId]))
-      // the control tool's own send carries a cli- send id
       .toEqual([["What is open?", undefined, expect.stringMatching(/^cli-/)], ["Create routine", draft.messageId, undefined], [text, draft.messageId, sendId]]);
     expect(after.find((message) => message.id === draft.messageId).widget.settled).toEqual(settled);
     expect(after.find((message) => message.id === next.messageId)).toMatchObject({ kind: "widget", text: "Build 25 is uploading." });
 
-    // What the control surface and the export show of it.
     const listed = (await control("messages", "--bot", bot.id, "--task", bot.threadId, "--limit", "30")).messages as any[];
     expect(listed.find((message) => message.id === draft.messageId)).toMatchObject({
       kind: "widget", text: shown.text, widget: { v: 1, rev: 1, root: { type: "Card", title: "New routine: release check" }, settled: { ref: "confirm", sendId } },

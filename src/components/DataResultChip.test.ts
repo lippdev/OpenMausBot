@@ -12,7 +12,6 @@ const dispatch = vi.fn();
 vi.mock("@/state/store", () => ({ useStore: () => ({ state: { bots: [{ id: "bot" }] }, dispatch }) }));
 import { DataResultChip } from "./DataResultChip";
 
-// As the server stores it: the tool that ran, with the card's title only in dataResult.
 const message: Message = { id: "receipt", at: 1, role: "bot", kind: "activity", tool: { name: "data_show", ok: true },
   dataResult: { botId: "bot", cardId: "c_1", title: "Revenue", kind: "chart" } };
 

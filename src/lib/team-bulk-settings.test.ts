@@ -55,8 +55,6 @@ describe("team-wide settings", () => {
     expect(plan.map((row) => row.status)).toEqual(["apply", "unchanged", "skip", "apply"]);
     expect(plan[0]).toMatchObject({ patch: { approvalMode: "full", applyToAllThreads: true } });
     expect(plan[2]).toMatchObject({ reason: expect.stringMatching(/busy/) });
-    // Antigravity's picker offers no Auto: the team change says so instead of
-    // writing a level that bot's own panel would never offer.
     const auto = planTeamChange([bots[3]!], [engine("ag", "antigravityAgent", ["x"])], { kind: "approval", mode: "auto" });
     expect(auto[0]).toMatchObject({ status: "skip", reason: "Ag does not offer this approval level" });
     expect(planTeamChange([bot("codex", { modelSelection: { instanceId: "codex", model: "gpt-5" } })], instances,
@@ -64,7 +62,6 @@ describe("team-wide settings", () => {
   });
 
   it("sends every level to each bot and every one of its threads, the same way, as the bot API receives it", async () => {
-    // Each bot has a thread opened with New thread that kept its own level.
     const withOpened = (id: string, botMode: "ask" | "full", threadMode: "ask" | "full") => bot(id, { approvalMode: botMode, tasks: [
       { threadId: `${id}-t`, title: "Main", createdAt: 1 }, { threadId: `${id}-new`, title: "New thread", createdAt: 2, approvalMode: threadMode },
     ] });
@@ -126,7 +123,6 @@ describe("team-wide settings", () => {
     expect(high[2]).toMatchObject({ reason: "Pi uses reasoning variants instead of effort levels" });
     expect(planTeamChange([bots[0]!], instances, { kind: "model", effort: "xhigh" })[0]).toMatchObject({ status: "skip", reason: "Claude does not offer this effort level" });
 
-    // Clearing the effort, and a variant only following its own model.
     expect(planTeamChange([bots[0]!], instances, { kind: "model", effort: null })[0])
       .toMatchObject({ patch: { modelSelection: { instanceId: "claude", model: "sonnet" } } });
     expect(planTeamChange([bots[2]!], instances, { kind: "model", model: "local" })[0]).toMatchObject({ status: "unchanged" });
@@ -169,6 +165,6 @@ describe("team-wide settings", () => {
   it("is offered in the team menu only when the caller passes the owner's action", () => {
     const base = { onAddBots: vi.fn(), onRename: vi.fn(), onShare: vi.fn(), onDelete: vi.fn() };
     expect(renderToStaticMarkup(createElement(TeamMenuItems, base))).not.toContain("Set for all bots");
-    expect(renderToStaticMarkup(createElement(TeamMenuItems, { ...base, onSetForAll: vi.fn() }))).toContain("Set for all bots in this team…");
+    expect(renderToStaticMarkup(createElement(TeamMenuItems, { ...base, onSetForAll: vi.fn() }))).toContain("Set for all bots in this department…");
   });
 });

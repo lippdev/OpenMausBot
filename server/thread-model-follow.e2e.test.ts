@@ -1,8 +1,3 @@
-// A thread's own model that can't run gives way to its bot's, through the
-// real server and fake Claude CLIs: the turn runs on the bot's engine, the
-// thread follows the bot from then on, and exactly one line says so. A
-// signed-out engine gives way only when the bot's model is on another engine
-// that can run; on the same engine the turn still meets its sign-in.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,7 +35,6 @@ async function withEngines(check: (fixture: Fixture) => Promise<void>) {
     return result;
   };
   const control = (...args: string[]) => runControlOmb([...args, "--url", url]) as Promise<any>;
-  /** Stop the server, set up the engines as asked, and start it again. */
   const restart = async (engines: Engines) => {
     await waitForExit(server ?? fixture.child, { signal: "SIGTERM" });
     const configPath = join(dataDir, "config.json");
@@ -74,6 +68,11 @@ async function withEngines(check: (fixture: Fixture) => Promise<void>) {
   };
   try {
     await restart({});
+    // Chief first makes the starter its team's Chief, which answers a teammate's failed run with a Team incidents turn
+    // of its own on Claude, whose prompts these tests count. Stepped down, only the threads under test run.
+    const { bots } = await api("GET", "/api/bots") as { bots: Array<{ id: string; chiefOfStaff?: boolean }> };
+    const starter = bots.find((bot) => bot.chiefOfStaff)!;
+    await api("PATCH", `/api/bots/${starter.id}`, { chiefOfStaff: false });
     await check({ api, control, restart, prompts: (instance) => lines(promptFile(instance)) });
   } finally {
     await waitForExit(server, { signal: "SIGTERM" });
@@ -82,7 +81,6 @@ async function withEngines(check: (fixture: Fixture) => Promise<void>) {
   }
 }
 
-/** A bot on Claude with one thread a person moved to `own`. */
 async function botWithOwnModel(fixture: Fixture, own: { instanceId: string; model: string }) {
   const { bot: created } = await fixture.control("new-bot", "--name", "Ada");
   const { task } = await fixture.api("POST", `/api/bots/${created.id}/tasks`, { title: "Own model" });
@@ -116,7 +114,6 @@ it.each([
     expect(messages.findLast((message) => message.role === "bot" && message.kind === "text")).toMatchObject({ turnSucceeded: true });
     expect(bot.modelSelection).toEqual({ instanceId: "claude", model: "claude-sonnet-5" });
     expect(await thread()).toMatchObject({ modelSelection: bot.modelSelection, followsBotModel: true });
-    // From then on it is an ordinary follower: no second line.
     const again = await sendAndSettle(fixture, bot.id, threadId, "STILL_FOLLOWING_5L");
     expect(again.filter(notice)).toHaveLength(1);
     expect(fixture.prompts("claude")).toHaveLength(2);
@@ -142,7 +139,6 @@ it("keeps the sign-in failure when the bot's model is on the same signed-out eng
     await fixture.restart({ claude: "signed-out" });
     const messages = await sendAndSettle(fixture, bot.id, threadId, "SAME_ENGINE_SIGN_IN_7N", "failed");
     expect(messages.filter(notice)).toHaveLength(0);
-    // The engine's own failure, flagged as the sign-in it is (src/lib/failed-turn.ts).
     expect(messages.findLast((message) => message.kind === "activity" && message.tool?.name?.startsWith("error:"))?.tool)
       .toMatchObject({ ok: false, setup: true });
     expect(fixture.prompts("claude")).toHaveLength(1);

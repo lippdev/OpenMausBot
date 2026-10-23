@@ -8,7 +8,6 @@ import { CallRecordRow } from "./CallRecordRow";
 
 const at = 1_700_000_000_000;
 const msg = (id: string, fields: Partial<Message>): Message => ({ id, role: "bot", kind: "text", at, ...fields }) as Message;
-/** A tool the provider ran: the only kind of chip a record lists as a step. */
 const step = (id: string, request: string, tool: NonNullable<Message["tool"]>) =>
   msg(id, { kind: "activity", requestMessageId: request, tool: { ...tool, itemId: `item-${id}` } });
 const row = (call: Partial<NonNullable<Message["call"]>> = {}) => msg("row", {
@@ -30,7 +29,6 @@ const transcript: Message[] = [
 ];
 const draw = (message: Message, messages: Message[] = transcript, { busy = false, hasMore = false } = {}) =>
   renderToStaticMarkup(createElement(CallRecordRow, { message, transcript: [...messages, message], botName: "Pepper", busy, hasMore }));
-/** What each line reads as: its markup's text. The glyphs carry none. */
 const lineTexts = (markup: string) => [...markup.matchAll(/<li\b[^>]*>(.*?)<\/li>/g)].map(([, inner]) => inner!.replace(/<[^>]+>/g, ""));
 
 afterEach(() => {
@@ -45,9 +43,7 @@ describe("CallRecordRow", () => {
     expect(markup).toContain("1:42");
     expect(markup).toContain("Searching the web");
     expect(markup).toContain("Allowed: run a command · by voice");
-    // a typed message's work is not the call's
     expect(markup).not.toContain("Reading a file");
-    // step names, never their arguments
     expect(markup).not.toContain("secret-query");
     expect(markup).not.toContain("rm -rf build");
   });
@@ -78,10 +74,8 @@ describe("CallRecordRow", () => {
       "Searching the web (Completed)",
       "Running the tests (Failed)",
       "Reading a file (Running)",
-      // an approval already says its outcome in words
       "Denied: run a command",
     ]);
-    // read out, not drawn: the glyph stays the visible cue
     expect(markup).toContain('<span class="sr-only"> (Failed)</span>');
   });
 
@@ -105,7 +99,6 @@ describe("CallRecordRow", () => {
     expect(markup).toContain('role="group"');
     expect(markup).toContain('aria-label="Live call: Call with Pepper, 1:42"');
     expect(markup).not.toContain("<section");
-    // a line wider than the pill truncates instead of spilling past its border
     expect(markup).toMatch(/<ul class="[^"]*\bmax-w-full\b/);
   });
 
@@ -118,14 +111,12 @@ describe("CallRecordRow", () => {
   });
 
   describe("a call that began before the messages loaded so far", () => {
-    // the transcript's oldest message is `at`, the call began 102 s before it
     const hint = "Some of this call may be in earlier messages";
 
     it("says its lines may be incomplete, and how to see them, when older messages remain", () => {
       const markup = draw(row(), transcript, { hasMore: true });
       expect(markup).toContain(hint);
       expect(markup).toContain("Load earlier messages");
-      // the lines it does have are still drawn
       expect(markup).toContain("Searching the web");
     });
 
@@ -140,7 +131,6 @@ describe("CallRecordRow", () => {
   });
 
   describe("a step that never reported how it went", () => {
-    // a turn that was stopped, killed or lost leaves its running step like this
     const work: Message[] = [
       msg("m1", { role: "user", text: "read the log", via: "call", callId: "c1" }),
       step("a1", "m1", { name: "Read", spoken: "reading a file" }),

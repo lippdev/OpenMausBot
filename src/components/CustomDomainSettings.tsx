@@ -14,8 +14,7 @@ export interface CustomDomainStatus {
   serverIpv4?: string | null;
 }
 
-/** Preview only; the server remains authoritative for domain validation.
- * Keep the full DNS name instead of guessing a provider's zone (e.g. co.uk). */
+/** Preview only; the server validates. Keep the full DNS name rather than guessing a provider's zone (co.uk). */
 export function customDomainDnsName(raw: string): string | null {
   const value = raw.trim();
   if (!value || /[\s\\?#@%]/.test(value)) return null;
@@ -57,8 +56,7 @@ export function CustomDomainDnsRecord({ domain, serverIpv4 }: { domain: string; 
   );
 }
 
-/** Fixed placeholder avoids turning a partially typed domain into shell or
- * Caddy configuration. Ports come from the running server, not the browser. */
+/** Security: a fixed placeholder, so a partially typed domain never becomes shell or Caddy configuration. */
 export function customDomainProxyExample(status: Pick<CustomDomainStatus, "appPort" | "webhookPort">): string {
   return `bots.example.com {
     handle /hooks/* {

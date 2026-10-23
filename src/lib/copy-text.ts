@@ -1,21 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-/** What a copy attempt did. "empty" means nothing was written, so the user's
- * existing clipboard is left alone. */
 export type CopyResult = "copied" | "empty" | "failed";
 export type CopyFeedback = "idle" | "copied" | "failed";
 
-/** How long the success/failure mark stays before the icon is restored. */
 export const COPY_FEEDBACK_MS = 1200;
 
-/** How long the web Clipboard write may stay unsettled before the desktop
- * bridge is tried. Chromium rejects an unfocused write at once; this only
- * bounds a write that never settles at all. */
+/** Bounds a web write that never settles; Chromium rejects an unfocused write at once. */
 export const WEB_WRITE_TIMEOUT_MS = 3000;
 
-/** Resolves true when the web write succeeds, false when it rejects, throws,
- * is unavailable or is still unsettled after WEB_WRITE_TIMEOUT_MS. A late
- * settlement is ignored, and its rejection is handled here. */
 function writeWeb(text: string): Promise<boolean> {
   return new Promise((resolve) => {
     let done = false;
@@ -35,21 +27,13 @@ function writeWeb(text: string): Promise<boolean> {
   });
 }
 
-/**
- * Writes `text` to the clipboard and says whether it landed. The web
- * Clipboard API is tried first; it rejects when the page is not focused, the
- * permission is denied, or the context is insecure (where `navigator.clipboard`
- * is absent), and a write that never settles times out. Only then does the
- * desktop bridge's explicit clipboard channel run, when the shell provides it.
- * Never throws.
- */
+/** The web Clipboard API rejects unfocused, denied and insecure-context writes; then the desktop bridge runs. Never throws. */
 export async function copyText(text: string): Promise<CopyResult> {
   if (!text.trim()) return "empty";
   if (await writeWeb(text)) return "copied";
   try {
     if (typeof window !== "undefined" && (await window.ogb?.copyText?.(text)) === true) return "copied";
   } catch {
-    // both mechanisms failed
   }
   return "failed";
 }
@@ -62,8 +46,6 @@ interface CopyFeedbackOptions {
   clearTimer?: (handle: unknown) => void;
 }
 
-/** Framework-free state machine behind the copy button: one write in flight
- * at a time, a result mark that resets itself, and no updates after dispose. */
 export function createCopyFeedback({
   copy,
   onChange,
@@ -81,7 +63,6 @@ export function createCopyFeedback({
   };
 
   return {
-    /** Resolves once the attempt settles; a click while one is in flight is ignored. */
     async click(text: string): Promise<CopyResult | "busy"> {
       if (pending) return "busy";
       pending = true;
@@ -109,7 +90,6 @@ export function createCopyFeedback({
   };
 }
 
-/** React binding: `state` drives the icon, `copy()` is safe to wire to onClick. */
 export function useCopyFeedback(text: string) {
   const [state, setState] = useState<CopyFeedback>("idle");
   const controller = useRef<ReturnType<typeof createCopyFeedback> | null>(null);

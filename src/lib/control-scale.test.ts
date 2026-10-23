@@ -1,6 +1,3 @@
-// The control scale in styles.css: one 32/28/24px button ladder, one 28px
-// transcript pill, one 22px chip, one inline-code chip and one menu row.
-// Each step keeps a medium weight and a line box that centers its label.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -27,7 +24,6 @@ describe("control scale", () => {
   it("steps buttons 32, 28 and 24px with a centered medium label", () => {
     const base = rule(".ui-button,\n  .ui-icon-button");
     expect(base).toMatchObject({ "min-height": "2rem", "font-size": "13px", "font-weight": "500", "line-height": "1.25rem", "align-items": "center" });
-    // padding plus line plus border stays under min-height, so 32px is real
     expect(rule(".ui-button")).toMatchObject({ padding: "0.25rem 0.75rem" });
     expect(rule(".ui-button-md")).toMatchObject({ "min-height": "1.75rem", "font-size": "13px", "line-height": "1.25rem" });
     expect(rule(".ui-button-sm")).toMatchObject({ "min-height": "1.5rem", "font-size": "12px", "line-height": "1rem" });

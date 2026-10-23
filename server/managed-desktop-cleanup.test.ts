@@ -4,16 +4,10 @@ import ts from "typescript";
 import { expect, it } from "vitest";
 import { changedInstanceIds, engineLaunches } from "./config.ts";
 
-// Execute the actual cleanup functions without importing index.ts, which would
-// start a server. State and adapters are synthetic; this is an ownership-race
-// regression, not proof of a real provider or conversation workflow.
+// Runs the real cleanup functions sliced from index.ts: importing index.ts would start a server.
 const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
 function section(start: string, end: string) {
-  // Anchor both markers to the start of a line. `function bindTurnComputer(`
-  // also matches INSIDE `async function bindTurnComputer(`, which silently cut
-  // the slice after the `async ` and left it dangling — the extracted code then
-  // died with `ReferenceError: async is not defined` instead of failing here
-  // with a readable "section moved". Anchoring makes drift loud again.
+  // Line-anchored: `function bindTurnComputer(` also matches inside `async function bindTurnComputer(`.
   const lineStart = (marker: string, from: number) => {
     if (from === 0 && source.startsWith(marker)) return 0;
     const at = source.indexOf(`\n${marker}`, from);
@@ -53,8 +47,7 @@ function fixture(kind: "direct" | "group", threadIds = ["first"]) {
   const interruptCalls: string[] = [], cancelled: string[] = [], revoked: string[] = [], messages: string[] = [], settled: string[] = [], detached: string[] = [];
   const roomStops: Array<{ threadId: string; status: string; detail: string; byHarness?: boolean }> = [];
   const causes: Array<{ threadId: string; cause: string; interrupted: boolean }> = [];
-  // What Stop does that a computer-wait park must not: stop the request,
-  // stop awaiting the conversation's teammates, cancel the person's message.
+  // What Stop does and a computer-wait park must not: stop the request, its teammates, the person's message.
   const directRequestOwners = new Map<string, { messageId?: string; stopped: boolean; generations: Set<string> }>();
   const stopAwaiting: string[] = [], patched: Array<[string, string, object]> = [];
   const stoppedCards: string[] = [];
@@ -92,11 +85,10 @@ function fixture(kind: "direct" | "group", threadIds = ["first"]) {
       interruptCalls.push(threadId); started.get(threadId)!.resolve(); return interrupted.get(threadId)!.promise;
     } } }) },
     turnResourceOwners: owners, directTurnGenerationByThread: generations, directTurnBots: directBots, groupSpeakers: speakers,
-    // each fixture room has one thread, keyed like its group
     activeGroupSpeaker: (groupId: string) => speakers.get(groupId),
     directRequestOwners,
     autoVmClaims,
-    turnResources: { release() {} }, settlingResourceOwners: new Map(), turnComputerResources: new Map(), teamComputerTurns: new Map(),
+    turnResources: { release() {} }, cloudComputerPower: { released() {} }, settlingResourceOwners: new Map(), turnComputerResources: new Map(), teamComputerTurns: new Map(),
     coordinator: { stopAwaitingDirect: (threadId: string) => { stopAwaiting.push(threadId); return []; } },
     noteTeammatesLeftRunning() {}, stopParkedCards: (threadId: string) => stoppedCards.push(threadId),
     cancelDirectTurnDispatch: (_botId: string, threadId: string) => cancelled.push(threadId),
@@ -153,8 +145,7 @@ it("preserves a personal direct turn started while a slower Company sibling is s
   const stopping = f.stop();
   await Promise.all([f.started("first"), f.started("slow")]);
   f.finish("first");
-  // Let interruptDirectThread finish for the first thread while the batch's
-  // second adapter remains pending, then simulate a new personal dispatch.
+  // Let the first thread's interrupt finish while the batch's second adapter stays pending.
   for (let count = 0; count < 5; count++) await Promise.resolve();
   f.replace("first");
   f.finish("slow"); await stopping;
@@ -194,16 +185,12 @@ it("skips a later snapshot entry replaced while an earlier group interrupt is pe
   expect(f.speakers.get("later")?.name).toBe("Personal turn");
 });
 
-// A room's assignments fail with the cause and its goal run says it, so
-// neither the assigner nor the person reads a Company change as their Stop.
 it("stops a Company room turn with the cause, not as the person's Stop", async () => {
   const f = fixture("group"), stopping = f.stop();
   await f.started("first"); f.finish("first"); await stopping;
   expect(f.roomStops).toEqual([{ threadId: "first", status: "stopped", detail: "turn interrupted — the Company connection changed", byHarness: true }]);
 });
 
-// Company engines stay attached while their turns end, so a turn's own end
-// can reach its requester before the cleanup loop: the cause is noted first.
 it("notes the Company cause for each direct turn before interrupting it", async () => {
   const f = fixture("direct", ["first", "second"]), stopping = f.stop();
   await Promise.all([f.started("first"), f.started("second")]); f.finish("first"); f.finish("second"); await stopping;
@@ -240,12 +227,6 @@ for (const kind of ["direct", "group"] as const) {
   });
 }
 
-// The computer wait ceiling at a lazy claim (#1651) ends the engine's turn
-// so the seat is not held through the wait, but it is not the person's
-// Stop: the request stays theirs, the conversation keeps awaiting its
-// teammates, and the root survives to continue in place when the seat
-// frees (decision 6: the ceiling is the runtime's admission). Stop does all
-// three, and only Stop.
 it("interruptParkedTurn ends the engine's turn without stopping the request or its teammates", async () => {
   const f = fixture("direct");
   f.directRequestOwners.set("first", { messageId: "m1", stopped: false, generations: new Set(["company-first"]) });
@@ -274,12 +255,6 @@ it("interruptParkedTurn cannot close a replacement generation's approval after a
   expectPersonalResources(f, "first");
 });
 
-// The seat park → continuation, card park → answer and seat-admission paths are
-// covered end-to-end by server/runtime-roots.e2e.test.ts (T2–T7) for direct
-// roots and by server/room-roots.e2e.test.ts for room members (a room
-// member's turn is a root too; docs/runtime-contract.md §10 PR 5), and by the
-// runtime-coordinator unit tests; no sliced-source fixture repeats them here.
-
 it("quitting disposes Company instances without interrupting turns or writing connection-changed cards", async () => {
   const f = fixture("direct");
   f.context.companyShutdown = true;
@@ -290,10 +265,6 @@ it("quitting disposes Company instances without interrupting turns or writing co
   expect(f.tasks.get("first")?.busy).toBe(true);
 });
 
-// A provider settings save replaces only the engines whose launch config it
-// changed (config.ts changedInstanceIds), and interrupts only the turns
-// running on them, each requester told why. Saving the same values again, or
-// changing another engine's key, leaves a teammate's long turn running.
 function reloadFixture() {
   type Thread = { botId: string; threadId: string; engine: string; busy: boolean };
   const threads: Thread[] = [
@@ -306,14 +277,12 @@ function reloadFixture() {
     compat: { driver: "openai-compat", environment: { OPENAI_COMPAT_API_KEY: "k1" } },
     claude: { driver: "claudeAgent" },
   };
-  // Two rooms, each with a member speaking on one of the engines; both
-  // members hold a bearer in each from turns they took there.
+  // Two rooms, each with a member speaking on one engine and holding a bearer in each.
   const rooms = new Map([["room-compat", { botId: "eli", engine: "compat" }], ["room-claude", { botId: "mira", engine: "claude" }]]);
   const log: string[] = [], settled: Array<{ generation: string; text: string }> = [], revoked: string[] = [];
   const slot = (botId: string) => [`${botId} agents`, { grants: "", token: `t-${botId}` }] as const;
   const bearers = new Map([...threads.map(thread => [thread.threadId, new Map([slot(thread.botId)])] as const),
     ...[...rooms.keys()].map(threadId => [threadId, new Map([slot("eli"), slot("mira")])] as const)]);
-  // What each turn in flight was handed.
   const capabilities = new Map([...threads.filter(thread => thread.busy), ...[...rooms].map(([threadId, room]) => ({ threadId, ...room }))]
     .map(turn => [`cap-${turn.threadId}`, { botId: turn.botId, threadId: turn.threadId }]));
   const context = vm.createContext({
@@ -385,11 +354,7 @@ it("saving the same provider settings again interrupts no turn and replaces no e
 it("a changed key replaces only its engine and tells only that engine's requesters why", async () => {
   const f = reloadFixture();
   await f.save({ ...f.configs(), compat: { driver: "openai-compat", environment: { OPENAI_COMPAT_API_KEY: "k2" } } });
-  // The other engine's processes, bearers and teammate turn are untouched.
   expect(f.log.filter(line => line.includes("claude") || line.includes("mira"))).toEqual([]);
-  // Its turns in flight lose what they were handed; every bearer its bot
-  // holds goes, in a room too, while the other engine's bot keeps its own
-  // even in the room the changed engine's bot was speaking in.
   expect(f.revoked).toEqual(["eli-work", "room-compat"]);
   expect(f.held()).toEqual({
     "eli-work": [], "eli-idle": [], "mira-work": ["mira agents"], "mira-idle": ["mira agents"],
@@ -397,7 +362,6 @@ it("a changed key replaces only its engine and tells only that engine's requeste
   });
   expect(f.log).toEqual(expect.arrayContaining(["auth:compat", "detach:compat", "cancel:eli-work", "load:compat", "attach:compat",
     "message:eli-work:turn interrupted — provider settings changed",
-    // a room's assignments fail with the cause, never as the person's Stop
     "room-stop:room-compat:stopped:turn interrupted — provider settings changed:true"]));
   expect(f.settled).toEqual([{ generation: "gen-eli-work", text: "turn interrupted — provider settings changed (eli-work)" }]);
   expect(f.threads.find(thread => thread.threadId === "mira-work")?.busy).toBe(true);
@@ -406,13 +370,6 @@ it("a changed key replaces only its engine and tells only that engine's requeste
   expect(f.context.providerFleetReloading).toBe(false);
 });
 
-// A harness stop ends a room with its cause: the assignments fail with it
-// (their assigners read it, not "Stopped by user") and the goal run's card
-// says it under the same "stopped" status, so no new failure notice goes out.
-// The person's Stop is the one a bot's thread gets (docs/runtime-contract.md
-// §2): the cards the room's roots parked on are stopped first, the room
-// stops awaiting its teammates (those left mid-turn noted once), then the
-// room's remaining rows are cancelled as theirs.
 it("ends a room stopped by the harness with its cause, and one the person stopped as theirs", () => {
   const run = (outcome?: { status: "stopped"; detail: string; byHarness: true }) => {
     const calls: string[] = [];
@@ -435,7 +392,6 @@ it("ends a room stopped by the harness with its cause, and one the person stoppe
   };
   expect(run({ status: "stopped", detail: "Turn interrupted — provider settings changed.", byHarness: true })).toEqual([
     "assignments:g|room|Turn interrupted — provider settings changed.|failed",
-    // the stopped thread hands back every member it was holding
     "member-claims:room",
     "goal:stopped|Turn interrupted — provider settings changed.",
   ]);

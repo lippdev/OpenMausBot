@@ -1,41 +1,17 @@
-// Prompt-cache keep-warm for bot threads.
-//
 // Ported from the design of Cache Tax (MIT, Copyright (c) 2026 Karan Bansal,
 // https://github.com/karanb192/claude-code-mods, hooks/register.ts): bots run
 // Claude Code with project-only settings, so a person's own Claude Code
-// plugins never reach them. A bot that sits idle past the provider's cache
-// lifetime with a big context pays to re-write all of it on the next
-// message; a cheap cache read every ~50 idle minutes keeps it warm instead.
+// plugins never reach them.
 //
-// After each completed turn of a thread whose context is big enough to
-// matter (MIN_CONTEXT_TOKENS), a bounded window is armed (the setting's
-// "for", 3h by default). While the thread is idle inside it, ONE ping is
-// sent per idle stretch, PING_AFTER_MS after the last request: a tool-less
-// request forked from the thread's live session (the driver's
-// cacheKeepWarm.ping), which never changes the conversation. Its usage is
-// read after every ping, and the window stops for good if the ping read
-// nothing from the cache or wrote at least a tenth of what it read (the
-// cache was already gone, so pinging again would only pay to re-write it).
-// It also stops at its deadline, on a failed ping, at the spend cap and when
-// the account's usage limit refuses a ping. There is no polling loop: one
-// timer per window, re-armed after each ping and each turn.
-//
-// Only engines whose prompt cache lives an hour: a subscription (Pro/Max)
-// login. A metered API key's main cache lives five minutes by default, and a
-// ping every four minutes costs more than the one re-write it avoids after
-// about 50 minutes of idle, so API-key engines are never pinged.
-//
-// Nothing is persisted. After a restart the live session is gone, and the
-// next turn relaunches the CLI with a freshly computed system prompt, which
-// misses the cache whatever was warmed; a window that survived a restart
-// could only spend money.
+// Only subscription (Pro/Max) logins are pinged: their prompt cache lives an hour. A metered API key's main cache lives
+// five minutes by default, so pinging it costs more than the re-write it avoids. Nothing is persisted: after a restart the
+// CLI relaunches with a fresh system prompt that misses the cache anyway.
 
 import type { CacheWarmPingResult } from "./contracts.ts";
 import type { CacheKeepWarmStatus } from "../shared/wire.ts";
 
 export const CACHE_TTL_MS = 60 * 60_000;
 export const PING_AFTER_MS = 50 * 60_000;
-/** A busy bot is asked again this much later, while the cache is still warm. */
 export const BUSY_RETRY_MS = 60_000;
 export const MIN_CONTEXT_TOKENS = 50_000;
 export const DEFAULT_WINDOW_MINUTES = 180;
@@ -51,40 +27,28 @@ export interface KeepWarmTarget {
 
 export type KeepWarmPingResult = CacheWarmPingResult;
 
-/** The status a client shows, per thread (shared/wire.ts). */
 export type KeepWarmStatus = CacheKeepWarmStatus;
 
 export interface KeepWarmDeps {
   now: () => number;
-  /** one-shot timer; the window never keeps more than one */
   after: (ms: number, fn: () => void) => { cancel: () => void };
-  /** the window this bot's threads get, or null when keep-warm is off for it */
   windowMs: (botId: string) => number | null;
-  /** why this target cannot be warmed now (engine not on a subscription,
-   * thread gone, engine without keep-warm), or null when it can */
   ineligible: (target: KeepWarmTarget) => string | null;
-  /** a turn is running for this bot or in this thread */
   busy: (target: KeepWarmTarget) => boolean;
-  /** the workspace's spend cap is reached */
   overBudget: () => boolean;
   ping: (target: KeepWarmTarget, signal: AbortSignal) => Promise<KeepWarmPingResult>;
-  /** keep the live session open until `until`, or release it (null) */
   hold: (target: KeepWarmTarget, until: number | null) => void;
-  /** book a ping's usage in the ledger (spend tracking and the cap) */
   book: (target: KeepWarmTarget, result: Extract<KeepWarmPingResult, { ok: true }>) => void;
-  /** a thread's status changed */
   changed: (target: KeepWarmTarget) => void;
 }
 
 interface Window {
   target: KeepWarmTarget;
   deadline: number;
-  /** the last request that refreshed the cache: a turn's end or a warm ping */
   lastRequestAt: number;
   pending: { cancel: () => void } | null;
   nextPingAt: number | null;
   inflight: AbortController | null;
-  /** a turn is running: no timer until it completes */
   paused: boolean;
 }
 
@@ -109,7 +73,6 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
     w.nextPingAt = null;
   };
 
-  /** Ends a window. A reason is kept for the status until the next turn. */
   const end = (w: Window, why: string | null) => {
     disarm(w);
     w.inflight?.abort();
@@ -140,7 +103,6 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
     if (disposed || w.paused || windows.get(w.target.threadId) !== w) return;
     const now = deps.now();
     if (now >= w.deadline || now - w.lastRequestAt >= CACHE_TTL_MS) return end(w, null);
-    // The timer fired early for this stretch (a turn re-armed it): wait more.
     if (now - w.lastRequestAt < PING_AFTER_MS - 1000) return arm(w);
     if (deps.windowMs(w.target.botId) === null) return end(w, null);
     const ineligible = deps.ineligible(w.target);
@@ -158,7 +120,7 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
     if (w.inflight === controller) w.inflight = null;
     // Whatever happened to the window meanwhile, a ping that ran is booked.
     if (result.ok) {
-      try { deps.book(w.target, result); } catch { /* bookkeeping never fails the window */ }
+      try { deps.book(w.target, result); } catch {}
     }
     if (disposed || windows.get(w.target.threadId) !== w || controller.signal.aborted) return;
     if (!result.ok) {
@@ -174,7 +136,6 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
     arm(w);
   };
 
-  /** A busy bot is asked again in a minute, while the cache is still warm. */
   const retryLater = (w: Window, now: number) => {
     disarm(w);
     const untilCold = w.lastRequestAt + CACHE_TTL_MS - now;
@@ -185,7 +146,6 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
   };
 
   return {
-    /** A turn started in this thread: no ping while it runs. */
     noteTurnStarted(threadId: string): void {
       const w = windows.get(threadId);
       if (!w) return;
@@ -196,7 +156,6 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
       deps.changed(w.target);
     },
 
-    /** A turn completed: arm (or extend) the thread's window when it qualifies. */
     noteTurnCompleted(target: KeepWarmTarget, turn: { ok: boolean; stopReason?: string | null; contextTokens?: number }): void {
       if (disposed) return;
       const existing = windows.get(target.threadId);
@@ -221,7 +180,6 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
       arm(w);
     },
 
-    /** The thread was deleted, or its engine changed: end its window quietly. */
     cancelThread(threadId: string): void {
       stoppedWhy.delete(threadId);
       lastPing.delete(threadId);
@@ -229,12 +187,10 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
       if (w) end(w, null);
     },
 
-    /** The bot was deleted, or its keep-warm was switched off. */
     cancelBot(botId: string): void {
       for (const w of windows.values()) if (w.target.botId === botId) end(w, null);
     },
 
-    /** The workspace setting changed: windows of bots now off end. */
     refresh(): void {
       for (const w of windows.values()) if (deps.windowMs(w.target.botId) === null) end(w, null);
     },
@@ -254,7 +210,6 @@ export function createCacheKeepWarm(deps: KeepWarmDeps) {
       return why ? { state: "stopped", stopped: why, ...(last ? { last } : {}) } : undefined;
     },
 
-    /** App quit: every timer and in-flight ping goes, and every hold. */
     dispose(): void {
       disposed = true;
       for (const w of windows.values()) {

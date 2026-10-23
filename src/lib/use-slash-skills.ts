@@ -6,7 +6,6 @@ interface SkillsResponse {
   skills?: Array<{ name?: unknown; description?: unknown; enabled?: unknown }>;
 }
 
-/** Enabled skills from a `GET /api/bots/:id/skills` body, as menu rows. */
 export function enabledSlashSkills(body: SkillsResponse | null | undefined): SlashSkill[] {
   return (body?.skills ?? []).flatMap((skill) =>
     skill.enabled === true && typeof skill.name === "string"
@@ -14,11 +13,6 @@ export function enabledSlashSkills(body: SkillsResponse | null | undefined): Sla
       : []);
 }
 
-/** A bot's enabled skills for the slash menu. Loaded when the menu opens
- * (`active`), and again each time it reopens, so a skill switched on or off
- * in settings shows the right way without a reload. Closing the menu drops
- * the list, so a stale one never shows while the next load runs. A failed
- * load just lists none. */
 export function useSlashSkills(botId: string | undefined, active: boolean): SlashSkill[] {
   const [skills, setSkills] = useState<{ botId: string; list: SlashSkill[] } | null>(null);
   useEffect(() => {

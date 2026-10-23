@@ -1,7 +1,3 @@
-// The trial's Claude credit engine on a Cloud home: what it is made of, when
-// it loads, and that a refusal from the relay ends it until another token
-// comes. OpenMausBot's own chat engine against a stand-in relay (an
-// OpenAI-compatible API); no CLI, no network.
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +10,7 @@ import { recordEvents } from "./testing/events.ts";
 import { TRIAL_CREDIT_REFUSED } from "./trial-credit.ts";
 
 const TOKEN = `omb_ai_${"t".repeat(43)}`;
-/** OMB_CLOUD_AI_URL exactly as the Admin sets it (cloud-credit.ts `env`): an OpenAI base URL, its `/v1` included. */
+/** OMB_CLOUD_AI_URL exactly as the Admin sets it: an OpenAI base URL, its `/v1` included. */
 const RELAY = "https://cloud.example.test/api/cloud/services/ai/v1";
 const credential = { token: TOKEN, api: RELAY, included: true };
 const MODELS = { object: "list", data: [
@@ -47,7 +43,6 @@ describe("what the credit's engine is made of", () => {
       config: { url: RELAY, apiKeyEnv: "OPENMAUSBOT_TRIAL_CREDIT_KEY", provider: "", model: "claude-haiku-4-5", managedModels: ["claude-haiku-4-5", "claude-sonnet-5"] },
       environment: { OPENMAUSBOT_TRIAL_CREDIT_KEY: TOKEN } });
     expect(JSON.stringify(configs)).not.toMatch(/ANTHROPIC|claudeAgent|codex|\/messages/);
-    // The driver reads it as its own connection: none of the workspace's key, address, model or routing.
     expect(OpenAICompatDriver.decodeConfig(entry.config)).toEqual({ url: RELAY, apiKeyEnv: "OPENMAUSBOT_TRIAL_CREDIT_KEY",
       model: "claude-haiku-4-5", managedModels: ["claude-haiku-4-5", "claude-sonnet-5"], key: undefined, provider: undefined });
   });
@@ -144,6 +139,23 @@ describe("the credit's engine on a Cloud home", () => {
     expect(loaded[1]!.instance.models.default).toBe("claude-haiku-5");
   });
 
+  it("says when the relay's default changes, so bots left on the old one follow it; never on a first list or the same default", async () => {
+    const first = vi.fn();
+    await make({ registry: fakeRegistry().registry, fetch: relay(200, MODELS), onDefault: first }).start();
+    expect(first).not.toHaveBeenCalled();
+    const same = vi.fn();
+    const again = make({ registry: fakeRegistry().registry, fetch: relay(200, { data: [...MODELS.data, { id: "claude-opus-5" }] }), onDefault: same });
+    await again.start();
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(join(data, "providers", "trial-credit", "state.json"), "utf8")).models).toHaveLength(3));
+    expect(same).not.toHaveBeenCalled();
+    const onDefault = vi.fn();
+    const { registry, loaded } = fakeRegistry();
+    void make({ registry, fetch: relay(200, { data: [MODELS.data[1], MODELS.data[0]] }), onDefault }).start();
+    await vi.waitFor(() => expect(onDefault).toHaveBeenCalledWith("claude-haiku-4-5", "claude-sonnet-5"));
+    expect(onDefault).toHaveBeenCalledOnce();
+    expect(loaded.at(-1)!.instance.models.default).toBe("claude-sonnet-5");
+  });
+
   it("asks again, more and more slowly, while the relay cannot answer or is paused, and never logs what it sent", async () => {
     vi.useFakeTimers();
     const { registry, loaded } = fakeRegistry(), log = vi.fn();
@@ -185,13 +197,11 @@ describe("the credit's engine on a Cloud home", () => {
     await expect(instance.generateText!("a title, please")).rejects.toThrow(TRIAL_CREDIT_REFUSED.used_up);
     expect(base.adapter.sendTurn).not.toHaveBeenCalled(); expect(base.generateText).not.toHaveBeenCalled();
     expect(onChange).toHaveBeenLastCalledWith([CLOUD_CREDIT_INSTANCE]);
-    // The next start remembers, and does not ask the relay.
     const again = fakeRegistry(), fetch = relay(200, MODELS);
     const restarted = make({ registry: again.registry, fetch });
     await restarted.start();
     expect(restarted.status()).toBe("used_up"); expect(fetch).not.toHaveBeenCalled();
     expect(await again.loaded[0]!.instance.snapshot()).toMatchObject({ state: "unavailable" });
-    // Another token is another credit.
     const other = fakeRegistry();
     const fresh = make({ registry: other.registry, fetch: relay(200, MODELS), credential: { ...credential, token: `omb_ai_${"n".repeat(43)}` } });
     await fresh.start();
@@ -251,7 +261,6 @@ describe("the credit's engine on a Cloud home", () => {
     expect(turn).toMatchObject({ method: "POST", authorization: `Bearer ${TOKEN}` });
     expect(JSON.parse(turn.body)).toMatchObject({ model: "claude-haiku-4-5" });
     expect(JSON.parse(turn.body)).not.toHaveProperty("provider");
-    // Only the relay's OpenAI-compatible routes, once each under its base (never `/v1/v1`), and never an Anthropic-shaped one.
     expect(requests.map(request => request.url.slice(RELAY.length)).every(path => ["/models", "/chat/completions"].includes(path))).toBe(true);
     expect(requests.every(request => !request.url.includes("/v1/v1") && !request.url.includes("/messages"))).toBe(true);
     usedUp = true;

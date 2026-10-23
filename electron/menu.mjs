@@ -1,8 +1,4 @@
-// The application menu. It exists for two reasons: the Server submenu,
-// where the user switches between the local server and paired remote ones,
-// and the macOS Preferences… item (Electron has no role for it, so it is
-// built explicitly). Everything else is Electron's standard roles so macOS
-// keeps Edit/Window and Windows/Linux get the same items under a visible bar.
+// Electron has no role for the macOS Preferences… item, so it is built explicitly.
 import { Menu, app } from "electron";
 
 /**
@@ -15,14 +11,26 @@ import { Menu, app } from "electron";
  * @param {(id: string) => void} input.onForget
  * @param {() => void} input.onOpenSettings
  * @param {() => void} input.onOrganizationSignIn
+ * @param {{ origin: string, onBack: () => void } | null} [input.home] My Cloud once the person's bots moved there: the
+ *   menu lists only the other saved servers, with Back to My Cloud, and is absent without any.
  */
-/** `onAddCloud` and `sublabels` as in the sidebar's server menu
- * (environments.cjs workspaceMenuTemplate): "Add a Cloud…" under the saved
- * servers, and My Cloud's line in place of its host. */
-export function buildApplicationMenu({ environments, activeId, onSwitch, onAddFromClipboard, onConnect, onForget, onOpenSettings, onOrganizationSignIn, onAddCloud, sublabels = {} }) {
+export function buildApplicationMenu({ environments, activeId, onSwitch, onAddFromClipboard, onConnect, onForget, onOpenSettings, onOrganizationSignIn, onAddCloud, sublabels = {}, home = null }) {
   const isMac = process.platform === "darwin";
   const active = environments.find((e) => e.id === activeId) ?? null;
-  const server = {
+  const others = home ? environments.filter((e) => e.origin !== home.origin && e.kind !== "local") : [];
+  const away = Boolean(active && home && active.origin !== home.origin);
+  const homeServer = {
+    label: "Server",
+    submenu: [
+      { id: "back-to-my-cloud", label: "Back to My Cloud", enabled: away, click: () => home?.onBack() },
+      { type: "separator" },
+      ...others.map((e) => ({ label: `${e.name} — ${new URL(e.origin).host}`, type: "radio", checked: e.id === activeId, click: () => onSwitch(e.id) })),
+      { type: "separator" },
+      { label: "Add Server from Copied Pairing Link…", click: () => onAddFromClipboard() },
+      { label: away ? `Forget “${active.name}”` : "Forget Server", enabled: away, click: () => away && onForget(active.id) },
+    ],
+  };
+  const server = home ? homeServer : {
     label: "Server",
     submenu: [
       { label: "This computer", type: "radio", checked: !active, click: () => onSwitch("local") },
@@ -48,7 +56,7 @@ export function buildApplicationMenu({ environments, activeId, onSwitch, onAddFr
     ...(isMac ? [{ label: app.name, submenu: [{ role: "about" }, { label: "Preferences…", accelerator: "CmdOrCtrl+,", click: () => onOpenSettings() }, { type: "separator" }, { role: "hide" }, { role: "hideOthers" }, { role: "unhide" }, { type: "separator" }, { role: "quit" }] }] : []),
     { role: "fileMenu" },
     { role: "editMenu" },
-    server,
+    ...(home && !others.length ? [] : [server]),
     { role: "viewMenu" },
     { role: "windowMenu" },
   ];

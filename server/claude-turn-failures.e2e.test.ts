@@ -1,9 +1,5 @@
-// Two ways a Claude turn failed and the harness told nobody the truth,
-// replayed against the real server with the fake CLI playing the frames
-// Claude Code 2.1.295 really sent (Oct 8-10):
-//   - an account past its weekly limit was reported as "update required",
-//     then "stop_sequence", and its Chief told the person to finish setup;
-//   - a session the CLI no longer had after a long idle ended the turn empty.
+// The fake CLI replays the frames Claude Code 2.1.295 really sent (Oct 8-10): a weekly limit reported as "update required"
+// then "stop_sequence", and a session the CLI lost after a long idle ending the turn empty.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -62,13 +58,10 @@ async function launch() {
     writeFileSync(modes, JSON.stringify({ ...plan, [key]: { mode, env } }));
   };
   const dumpOf = (threadId: string, botId: string) => join(dataDir, `${threadId}-${botId}.json`);
-  /** What the latest turn of `botId` in `threadId` was handed. */
   const told = (threadId: string, botId: string) => {
     try { return JSON.stringify(JSON.parse(readFileSync(dumpOf(threadId, botId), "utf8")).prompt); } catch { return ""; }
   };
   const proxies: ReturnType<typeof spawn>[] = [];
-  /** The agents tools of `botId`'s running turn in `threadId`, called the way
-   * its engine calls them: through the MCP server its launch was handed. */
   const agentTools = async (threadId: string, botId: string) => {
     const dump = dumpOf(threadId, botId);
     await expect.poll(() => existsSync(dump), { timeout: 20_000 }).toBe(true);
@@ -90,9 +83,6 @@ async function launch() {
     await request("initialize", { protocolVersion: "2024-11-05" });
     return (name: string, args: unknown) => request("tools/call", { name, arguments: args });
   };
-  /** `chief`'s turn in `threadId` hands Pesto work with coordinate_bots and
-   * ends; Pesto runs into its weekly limit; the Chief is resumed with what
-   * came back, and that is returned. */
   const handOff = async (threadId: string, chief: { id: string }, pesto: { id: string }, send: () => Promise<unknown>) => {
     const release = join(dataDir, `release-${chief.id}`);
     play(`${threadId}:${chief.id}`, "hang", { FAKE_CLAUDE_RELEASE: release });
@@ -127,15 +117,12 @@ it("reports an account's weekly limit with its reset to the person and the Chief
     await expect.poll(async () => (await messages(pesto.activeTaskId)).some((m) => m.kind === "activity" && m.tool?.ok === false), { timeout: 20_000 }).toBe(true);
     const thread = await messages(pesto.activeTaskId);
     const failed = thread.filter((m) => m.kind === "activity" && m.tool?.ok === false);
-    // one plain line: which limit and when it resets; no sign-in or update card
     expect(failed).toHaveLength(1);
-    expect(failed[0].tool.name).toMatch(/^error: This Claude account has reached its weekly limit, which resets .+\. Until then, switch this bot to another engine or Claude account\.$/);
+    expect(failed[0].tool.name).toMatch(/^error: This Claude account has reached its weekly limit, which resets .+\. Until then, switch this bot to another AI or Claude account\.$/);
     expect(failed[0].tool).not.toHaveProperty("setup");
     expect(failed[0].tool).not.toHaveProperty("claudeUpdate");
-    // the CLI's words are not passed off as Pesto's reply
     expect(thread.some((m) => m.role === "bot" && m.kind === "text" && /hit your weekly limit/.test(m.text ?? ""))).toBe(false);
 
-    // The Chief hears the same cause, not a stop token, and not "setup".
     await expect.poll(async () => (await api("GET", "/api/bots")).bots.find((b: any) => b.id === chief.id)?.tasks?.some((t: any) => t.title === "Team incidents"), { timeout: 20_000 }).toBe(true);
     const incidents = (await api("GET", "/api/bots")).bots.find((b: any) => b.id === chief.id).tasks.find((t: any) => t.title === "Team incidents");
     await expect.poll(async () => (await messages(incidents.threadId)).find((m) => m.kind === "activity" && (m.tool?.name ?? "").startsWith("Incident: "))?.tool.name, { timeout: 20_000 })
@@ -147,9 +134,6 @@ it("reports an account's weekly limit with its reset to the person and the Chief
   }
 }, 120_000);
 
-// What the Chief hears when it hands that teammate work itself. The CLI's
-// words used to come back as the teammate's reply; with them gone from the
-// reply, the bare stop token ("quota") must not take their place.
 it("tells a Chief whose teammate is past its weekly limit which limit it is and when it resets", async () => {
   const { control, handOff, close } = await launch();
   try {
@@ -163,8 +147,6 @@ it("tells a Chief whose teammate is past its weekly limit which limit it is and 
   }
 }, 120_000);
 
-// …and in a room, where the coordinator waits on the teammate's member turn
-// and reads its end after the transcript has taken it in.
 it("tells a room's coordinator that a teammate is past its weekly limit, with the reset", async () => {
   const { api, control, handOff, close } = await launch();
   try {

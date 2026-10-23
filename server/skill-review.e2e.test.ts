@@ -1,8 +1,3 @@
-// Learn skills automatically, through the real server: tool steps from two
-// short turns add up past the threshold, the bot's own engine reviews the
-// conversation in the background, and the skill it proposes is applied
-// through skill_manage's path — the receipt with Undo is the only thing the
-// review adds to the chat.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,13 +44,11 @@ it("reviews a conversation in the background once its tool steps reach the thres
     expect(config.features).toMatchObject({ skillAuthoring: true, skillReview: true, skillReviewSteps: 3 });
     const { bot } = await api<{ bot: WireBot }>("/api/bots", "POST", { name: "Reporter" }, 201);
 
-    // Two tool steps: below the threshold, nothing is reviewed yet.
     await turn(bot, "Write the weekly report from the notes.");
     const counters = JSON.parse(readFileSync(join(fixture.info.dataDir, "skill-review.json"), "utf8")).counters;
     expect(counters).toEqual([expect.objectContaining({ botId: bot.id, threadId: bot.threadId, steps: 2 })]);
     expect((await messages(bot)).some((message) => message.card?.skillRequest)).toBe(false);
 
-    // Two more: the review runs on the bot's engine and the skill applies.
     await turn(bot, "Shorter please, five bullets at most.");
     await expect.poll(async () => (await messages(bot)).find((message) => message.card?.skillRequest)?.card, { timeout: 20_000 })
       .toMatchObject({ answered: "allow", autoApplied: true, title: 'Skill "weekly-report" enabled' });
@@ -64,7 +57,6 @@ it("reviews a conversation in the background once its tool steps reach the thres
     const review = JSON.parse(readFileSync(join(scratch, "one-shot.json"), "utf8")) as { prompt: string };
     expect(review.prompt).toContain("Shorter please, five bullets at most.");
     expect(review.prompt).toContain("[tool] Read");
-    // The review wrote no chat line of its own: only the receipt.
     const texts = (await messages(bot)).filter((message) => message.kind === "text").map((message) => message.text ?? "");
     expect(texts.some((text) => text.includes(SKILL_REVIEW_MARKER) || text.includes("one lesson"))).toBe(false);
     await expect.poll(() => JSON.parse(readFileSync(join(fixture.info.dataDir, "skill-review.json"), "utf8")).counters[0].steps).toBe(0);
@@ -74,8 +66,7 @@ it("reviews a conversation in the background once its tool steps reach the thres
   }
 }, 90_000);
 
-// On Codex, OMB's default engine, the review is Codex's own background call
-// (generateMemoryText: a tool-free `codex exec`), not a missing engine.
+// On Codex, OMB's default engine, the review is Codex's own tool-free `codex exec` call.
 it("reviews a Codex bot's conversation through Codex's own background call", async () => {
   const scratch = mkdtempSync(join(tmpdir(), "omb-skill-review-codex-"));
   const routes = join(scratch, "routes.json");

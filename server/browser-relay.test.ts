@@ -22,7 +22,6 @@ describe("the engine's loopback command relay", () => {
     expect(answer).toMatchObject({ success: true, launched: true, data: { messages: [] } });
     // The fake answers 403 to a request without the same-origin header, as the engine does.
     expect(daemon.commands).toEqual([{ action: "console" }]);
-    // A redirect, even to a relay that would answer, is never followed.
     const redirecting = createServer((req, res) => {
       if (req.url === "/api/command") { res.writeHead(307, { location: "/elsewhere" }); res.end(); return; }
       res.writeHead(200, { "content-type": "application/json" });
@@ -47,16 +46,13 @@ describe("the engine's loopback command relay", () => {
     const ports = new RelayPorts();
     expect(await ports.port(daemon.target)).toBe(daemon.port);
     expect(daemon.actions()).toEqual(["session_info"]);
-    // Confirmed once per daemon: later calls only read the file.
     expect(await ports.port(daemon.target)).toBe(daemon.port);
     expect(daemon.actions()).toEqual(["session_info"]);
-    // A port another bot's daemon now holds is never trusted.
     const other = await fake("bot-b");
     other.writeStreamFile();
     const stranger = new RelayPorts();
     other.sessionName = "bot-someone-else";
     expect(await stranger.port(other.target)).toBeNull();
-    // The daemon exited and removed its file: forgotten at once, no command sent.
     daemon.removeStreamFile();
     const before = daemon.commands.length;
     expect(await ports.port(daemon.target)).toBeNull();
@@ -121,7 +117,6 @@ describe("preview frames over the relay", () => {
     await expect(captureFrame(new RelayPorts(), daemon.target)).rejects.toThrow(/no open page/);
     daemon.removeStreamFile();
     await expect(captureFrame(new RelayPorts(), daemon.target)).rejects.toThrow(/no open page/);
-    // Only the launch-free reads reached the daemon.
     expect(daemon.actions().every((action) => action === "stream_status" || action === "session_info")).toBe(true);
   });
 
@@ -162,7 +157,6 @@ describe("typing over the relay", () => {
     const daemon = await fake();
     await typeText(new RelayPorts(), daemon.target, "fake-S3cret!");
     expect(daemon.typed).toEqual(["fake-S3cret!"]);
-    // The secret travels only in the request body, never in a command name.
     expect(daemon.commands).toEqual([{ action: "session_info" }, { action: "keyboard", subaction: "insertText", text: "fake-S3cret!" }]);
   });
 });

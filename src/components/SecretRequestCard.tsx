@@ -1,14 +1,14 @@
 import { useState, type FormEvent } from "react";
 import { ExternalLink, KeyRound, Loader2, LockKeyhole, RefreshCw, X } from "lucide-react";
 
-import { credentialConfigPatch, credentialResumeOutcome } from "../../shared/credential-request";
+import { credentialResumeOutcome, credentialSaveRequest, isConfigCredentialTarget } from "../../shared/credential-request";
+import { credentialProvider } from "@/lib/analytics-allowlist";
 import { cn } from "@/lib/cn";
+import { keySaved, keySaveFailure, savedKeyResult } from "@/lib/product-events";
 import { api, useStore, type ConfigStatus, type Message } from "@/state/store";
 import { ASK_FIELD, ASK_PRIMARY_BUTTON, ASK_QUIET_BUTTON, AskCard, AskSettledLine, returnFocusToComposer } from "./AskCard";
 
-// The key a bot asked for. It waits in the shared ask card with a masked
-// field, and once saved folds into one line that names the key and never
-// its value: the value goes straight to the host's settings, not the chat.
+// Security: the value goes straight to the host's settings, never into the chat.
 
 export function SecretRequestCard({
   botId,
@@ -32,8 +32,6 @@ export function SecretRequestCard({
   const provided = outcome === "provided";
   const declined = outcome === "dismissed";
   const superseded = secret.superseded === true;
-  // Stop ended the turn this card paused: nothing resumes, whatever is
-  // saved afterwards (the key is kept, as it says).
   const stopped = secret.stopped === true;
   const description = superseded
     ? "This request was replaced by a newer one for the same key. Use the newest card to provide it."
@@ -56,8 +54,6 @@ export function SecretRequestCard({
         ? "The key is safe; resuming failed"
         : "Waiting to resume safely";
 
-  // A successful decline has no durable card to show. If its continuation
-  // failed, bring the card back with the same retry affordance as a saved key.
   if (declined && (secret.resumed || !error)) return null;
 
   const notifyProvided = async () => {
@@ -88,22 +84,29 @@ export function SecretRequestCard({
     if (saving || (!value.trim() && !savedLocally)) return;
     setSaving(true);
     setLocalError(null);
+    const provider = credentialProvider(secret.target);
+    let saved = savedLocally;
     try {
       if (!savedLocally) {
         const next = value.trim();
-        const status: ConfigStatus = window.ogb?.setCredential
-          ? await window.ogb.setCredential(secret.target, next)
-          : await api("/api/config", {
-              method: "PUT",
-              body: JSON.stringify(credentialConfigPatch(secret.target, next)),
-            });
-        dispatch({ type: "configStatus", config: status });
+        const target = secret.target;
+        // The 1Password token goes to this server's Logins, which checks it with 1Password first, never the settings file.
+        const request = credentialSaveRequest(target, next);
+        if (isConfigCredentialTarget(target)) {
+          const status: ConfigStatus = window.ogb?.setCredential
+            ? await window.ogb.setCredential(target, next)
+            : await api(request.path, { method: request.method, body: JSON.stringify(request.body) });
+          dispatch({ type: "configStatus", config: status });
+        } else await api(request.path, { method: request.method, body: JSON.stringify(request.body) });
+        saved = true;
+        keySaved(provider, "chat_request", savedKeyResult(provider));
         setValue("");
         setSavedLocally(true);
       }
       await notifyProvided();
       returnFocusToComposer();
     } catch (error) {
+      if (!saved) keySaved(provider, "chat_request", keySaveFailure(error));
       setLocalError(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);

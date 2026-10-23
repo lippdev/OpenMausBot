@@ -1,7 +1,3 @@
-// engine set / engine list against a stand-in API: a key is written once and
-// never printed, a second run changes nothing, --rotate replaces it, an
-// engine's command is installed only when it is not already running, and
-// the list shows which keys are set, never their values.
 import "../testing/scrub-ambient-omb-env.ts";
 
 import { createServer } from "node:http";
@@ -77,9 +73,7 @@ describe("engine set", () => {
   });
 
   it("waits for an install that takes longer than an ordinary request may, as a fresh sandbox's npm install does", async () => {
-    // The server answers the install only once npm is done. An ordinary JSON
-    // request gives up after OPENMAUSBOT_MCP_TIMEOUT_MS (30 s by default; 1 s
-    // here), and the install outlasts it.
+    // The server answers the install only once npm is done, which outlasts OPENMAUSBOT_MCP_TIMEOUT_MS (1 s here).
     const asked: string[] = [];
     let state = "unavailable";
     const server = createServer((req, res) => {
@@ -107,7 +101,6 @@ describe("engine set", () => {
       expect(code, out.join("\n")).toBe(0);
       const result = JSON.parse(out.join("\n"));
       expect(result).toMatchObject({ ok: true, installed: "now", state: "available", changed: [] });
-      // the server's engine list (with its paths) is not printed
       expect(out.join("\n")).not.toContain("/srv/engines");
       expect(err.map((line) => JSON.parse(line))).toEqual([{ event: "installing", engine: "claude" }]);
       expect(asked).toContain("POST /api/instances/claude/install");
@@ -124,7 +117,6 @@ describe("engine set", () => {
     const only = await w.run(["engine", "set", "claude", "--key-env", "ANTHROPIC_API_KEY", "--only-claude-api", "--base-url", "https://gw.example.com", "--json"]);
     expect(JSON.parse(only.out)).toMatchObject({ instanceId: "claudeApi", changed: ["key", "baseUrl", "everyClaudeBot"] });
     expect(w.writes[0]).toEqual({ path: "/api/config", body: { anthropic: { key: KEY, url: "https://gw.example.com", everyClaudeBot: false } } });
-    // set already: the server does not show its address, so a different one is not written, and that is said
     const kept = await w.run(["engine", "set", "claude", "--key-env", "ANTHROPIC_API_KEY", "--only-claude-api", "--base-url", "https://gw2.example.com"]);
     expect(kept.out).toContain("warning: claude already has a key and the server does not show its base URL, so --base-url was not written: pass --rotate to write both");
     expect(w.writes).toHaveLength(1);

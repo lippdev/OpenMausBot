@@ -23,9 +23,7 @@ it("survives a real server crash: queued sends keep receipts, cancellation and u
     expect(response.status, JSON.stringify(result)).toBe(status);
     return result;
   };
-  // A second person on a paired device. What they queue must still be theirs
-  // after the wait, the crash and the restart: the name rides the durable row.
-  // `id` is the opaque person key the server derives from the session; a row
+  // A second person on a paired device: what they queue stays theirs through the wait, the crash and the restart. A row
   // written straight to the database below keeps the older name-only shape.
   const PAIRED = { name: "Safari on Mac", id: expect.stringMatching(/^p_[\w-]{22}$/) };
   const PAIRED_ROW = { name: "Safari on Mac" };
@@ -188,11 +186,8 @@ it("survives a real server crash: queued sends keep receipts, cancellation and u
     writeFileSync(join(dataDir, "restarted"), "allow restored fake turns to finish");
     const crashed = new DatabaseSync(join(dataDir, "messages.db"));
     try {
-      // The narrowest crash window: the dispatch claim reached disk, the
-      // transcript line did not. One row names its sender; one was written by
-      // a build that did not keep one and must still recover; one was spoken
-      // in a Live call and must still say so, with its call; one typed row
-      // carries a stray call id it must never get back.
+      // The narrowest crash window: the dispatch claim reached disk, the transcript line did not. One row names its sender, one
+      // is from a build that kept none, one was spoken in a Live call, and one typed row carries a stray call id.
       const claim = crashed.prepare(
         "INSERT INTO chat_followups(id, kind, owner_id, thread_id, send_id, status, payload) VALUES (?, 'bot', ?, ?, NULL, 'dispatching', ?)",
       );
@@ -223,10 +218,6 @@ it("survives a real server crash: queued sends keep receipts, cancellation and u
       expect.objectContaining({ role: "user", text: "Reply to a message that disappears", sender: PAIRED }),
     ]);
     expect((await api("POST", `/api/bots/${bot.id}/messages`, cancelledBody, 409)).error).toContain("cancelled");
-    // The crash cut the bot's turn while the person's next words waited
-    // behind it: the restart policy ends that cut turn with the interrupted
-    // line instead of rerunning it (#2735: the pending words carry the
-    // conversation on), and the held line runs once.
     expect(prompts(bot.threadId)).toHaveLength(2);
     expect(prompts(bot.threadId)[1].message.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "image" })]));
 
@@ -244,11 +235,7 @@ it("survives a real server crash: queued sends keep receipts, cancellation and u
       expect.objectContaining({ kind: "activity", tool: { name: expect.stringContaining("Review the result"), ok: false } }),
     ]);
     expect((await api("POST", `/api/bots/${uncertain.id}/messages`, uncertainBody, 202)).message.queueId).toBe(claimed.queueId);
-    // The claim itself is never replayed (one user line, one notice) and
-    // neither is its cut turn: a dispatched follow-up was that turn, so the
-    // restart policy ends it silently (#2735) and nothing runs again.
     expect(prompts(later.threadId)).toHaveLength(1);
-    // A second boot must not duplicate recovery notices or replay a claim.
     await waitForExit(restarted, { signal: "SIGTERM" });
     await restart();
     expect((await messages(later.threadId)).filter((message) => message.queueId === claimed.queueId)).toEqual(interrupted.filter((message) => message.queueId === claimed.queueId));

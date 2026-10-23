@@ -9,7 +9,6 @@ export function replySnippet(text: string, limit = 160): string {
       /<attached-(image|file)\s+path="[^"]*"(?:\s+name="[^"]*")?\s*\/>/g,
       (_tag, kind: "image" | "file") => (kind === "image" ? t("chat.reply.image") : t("chat.reply.file")),
     )
-    // read as text, not markup: the excerpt is one muted line
     .replace(/\[([^\]\n]+)\]\([^)\s]+\)/g, "$1")
     .replace(/(\*\*|__)(?=\S)([^\n]*?\S)\1/g, "$2")
     .replace(/`([^`\n]+)`/g, "$1")
@@ -24,9 +23,6 @@ export function replyAuthor(message: Message, fallback?: string): string {
   return message.from?.name ?? fallback ?? t("chat.assistant");
 }
 
-/** Escape in the composer drops a reply target, the keyboard twin of the
- * reply strip's x. Not mid IME composition, and not while dictating, where
- * Escape stops the recording instead. */
 export function escapeCancelsReply(
   event: { key: string; isComposing?: boolean },
   { replying, recording }: { replying: boolean; recording: boolean },

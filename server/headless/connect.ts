@@ -1,9 +1,4 @@
-// connect: get a token for a workspace you reach over the network, the way a
-// phone pairs. The address must answer as OpenMausBot; a one-time code is
-// exchanged (POST /api/auth/pair) and the token is written to a file only
-// you can read. On this computer's own server the code is minted here first
-// (POST /api/auth/pairing), as `openmausbot pair` does. The token is never
-// printed: pass the file to other verbs with --token-file.
+// The token is written to a file only you can read and never printed: pass the file to other verbs with --token-file.
 import { closeSync, existsSync, fchmodSync, fstatSync, openSync, writeSync } from "node:fs";
 import { isatty } from "node:tty";
 
@@ -23,7 +18,7 @@ async function call(origin: string, path: string, init: RequestInit = {}): Promi
   return { status: response.status, body: await response.json().catch(() => ({})) as Rec };
 }
 
-/** Write a secret to a new file only this user can read; never to a terminal. */
+/** A new file only this user can read; never a terminal. */
 export function writeTokenFile(path: string, token: string, force: boolean): void {
   if (path === "-" || /^\/dev\/(?:stdout|stderr|tty)$/.test(path)) throw usageError("the token goes to a file, never to the terminal", "pass --out FILE");
   if (existsSync(path) && !force) throw usageError(`${path} already exists`, "pass --force to replace it");

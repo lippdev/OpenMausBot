@@ -1,22 +1,9 @@
 // Stage the Data engine's native modules outside ASAR, one tree per platform
-// and CPU: dist-native/duckdb/<platform>-<arch>/node_modules/ holding
-// @duckdb/{node-api,node-bindings,node-bindings-<platform>-<arch>},
-// @resvg/{resvg-js,resvg-js-<target>} (the chart rasteriser, server/data/render.ts)
-// and @1password/{sdk,sdk-core} (saved logins from 1Password,
-// server/onepassword.ts: CommonJS that reads its WebAssembly core from beside
-// itself, so it cannot be bundled either; the same files on every platform).
-// The packaged app ships no node_modules (the server is an esbuild bundle), so
-// both travel as one extraResources tree that server/data/engine.ts loads
-// through createRequire; the Docker build stages the same way and points
-// OMB_DUCKDB_DIR at it.
-//
-// Each tree holds exactly the pinned version from package.json: a binding and
-// its libduckdb must come from the same release, and the extension directory
-// is keyed by that version too. The mac platform packages carry one universal
-// libduckdb.dylib (117 MB) for both arches; each single-arch app keeps only
-// its slice (57 MB) and re-signs it, electron-builder then signs it again with
-// the app's identity. When the host's install lacks the other mac arch's
-// package, the exact version is fetched with npm pack into a cache.
+// and CPU (dist-native/duckdb/<platform>-<arch>/node_modules/): DuckDB, resvg,
+// and the 1Password SDK, which reads its WebAssembly core from beside itself so
+// cannot be bundled either. Each tree holds exactly the pinned DuckDB version: a
+// binding and its libduckdb must come from the same release. Each single-arch
+// mac app keeps only its slice of the universal libduckdb.dylib and re-signs it.
 import { execFile } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -82,10 +69,9 @@ function packageVersion(directory) {
   return JSON.parse(readFileSync(join(directory, "package.json"), "utf8")).version;
 }
 
-/** Where the install put a scoped package. pnpm links only the package the
- *  app depends on (node-api, resvg-js) at the top of node_modules; its
- *  dependencies sit beside it in the store, and the platform packages beside
- *  those. */
+/** pnpm links only the package the app depends on at the top of node_modules;
+ *  its dependencies sit beside it in the store, and the platform packages
+ *  beside those. */
 export function installedPackage(nodeModules, name, scope = SCOPE, anchors = ["node-api", "node-bindings"]) {
   const candidates = [join(nodeModules, scope, name)];
   try {
@@ -96,14 +82,12 @@ export function installedPackage(nodeModules, name, scope = SCOPE, anchors = ["n
       candidates.push(join(beside, "..", name));
     }
   } catch {
-    // the anchor is not installed at all: the loop below reports it
   }
   for (const candidate of candidates) {
     try {
       const real = realpathSync(candidate);
       if (statSync(real).isDirectory()) return real;
     } catch {
-      // not this candidate
     }
   }
   return null;
@@ -160,8 +144,7 @@ export async function verifyDuckdbTree(directory, platform, arch, version, resvg
   const shared = join(scope, native, library);
   requireRegularFile(binary);
   requireRegularFile(shared);
-  // The rasteriser rides in the same tree; a chart PNG with no resvg would
-  // fail only when someone exports or a phone asks for an image.
+  // Without resvg a chart PNG fails only when someone exports or a phone asks.
   const resvg = join(directory, "node_modules", RESVG_SCOPE);
   const resvgNative = resvgPlatformPackage(platform, arch);
   for (const name of [RESVG_PACKAGE, resvgNative.name]) {
@@ -173,8 +156,7 @@ export async function verifyDuckdbTree(directory, platform, arch, version, resvg
   requireRegularFile(join(resvg, RESVG_PACKAGE, "index.js"));
   const resvgBinary = join(resvg, resvgNative.name, resvgNative.binary);
   requireRegularFile(resvgBinary);
-  // 1Password rides along too; without it Connect 1Password says it is
-  // missing from this build only when someone tries it.
+  // Without it Connect 1Password fails only when someone tries it.
   const onePassword = join(directory, "node_modules", ONEPASSWORD_SCOPE);
   for (const name of ONEPASSWORD_PACKAGES) {
     requireRegularFile(join(onePassword, name, "package.json"));

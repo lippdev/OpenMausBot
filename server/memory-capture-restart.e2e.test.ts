@@ -1,8 +1,3 @@
-// Capture survives a restart: a 1:1 turn still waiting for the quiet spell
-// when the server stops is saved as ids (never its text), read back from the
-// transcript at the next start, and captured then. Before this the waiting
-// turns were dropped on every quit, update or restart.
-//
 // POSIX only: a Windows SIGTERM ends the process without its shutdown hooks.
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

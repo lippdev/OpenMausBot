@@ -1,7 +1,3 @@
-// The Data server's rpc as harness-mcp-proxy data calls it: the catalog
-// with the dialect instructions, the capability check before and after a
-// call, arguments refused before anything touches the database, and the
-// bot's connection for every statement.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

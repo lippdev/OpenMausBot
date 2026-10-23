@@ -1,10 +1,4 @@
-// A saved key counts as working until the provider says otherwise. When a
-// real use of it is refused as a bad key (a chat request, or Test in
-// Settings → API keys), every engine on that key and endpoint reports it as
-// not signed in, until the key is saved or cleared again or a later use of
-// it succeeds. In memory only: after a restart the key shows as working
-// until its next use fails. The key itself is never kept, only a hash of it
-// beside the provider's base URL.
+// The key itself is never kept, only a hash of it beside the provider's base URL.
 import { createHash } from "node:crypto";
 
 export const KEY_REJECTED_REASON = "The provider rejected this key. Change it in Settings → API keys.";
@@ -31,7 +25,6 @@ export function noteKeyAccepted(url: string, key: string): void {
   if (rejected.size > 0 && rejected.delete(markOf(url, key))) changed();
 }
 
-/** Drops every mark on this key, whatever endpoint it was used against. */
 export function forgetKey(key: string): void {
   if (rejected.size === 0) return;
   const suffix = ` ${fingerprint(key)}`;
@@ -45,9 +38,7 @@ export function onKeyRejectionChange(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** The provider refused the key itself: HTTP 401, or a 400/403 whose body
- * says the key is invalid or revoked (xAI answers a wrong key with a 400).
- * Rate limits, quota, billing and model access are not the key's fault. */
+/** xAI answers a wrong key with HTTP 400, not 401. */
 export function rejectsKey(status: number, body: string): boolean {
   if (/\b(?:quota|billing|credits?|rate.?limit|insufficient.?(?:balance|funds))\b/i.test(body)) return false;
   if (status === 401) return true;

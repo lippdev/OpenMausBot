@@ -182,24 +182,17 @@ describe("phone setup flow", () => {
 
   it("tells the desktop about automatic pairing, which keeps or creates the secure address", () => {
     const waiting = { enabled: true, endpoints: [] };
-    // Signed in, Remote access on, no HTTPS address yet: the person is
-    // pairing now, so the desktop creates it.
     const gate = phonePairingGate(account("ready"), waiting, false);
     expect(gate).toBe("wait");
     expect(shouldPrepareSecureAddress("automatic", gate, account("ready"))).toBe(true);
-    // A connector that is still coming up may need its tunnel repaired.
     expect(shouldPrepareSecureAddress("automatic", "wait", account("connecting"))).toBe(true);
-    // Already offered: pairing over it is a request too, so a release
-    // planned for an idle address does not land mid-pairing.
     expect(shouldPrepareSecureAddress("automatic", "open", account("ready"))).toBe(true);
     expect(shouldPrepareSecureAddress("automatic", "open", null)).toBe(true);
-    // Explicit Wi-Fi or Tailscale pairing never asks for one.
     for (const explicit of ["local", "tailscale"] as const) {
       for (const any of ["wait", "open"] as const) {
         expect(shouldPrepareSecureAddress(explicit, any, account("ready"))).toBe(false);
       }
     }
-    // Still to be started, or a sign-in to finish first.
     for (const other of ["start", "account-required"] as const) {
       expect(shouldPrepareSecureAddress("automatic", other, account("ready"))).toBe(false);
     }
@@ -215,10 +208,7 @@ describe("phone setup flow", () => {
 
   it("sees when nothing is creating the secure address a pairing waits for", () => {
     const waiting = { enabled: true, endpoints: [] };
-    // Signed in with no address and nothing in flight: the desktop stopped
-    // retrying, so a pairing that still waits asks again.
     expect(secureAddressRequestLapsed(account("ready"), waiting)).toBe(true);
-    // Being created or repaired, failed (the error is shown), or there.
     expect(secureAddressRequestLapsed(account("connecting"), waiting)).toBe(false);
     expect(secureAddressRequestLapsed(account("error"), waiting)).toBe(false);
     expect(secureAddressRequestLapsed(
@@ -229,7 +219,6 @@ describe("phone setup flow", () => {
       enabled: true,
       endpoints: [{ kind: "hosted", url: "https://c-opaque.openmausbot.com", priority: 0 }],
     })).toBe(false);
-    // Remote access off, unknown or unavailable: not this case.
     expect(secureAddressRequestLapsed(account("ready"), { enabled: false })).toBe(false);
     expect(secureAddressRequestLapsed(null, waiting)).toBe(false);
     expect(secureAddressRequestLapsed({ ...account("ready"), available: false }, waiting)).toBe(false);

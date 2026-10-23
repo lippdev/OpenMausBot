@@ -152,8 +152,6 @@ describe("Boat create idempotency", () => {
   });
 
   afterEach(() => {
-    // Every create asks for an empty guest: the bot's own engine drives the
-    // desktop from here, so no AI sign-in or key is ever sent to the Boat.
     for (const body of createBodies) expect(body).toEqual({ ttlSeconds: 8 * 60 * 60, noEnv: true });
   });
 
@@ -361,8 +359,7 @@ describe("Boat create idempotency", () => {
       expect(await workerLine(first, "first journal worker")).toBe("ready");
       expect(await workerLine(second, "second journal worker")).toBe("ready");
 
-      // Both long-lived processes loaded the empty journal before either
-      // mutation. The old in-memory cache deterministically minted two keys.
+      // Both long-lived processes loaded the empty journal before either mutation.
       first.child.stdin.end("begin\n");
       second.child.stdin.end("begin\n");
       const [firstResult, secondResult] = await Promise.all([

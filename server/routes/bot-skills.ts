@@ -1,17 +1,11 @@
-// A bot's skills and the skills library, moved out of server/index.ts's
-// inline routes into the route table (server/routes/README.md): imported
-// Agent Skills (SKILL.md) on a bot and, with features.skillsLibrary, the
-// local library and a bot's assignments from it. Everything is local disk;
-// an import lands disabled until a person enables it (server/skills.ts).
-// The table runs after the auth gate; scope rules stay keyed by path in
-// server/request-auth.ts.
 import { z } from "zod";
 
 import type { SkillsLibrarySkillWire } from "../../shared/wire.ts";
-import { skillsLibraryEnabled, type AppConfig } from "../config.ts";
+import type { AppConfig } from "../config.ts";
+import { importedSkillListings, setImportedSkillEnabled } from "../imported-skills.ts";
 import { botSkillTemplateSchema } from "../new-bot-defaults.ts";
 import { fetchSkillFromSource } from "../skill-fetch.ts";
-import { installLibrarySkill, listLibrarySkills, readLibrarySkillFile, readSkillLibraryIndex, setLibrarySkillReviewState } from "../skill-library.ts";
+import { installLibrarySkill, listLibrarySkills, readLibrarySkillFile, readSkillLibraryIndex, setLibrarySkillReviewState, skillsLibraryEnabled } from "../skill-library.ts";
 import {
   installSkill, listBotSkillsWithOrigin, listStagedSkillWrites, parseSkillMd, removeSkill, scanSkillText, setSkillEnabled,
   type SkillListing, type StagedSkillWrite,
@@ -22,22 +16,16 @@ import { PASS, type RouteHandler } from "./table.ts";
 export interface BotSkillsRouteDeps {
   store: Store;
   cfg: AppConfig;
-  /** A bot's skills: its own, or with the library on, those merged with its assignments. */
   listBotSkills(bot: BotRecord): SkillListing[];
-  /** A skill's SKILL.md: the bot's own before a same-named library skill. */
   readBotSkillFile(bot: BotRecord, name: string): string | null;
-  /** A staged skill write as the list shows it, without the file bodies. */
   stagedSkillListing(staged: StagedSkillWrite): Omit<StagedSkillWrite, "files" | "baseSha256" | "baseAppliedStageId">;
 }
 
 export function createBotSkillsRoutes(deps: BotSkillsRouteDeps): RouteHandler {
   const { store, cfg, listBotSkills, readBotSkillFile, stagedSkillListing } = deps;
   return async ({ req, res, path, method, json, readBody }) => {
-    /** scratch for route matches, shared by every `path.match` below */
     let m: RegExpMatchArray | null = null;
-    // ── bot skills: imported Agent Skills (SKILL.md) ────────────────────
-    // Import lands DISABLED; the UI shows SKILL.md + scan warnings and a
-    // person enables after reading. See server/skills.ts for the policy.
+    // Imports land DISABLED: a person enables one after reading SKILL.md and its scan warnings.
     m = path.match(/^\/api\/bots\/([\w-]+)\/skill-template$/);
     if (m && method === "POST") {
       if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
@@ -60,10 +48,8 @@ export function createBotSkillsRoutes(deps: BotSkillsRouteDeps): RouteHandler {
       if (skillsLibraryEnabled(cfg)) {
         const { skills, library } = listBotSkillsWithOrigin(m[1]!, store.bot(m[1])!.assignedSkills);
         return json(res, 200, {
-          skills,
+          skills: [...skills, ...importedSkillListings(m[1]!, new Set(skills.map((skill) => skill.name)))],
           library,
-          // the authoritative assignment list: merged rows hide
-          // assignments a same-name private skill shadows
           assignedSkills: store.bot(m[1])!.assignedSkills,
           staged: listStagedSkillWrites(m[1]).map(stagedSkillListing),
         });
@@ -95,6 +81,13 @@ export function createBotSkillsRoutes(deps: BotSkillsRouteDeps): RouteHandler {
     if (m && method === "PATCH") {
       const parsed = z.object({ enabled: z.boolean() }).safeParse(await readBody(req));
       if (!parsed.success) return json(res, 400, { error: "enabled must be true or false" });
+      const bot = store.bot(m[1]);
+      // A skill from this computer that none of the bot's own or library skills shadows: this bot's switch for it.
+      if (bot && listBotSkills(bot).some((skill) => skill.name === m![2] && (skill as { origin?: string }).origin === "imported")) {
+        const result = setImportedSkillEnabled(bot.id, m[2]!, parsed.data.enabled);
+        if ("error" in result) return json(res, 409, { error: result.error });
+        return json(res, 200, { skill: result });
+      }
       const result = setSkillEnabled(m[1]!, m[2]!, parsed.data.enabled);
       if ("error" in result) return json(res, 404, { error: result.error });
       return json(res, 200, { skill: result });
@@ -105,9 +98,6 @@ export function createBotSkillsRoutes(deps: BotSkillsRouteDeps): RouteHandler {
       return json(res, 200, { ok: true });
     }
 
-    // ── skills library (features.skillsLibrary): local browse surface ────
-    // Everything here is local: the library on disk, assignments on bot
-    // records, imports from pasted SKILL.md text. No registry, no network.
     m = path.match(/^\/api\/skills-library$/);
     if (m && method === "GET") {
       if (!skillsLibraryEnabled(cfg)) return json(res, 404, { error: "skills library is not enabled" });
@@ -137,8 +127,6 @@ export function createBotSkillsRoutes(deps: BotSkillsRouteDeps): RouteHandler {
       if (!parsed.success) return json(res, 400, { error: "text must be the SKILL.md contents to import" });
       const skill = parseSkillMd(parsed.data.text);
       if ("error" in skill) return json(res, 400, { error: skill.error });
-      // Imports land disabled with their scan warnings attached: enabling is
-      // a separate, explicit review step on the row.
       const installed = installLibrarySkill({
         name: skill.name,
         instructions: parsed.data.text,

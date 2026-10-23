@@ -25,7 +25,6 @@ afterEach(() => vi.unstubAllGlobals());
 it("finds the menu button on screen, below it in a full sidebar and beside it in the icons-only one", () => {
   expect(switcherPlacement(doc(rect(10, 140)), 1200, 800)).toBe("below");
   expect(switcherPlacement(doc(rect(8, 40)), 1200, 800)).toBe("right");
-  // A closed drawer (off screen) or a hidden button is no button.
   expect(switcherPlacement(doc(rect(-300, 140), { ...rect(10, 0), width: 0 }), 1200, 800)).toBeNull();
   expect(switcherPlacement(doc(), 1200, 800)).toBeNull();
 });
@@ -36,7 +35,7 @@ it("one step on the menu that keeps Add a Cloud, with Skip; nothing when not ask
   const html = render();
   expect(html).toContain('data-spotlight="server-switcher"'); expect(html).toContain('data-placement="below"');
   expect(html).toContain("Add a Cloud from here");
-  expect(html).toContain("Click this menu, then choose Add a Cloud. It&#x27;s also where you switch between this computer and My Cloud.");
+  expect(html).toContain("Click this menu, then choose Add a Cloud. It&#x27;s also where you switch between this computer and the Cloud.");
   expect(html).toContain(">Skip<");
   f.state = { cloudHowTo: false }; expect(render()).toBe("");
 });

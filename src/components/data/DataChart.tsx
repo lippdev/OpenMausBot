@@ -11,16 +11,12 @@ import { rowObjects, type Cell } from "./data-format";
 export interface DataChartProps {
   botId: string;
   cardId: string;
-  /** The compiled Vega-Lite spec, data-free; the rows bind as dataset "table". */
   spec: Record<string, unknown>;
-  /** Rows after the server's reduction (at most DATA_LIMITS.chartMaxMarks). */
   rowCount: number | undefined;
   theme: ColorScheme;
   revision?: string;
 }
 
-/** The reduced rows, paged like the grid pages: never more than pageSize
- * per request, never more than the chart cap in total. */
 export async function fetchChartRows(botId: string, cardId: string, rowCount: number | undefined, signal?: AbortSignal): Promise<Array<Record<string, Cell>>> {
   const rows: Array<Record<string, Cell>> = [];
   let offset = 0;
@@ -40,10 +36,7 @@ export async function fetchChartRows(botId: string, cardId: string, rowCount: nu
   return rows;
 }
 
-/** The spec with the rows bound as the dataset named "table", sized to its
- * container so it follows the card's width. A spec that already names its
- * data keeps that; one without any gets the table. Concat and repeat specs
- * size their own children, so only unit and layer specs get the width. */
+/** Concat and repeat specs size their own children, so only unit and layer specs get the width. */
 export function bindChartRows(spec: Record<string, unknown>, rows: Array<Record<string, Cell>>): Record<string, unknown> {
   const datasets = { ...(spec.datasets as Record<string, unknown> | undefined), table: rows };
   const unit = "mark" in spec || "layer" in spec;
@@ -55,9 +48,6 @@ export function bindChartRows(spec: Record<string, unknown>, rows: Array<Record<
   };
 }
 
-/** A Vega-Lite chart of a card's reduced rows. vega-embed (~270 KB gzipped)
- * loads on the first chart, not with the app. The theme comes from the
- * skin; the shared config carries OMB's palette and fonts. */
 export function DataChart({ botId, cardId, spec, rowCount, theme, revision }: DataChartProps) {
   const host = useRef<HTMLDivElement>(null);
   const displayed = useRef<{ result: Result; naturalHeight?: number } | null>(null);
@@ -79,8 +69,6 @@ export function DataChart({ botId, cardId, spec, rowCount, theme, revision }: Da
       element.replaceChildren();
     };
   }, []);
-  // The sheet is replaced whole on every frame, so the spec object changes
-  // identity without changing; redraw only when its content does.
   const specText = JSON.stringify(spec);
   useEffect(() => {
     const element = host.current;
@@ -108,12 +96,11 @@ export function DataChart({ botId, cardId, spec, rowCount, theme, revision }: Da
       Object.assign(candidate.style, { position: "absolute", top: "0", left: "0", width: "100%", visibility: "hidden" });
       candidate.setAttribute("aria-hidden", "true");
       element.append(candidate);
-      // SAFETY: the server validated the spec against Vega-Lite's schema and
-      // rendered it once headlessly; embed throws on anything it still rejects.
+      // SAFETY: the server validated the spec against Vega-Lite's schema and rendered it once headlessly; embed throws
+      // on anything it still rejects.
       const embedded = await embed(candidate, bound as Parameters<typeof embed>[1], { actions: false, config: vegaConfig(theme) });
       candidateResult = embedded;
       if (!alive) { discardCandidate(); return; }
-      // Keep a chart's preferred height in a tall panel; shrink only to fit the available output.
       naturalHeight ??= unit ? candidate.clientHeight || undefined : undefined;
       let fittedHeight = bound.height;
       while (naturalHeight && element.clientHeight > 0) {

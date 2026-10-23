@@ -1,9 +1,7 @@
-// A command the person writes in Bot settings > Skills: a name, one line on
-// what it does, and the instructions. It is stored as an ordinary SKILL.md
-// through the same per-bot install the bot-creation templates use, so it
-// needs no store of its own: it shows in the skills index, can be switched
-// off or removed like any skill, and runs as `/name` from the composer.
-import { DESCRIPTION_MAX, isSkillName, parseSkillMd } from "./skill-md.ts";
+// A command the person writes: a name, one line on what it does, and the
+// instructions. Stored as an ordinary SKILL.md through the per-bot install, so
+// it needs no store of its own and runs as `/name` from the composer.
+import { DESCRIPTION_MAX, isSkillName, parseSkillMd, yamlFrontmatterValue } from "./skill-md.ts";
 
 export const WRITTEN_SKILL_SOURCE = "written:bot settings";
 export const WRITTEN_INSTRUCTIONS_MAX = 16_000;
@@ -20,7 +18,7 @@ export type WrittenSkillProblem = "name" | "reserved" | "taken" | "description" 
 
 /** One line, no frontmatter-breaking characters. */
 export function writtenSkillDescription(value: string): string {
-  return value.replace(/\s+/g, " ").replace(/^["']+|["']+$/g, "").trim();
+  return value.replace(/\s+/g, " ").trim().replace(/^["']+|["']+$/g, "").trim();
 }
 
 /** What is wrong with the draft, first problem only, or null. `taken` is
@@ -44,12 +42,15 @@ export function writtenSkillMd(input: WrittenSkillInput): string {
   const problem = writtenSkillProblem(input);
   if (problem) throw new Error(`written skill: invalid ${problem}`);
   const name = input.name.trim();
-  const text = `---\nname: ${name}\ndescription: ${writtenSkillDescription(input.description)}\n---\n\n` +
+  const description = writtenSkillDescription(input.description);
+  const text = `---\nname: ${name}\ndescription: ${yamlFrontmatterValue(description)}\n---\n\n` +
     `# /${name}\n\n` +
     `A command the user wrote. When they run /${name}, follow these instructions. ` +
     "Where they say {input}, use what the user typed after the command.\n\n" +
     `${input.instructions.trim()}\n`;
   const parsed = parseSkillMd(text);
-  if ("error" in parsed || parsed.name !== name) throw new Error("written skill: did not round-trip");
+  if ("error" in parsed || parsed.name !== name || parsed.description !== description) {
+    throw new Error("written skill: did not round-trip");
+  }
   return text;
 }

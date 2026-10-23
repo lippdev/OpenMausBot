@@ -1,6 +1,4 @@
-// Local authority boundary. The server sends requests, never paths to grant,
-// commands to install, or permission changes. Only the desktop's saved grant
-// decides which operations reach this computer.
+// The server sends requests, never paths to grant, commands to install or permission changes: only the saved grant decides.
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
@@ -8,17 +6,23 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import { lentScreenArguments, lentScreenToolListing } from "./lent-screen-tools.mjs";
+import { helperMissing } from "./lent-screen-failures.mjs";
 
-const LIMIT = 256 * 1024;
+/** Reads stay under the 4 MB body that carries a result to the server (base64 of 2 MiB is 2.8 MB); writes stay small. */
+const READ_LIMIT = 2 * 1024 * 1024;
+const WRITE_LIMIT = 256 * 1024;
+const OUTPUT_LIMIT = 256 * 1024;
+// A process the command left running in the background can hold its output pipes open long after the command ended,
+// and on Windows a grandchild whose parent has exited is outside the tree taskkill /T ends. A command's result is
+// therefore what it wrote by shortly after it exited, and a stopped command ends shortly after the stop.
+const PIPE_GRACE_MS = 1000;
+const STOP_GRACE_MS = 5000;
+/** The server reads a result body of at most 4,000,000 bytes. */
+const RESULT_LIMIT = 3_900_000;
 const PROTECTED = "Desktop credentials and sharing settings cannot be accessed through a shared folder";
 const GIT_INTERNALS = "Files inside .git cannot be changed through a shared folder: git runs commands from its configuration and hooks";
 
-/** Where a person keeps the keys that open a shell or an account (SSH, cloud
- * and package CLIs, the coding engines, keychains and browser cookie stores)
- * and the places that run code by themselves (login items, git and shell
- * configuration, ~/.local/bin). No folder grant reaches these, read-only or
- * not, however the shared folder around them was chosen. Relative to home;
- * entries that do not exist on this machine protect nothing. */
+/** Keys that open a shell or an account, and places that run code by themselves: no folder grant reaches these. Relative to home. */
 const PERSONAL_SECRETS = [
   ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".netrc", ".git-credentials", ".npmrc", ".pypirc",
   ".claude", ".claude.json", ".codex", ".mozilla", ".local/share/keyrings", ".local/bin",
@@ -28,30 +32,28 @@ const PERSONAL_SECRETS = [
   "Library/Application Support/Google/Chrome", "Library/Application Support/Chromium",
   "Library/Application Support/BraveSoftware", "Library/Application Support/Microsoft Edge",
   "Library/Application Support/Firefox", "Library/Application Support/Arc",
+  ".cua",
+  // Windows: the browsers' saved passwords and cookies, the credential vault and its keys, and what runs at sign-in.
+  "AppData/Local/Google/Chrome/User Data", "AppData/Local/Microsoft/Edge/User Data", "AppData/Local/BraveSoftware/Brave-Browser/User Data",
+  "AppData/Roaming/Mozilla", "AppData/Local/Mozilla",
+  "AppData/Roaming/Microsoft/Credentials", "AppData/Local/Microsoft/Credentials", "AppData/Roaming/Microsoft/Protect",
+  "AppData/Roaming/Microsoft/Vault", "AppData/Local/Microsoft/Vault",
+  "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup",
 ];
 export function personalSecretPaths(home) {
   return typeof home === "string" && home ? PERSONAL_SECRETS.map(entry => path.join(home, ...entry.split("/"))) : [];
 }
 
-/** The computer-control tools a lent screen offers, and the arguments each
- * accepts: observing windows and operating apps the way a person at the
- * keyboard would (electron/lent-screen-tools.mjs). */
 export { LENT_SCREEN_TOOLS } from "./lent-screen-tools.mjs";
 
-/** Any component named .git, compared the way a case-folding, Unicode-
- * normalizing filesystem compares it: in the requested path, or in the
- * shared folder itself (someone may have picked a .git directory). */
+/** Compared the way a case-folding, Unicode-normalizing filesystem compares it. */
 const gitComponent = part => part.normalize("NFC").toLowerCase() === ".git";
 const insideGitInternals = (root, relative) => root.split(path.sep).some(gitComponent) || relative.split("/").some(gitComponent);
 const hash = data => createHash("sha256").update(data).digest("hex");
 const absent = error => error.code === "ENOENT" || error.code === "ENOTDIR";
 const identify = async candidate => { const info = await fs.stat(candidate, { bigint: true }); return `${info.dev}:${info.ino}`; };
 
-/** Protected roots as filesystem identities. A case-insensitive volume, a
- * Unicode normalization, a macOS firmlink and a Windows 8.3 or UNC name all
- * spell one directory several ways, so containment is decided by {dev, ino}
- * and never by comparing path text. A root a fresh install has not created
- * yet protects nothing, so a missing path is skipped rather than thrown. */
+/** {dev, ino}, never path text; a root a fresh install has not created yet is skipped. */
 async function protectedIdentities(roots) {
   const identities = new Set();
   for (const root of roots ?? []) {
@@ -62,9 +64,7 @@ async function protectedIdentities(roots) {
   return identities;
 }
 
-/** Refuse anything the operating system resolves inside a protected root. A
- * write may create a file that does not exist yet, so fall back to the nearest
- * existing ancestor, then walk that resolved chain comparing identities. */
+/** A write may create a file that does not exist yet, so walk from the nearest existing ancestor. */
 async function assertOutsideProtected(identities, target) {
   if (!identities.size) return;
   let current = path.resolve(target);
@@ -90,14 +90,15 @@ async function assertOutsideProtected(identities, target) {
 
 const text = value => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] });
 
-/** Job error text crosses to a remote workspace, so absolute paths collapse
- * to their basename. The original is warned first so debugging information is
- * preserved on this machine. */
+const POSIX_PATH = /(?:\/[^/\s]+)+/g;
+/** A Windows folder may hold spaces, so everything up to a line's last backslash goes. */
+const WINDOWS_FOLDERS = /(?:[A-Za-z]:|\\\\[^\\\s]+)\\(?:[^\\\r\n]*\\)*/g;
+/** Job error text crosses to a remote workspace, so absolute paths collapse to their basename (the original is logged here). */
 const basenameMessage = message => {
   const original = String(message);
-  if (!original.match(/(?:\/[^/\s]+)+/g)) return original;
+  if (!original.match(POSIX_PATH) && !original.match(WINDOWS_FOLDERS)) return original;
   console.warn("Shared computer error before path sanitization:", original);
-  return original.replace(/(?:\/[^/\s]+)+/g, matched => matched.slice(matched.lastIndexOf("/") + 1));
+  return original.replace(WINDOWS_FOLDERS, "").replace(POSIX_PATH, matched => matched.slice(matched.lastIndexOf("/") + 1));
 };
 export const sharedComputerError = error => ({ ...text(basenameMessage(error?.message ?? "Computer action failed")), isError: true });
 
@@ -124,52 +125,71 @@ function killTree(child) {
   }
 }
 
-/** No inherited API keys, model-provider credentials or shell startup files.
- * This is still UNRESTRICTED host execution when the user enables terminal. */
+/** No inherited API keys, provider credentials or shell startup files, but still UNRESTRICTED host execution once terminal is on. */
+/** No inherited API keys or provider credentials. On Windows a child without SystemRoot cannot start Winsock, one
+ * without USERPROFILE has no home, and one without TEMP or TMP puts temporary files in the Windows folder. */
+const hostEnvironment = () => Object.fromEntries(["PATH", "PATHEXT", "HOME", "USERPROFILE", "SystemRoot", "TEMP", "TMP", "LANG"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
+
 export function sharedCommand(command, cwd, signal) {
   if (typeof command !== "string" || !command.trim() || command.length > 8000) throw new Error("Give a command of at most 8000 characters");
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const windows = process.platform === "win32";
-    // Windows PowerShell searches registered third-party modules before its
-    // own cmdlets. On a cold machine even `echo` can spend the entire deadline
-    // discovering Write-Output. Prioritize built-ins after startup constructs
-    // the path, preserving every existing module location. A child CLI executes
-    // the original text unchanged: a ScriptBlock wrapper loses native failure
-    // status. The existing process-tree cancellation covers both shells.
+    // PowerShell searches third-party modules before its own cmdlets, so a cold `echo` can exhaust the deadline: prefer built-ins.
+    // A ScriptBlock wrapper would lose native failure status, so a child CLI runs the original text.
     const script = windows
       ? `$env:PSModulePath = "$PSHOME\\Modules;$env:PSModulePath"; & "$PSHOME\\powershell.exe" -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand '${Buffer.from(command, "utf16le").toString("base64")}'; exit $LASTEXITCODE`
       : command;
     const child = spawn(windows ? "powershell.exe" : "/bin/sh", windows ? ["-NoProfile", "-NonInteractive", "-Command", script] : ["-c", script], {
       cwd, detached: !windows, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       // Without PATHEXT, PowerShell treats even .exe files as documents.
-      env: Object.fromEntries(["PATH", "PATHEXT", "HOME", "USERPROFILE", "SystemRoot", "TEMP", "TMP", "LANG"].filter(key => process.env[key]).map(key => [key, process.env[key]])),
+      env: hostEnvironment(),
     });
-    const chunks = []; let bytes = 0; let reason;
-    const stop = message => { reason = message; killTree(child); };
+    const chunks = []; let bytes = 0; let reason; let settled = false;
+    const graces = [];
+    const settle = (code, error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer); for (const grace of graces) clearTimeout(grace);
+      signal.removeEventListener("abort", abort);
+      child.stdout.destroy(); child.stderr.destroy();
+      if (error) reject(error);
+      else if (reason) reject(new Error(reason));
+      else resolve(text({ exitCode: code, output: Buffer.concat(chunks).toString("utf8") }));
+    };
+    const stop = message => {
+      if (settled || reason) return;
+      reason = message;
+      killTree(child);
+      graces.push(setTimeout(() => settle(null), STOP_GRACE_MS));
+    };
     const abort = () => stop("Computer access was revoked or the requesting turn ended. Inspect the result before retrying.");
     signal.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => stop("Command timed out after 30 seconds; inspect before retrying."), 30_000);
     for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => {
       bytes += chunk.length;
-      if (bytes <= LIMIT) chunks.push(chunk); else stop("Command output exceeded the limit");
+      if (bytes <= OUTPUT_LIMIT) chunks.push(chunk); else stop("Command output exceeded the limit");
     });
-    const cleanup = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); };
-    child.once("error", error => { cleanup(); reject(error); });
-    child.once("close", code => { cleanup(); if (reason) reject(new Error(reason)); else resolve(text({ exitCode: code, output: Buffer.concat(chunks).toString("utf8") })); });
+    child.once("error", error => settle(null, error));
+    child.once("close", code => settle(code));
+    child.once("exit", code => { graces.push(setTimeout(() => settle(code), PIPE_GRACE_MS)); });
   });
 }
 
-/** Persistent official Cua MCP transport: observation references survive the
- * next call. Ending sharing closes this transport, not the app's own daemon. */
+/** Persistent transport: Cua observation references survive to the next call. Ending sharing closes this, not the app's daemon. */
 export function createSharedCua(connection) {
   const child = spawn(connection.mcpCommand, connection.mcpArgs, {
     stdio: ["pipe", "pipe", "ignore"], windowsHide: true,
-    env: { PATH: process.env.PATH, HOME: process.env.HOME, ...connection.mcpEnv },
+    env: { ...hostEnvironment(), ...connection.mcpEnv },
   });
   let sequence = 0; let closed = false; let bytes = 0;
   const pending = new Map();
-  const fail = error => { closed = true; for (const item of pending.values()) item.reject(error); pending.clear(); child.kill(); };
+  const fail = error => {
+    closed = true;
+    const reason = child.pid === undefined ? new Error(helperMissing()) : error;
+    for (const item of pending.values()) item.reject(reason);
+    pending.clear(); child.kill();
+  };
   child.on("error", fail);
   child.stdin.on("error", fail);
   child.on("exit", () => fail(new Error("Computer-control transport closed")));
@@ -202,8 +222,7 @@ export function createSharedCua(connection) {
         return text({ ...listed, tools: lentScreenToolListing(listed?.tools) });
       }
       if (typeof operation.tool_name !== "string" || !operation.tool_name) throw new Error("Choose a tool from computer_tools first");
-      // Tool and every argument checked here, on this computer: nothing the
-      // server sends reaches the driver unless a lent screen accepts it.
+      // Every tool and argument is checked here: nothing the server sends reaches the driver unless a lent screen accepts it.
       const lent = lentScreenArguments(operation.tool_name, operation.arguments);
       if (lent.error) throw new Error(lent.error);
       return request("tools/call", { name: operation.tool_name, arguments: lent.arguments }, signal);
@@ -235,7 +254,7 @@ export async function executeSharedOperation(grant, operation, signal, cua) {
     const shown = await Promise.all(entries.slice(0, 200).map(async entry => {
       if (entry.isSymbolicLink()) return { name: entry.name, type: "blocked-link" };
       let identity;
-      try { identity = await identify(path.join(target, entry.name)); } catch { /* vanished meanwhile */ }
+      try { identity = await identify(path.join(target, entry.name)); } catch {}
       if (identity !== undefined && protectedRoots.has(identity)) return { name: entry.name, type: "protected" };
       return { name: entry.name, type: entry.isDirectory() ? "directory" : "file" };
     }));
@@ -248,30 +267,29 @@ export async function executeSharedOperation(grant, operation, signal, cua) {
   if (write) {
     if (typeof operation.content !== "string") throw new Error("Give file content to write");
     data = Buffer.from(operation.content, operation.encoding === "base64" ? "base64" : "utf8");
-    if (data.length > LIMIT) throw new Error("Files are limited to 256 KiB per operation");
+    if (data.length > WRITE_LIMIT) throw new Error("A file written here is limited to 256 KiB");
   }
   const flags = (write ? operation.expected_sha256 ? constants.O_RDWR : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL : constants.O_RDONLY) | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
   const file = await fs.open(target, flags, 0o600);
   try {
     const stat = await file.stat({ bigint: true });
-    if (!stat.isFile() || stat.nlink !== 1n || stat.size > LIMIT) throw new Error("Only regular, single-link files up to 256 KiB can be shared");
+    if (!stat.isFile() || stat.nlink !== 1n || stat.size > READ_LIMIT) throw new Error("Only regular, single-link files up to 2 MiB can be shared");
     await sharedPath(folder, operation.path);
     const named = await fs.lstat(target, { bigint: true });
     if (named.ino !== stat.ino || named.dev !== stat.dev || named.isSymbolicLink()) throw new Error("The file changed while opening it; retry after inspecting the folder");
-    // The descriptor, not the spelling, is what the rest of this call reads and
-    // writes, so re-decide containment against its own identity and ancestry.
+    // Re-decide containment against the opened descriptor's own identity, not the spelling.
     if (protectedRoots.has(`${stat.dev}:${stat.ino}`)) throw new Error(PROTECTED);
     await assertOutsideProtected(protectedRoots, target);
     let current = Buffer.alloc(0);
     if (!write || operation.expected_sha256) {
-      const buffer = Buffer.alloc(LIMIT + 1);
+      const buffer = Buffer.alloc(READ_LIMIT + 1);
       let total = 0;
       while (total < buffer.length) {
         const { bytesRead } = await file.read(buffer, total, buffer.length - total, total);
         if (!bytesRead) break;
         total += bytesRead;
       }
-      if (total > LIMIT) throw new Error("File grew beyond the 256 KiB limit");
+      if (total > READ_LIMIT) throw new Error("File grew beyond the 2 MiB limit");
       current = buffer.subarray(0, total);
     }
     if (write) {
@@ -287,6 +305,9 @@ export async function executeSharedOperation(grant, operation, signal, cua) {
       return text({ written: true, bytes: data.length, sha256: hash(data) });
     }
     signal.throwIfAborted();
-    return text({ content: current.toString(operation.encoding === "base64" ? "base64" : "utf8"), encoding: operation.encoding ?? "utf8", bytes: current.length, sha256: hash(current) });
+    const read = text({ content: current.toString(operation.encoding === "base64" ? "base64" : "utf8"), encoding: operation.encoding ?? "utf8", bytes: current.length, sha256: hash(current) });
+    // Text full of quotes or control characters grows when escaped twice; base64 never does.
+    if (Buffer.byteLength(JSON.stringify(read)) > RESULT_LIMIT) throw new Error("This file is too big to read as text. Read it with encoding base64.");
+    return read;
   } finally { await file.close(); }
 }

@@ -9,23 +9,20 @@ export type ConfirmTone = "danger" | "neutral";
 export interface ConfirmDialogProps {
   open: boolean;
   title: string;
-  body: string;
+  body: ReactNode;
   confirmLabel: string;
-  /** "danger" for irreversible actions (filled red button, red frame);
-   * "neutral" for reversible ones like archiving. */
   tone?: ConfirmTone;
   icon?: ReactNode;
   onCancel: () => void;
   onConfirm: () => void;
   pending?: boolean;
-  /** Stable fallback when a context-menu trigger disappears before opening. */
   returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
-/** In-app replacement for window.confirm: backdrop, focus trap, Escape
- * cancels, Cancel focused by default so
- * a stray Enter never confirms. Portalled to <body> because the sidebar
- * translates below md and would otherwise become the containing block. */
+/**
+ * Cancel is focused by default so a stray Enter never confirms. Portalled to <body>: the sidebar's translate below md
+ * would become the containing block.
+ */
 export function ConfirmDialog(props: ConfirmDialogProps) {
   const { open, onCancel, returnFocusRef } = props;
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -84,8 +81,6 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
   );
 }
 
-/** The card alone, without the portal or key handling — exported so it can be
- * rendered to static markup in tests. */
 export function ConfirmDialogCard({
   ref,
   cancelRef,

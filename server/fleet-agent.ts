@@ -1,8 +1,5 @@
-// The fleet agent: the one root process on a shared server, listening on a
-// Unix socket only the operator's user may open. It answers a small JSON API
-// by planning with fleet.ts and running the plan with the same executor the
-// CLI uses. Every request is validated here, every action is written to an
-// audit log, and nothing arrives as a command string.
+// The one root process on a shared server, on a Unix socket only the operator's user may open. Every request is validated
+// and audited, and nothing arrives as a command string.
 import { appendFileSync, chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
@@ -18,7 +15,6 @@ export interface FleetAgentOptions {
   licenseKey?: string;
   root?: string;
   deps?: FleetDeps;
-  /** Where actions are recorded; the layout's audit file by default. */
   auditFile?: string;
   now?: () => Date;
 }
@@ -92,7 +88,6 @@ export function createFleetAgent(options: FleetAgentOptions): Server {
       mkdirSync(dirname(auditFile), { recursive: true, mode: 0o750 });
       appendFileSync(auditFile, `${JSON.stringify({ at: now().toISOString(), ...entry })}\n`, { mode: 0o600 });
     } catch {
-      /* the audit line must never fail the action it records */
     }
   };
 
@@ -124,8 +119,7 @@ export function createFleetAgent(options: FleetAgentOptions): Server {
     return code === 0 ? { status: 200, body: { ok: true, log } } : { status: 500, body: { error: errors[0] ?? "the step failed", log: [...log, ...errors] } };
   };
 
-  // Planning reads the registry too: serialize the entire read/modify/execute
-  // sequence, not just the subprocesses, so ports and updates cannot collide.
+  // Planning reads the registry too: serialize the whole read/modify/execute sequence so ports and updates cannot collide.
   let mutationTail: Promise<unknown> = Promise.resolve();
   const act = (input: FleetInput) => {
     const result = mutationTail.then(() => runAction(input));

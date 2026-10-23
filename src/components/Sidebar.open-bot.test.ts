@@ -1,10 +1,3 @@
-// The sidebar's other ways of opening a bot open it as its row does
-// (openBot): Edit profile on another bot, a bot restored from Archived bots
-// or by Undo, and the next bot after archiving the one on screen. With
-// threads hidden a bot is one conversation, its main thread, so none of them
-// lands on a thread an activity row or a notification left it on, where the
-// person's next words would make it theirs. With threads shown they select
-// the bot, as they always did.
 import { Children, isValidElement, type EffectCallback, type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppState, Bot } from "@/state/store";
@@ -52,7 +45,6 @@ import { initialState } from "@/state/store";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ArchivedBotsPanel, BotContextMenu, Sidebar } from "./Sidebar";
 
-/** A bot left on an older thread; the person last wrote in its main one. */
 const left = (id: string, extra: Partial<Bot> = {}): Bot => ({
   id, threadId: `${id}-left`, mainThreadId: `${id}-main`, name: id, title: "", description: "", notifications: true,
   color: "green", unread: false, modelSelection: { instanceId: "fake", model: "m" }, messages: [],
@@ -74,7 +66,6 @@ function render(component: () => ReactNode) {
 }
 const label = (node: ReactElement<Props>) => Children.toArray(node.props.children).filter((child) => typeof child === "string").join("");
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
-/** What opening `id` dispatches: its main thread by the switch alone with threads hidden, the bot selected with threads shown. */
 const opened = (id: string) => fixture.showThreads ? { type: "select", id } : { type: "switchTask", botId: id, threadId: `${id}-main` };
 const actions = () => fixture.dispatch.mock.calls.map(([action]) => action).filter((action) => action.type !== "botPatched");
 

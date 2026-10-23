@@ -104,7 +104,7 @@ export async function readBoundedJSON(request: Request): Promise<JSONValue> {
 }
 
 /** For a route whose JSON body is optional: no body, or an empty one, is
- * `undefined` (older clients send none). Anything else must be JSON. */
+ * `undefined`. Anything else must be JSON. */
 export async function readOptionalBoundedJSON(request: Request): Promise<JSONValue | undefined> {
   if (!request.body) return undefined;
   const bytes = await readBoundedBody(request);

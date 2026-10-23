@@ -2,7 +2,6 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 
-/** One picker row: icon, name, optional one-line description, kind tag at the end. */
 export function ComposerMenuRow({
   icon,
   name,

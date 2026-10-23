@@ -1,10 +1,4 @@
 // @vitest-environment happy-dom
-// A Data receipt renders as the result chip in a 1:1 chat and in a room,
-// before anything reads its tool name as a status, a failed turn or a plain
-// tool run. Receipts written before the server named the tool "data_show"
-// carry the card's title as the tool name, so a result called
-// "notice: …" or "error: …" must still be a receipt, with Open in Data and
-// no Retry.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -17,7 +11,7 @@ vi.mock("./DesktopCapabilities", async (importOriginal) => ({
   useCaptionChrome: () => ({}),
 }));
 vi.mock("@/lib/analytics", () => ({ track: vi.fn() }));
-vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true }));
+vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true, useReactor: () => "user" }));
 vi.mock("./ModelPicker", () => ({ ModelPicker: () => null }));
 
 const { ChatView } = await import("./ChatView");
@@ -26,7 +20,6 @@ const { BotEditorStore, initialState } = await import("@/state/store");
 const { t } = await import("@/lib/i18n");
 
 const at = new Date(2026, 9, 10, 9, 0).getTime();
-/** An older server's receipt: the card's title doubled as the tool name. */
 const legacyReceipt = (id: string, title: string, parentId?: string, extra: Partial<Message> = {}): Message => ({
   id, parentId, at, role: "bot", kind: "activity", tool: { name: title, ok: true },
   dataResult: { botId: "pepper", cardId: id, title, kind: "table", sql: "SELECT region FROM orders" }, ...extra,
@@ -67,7 +60,6 @@ function expectReceipts(container: HTMLElement) {
     expect(chip!.textContent).toContain(title);
     expect(chip!.textContent).toContain(t("data.openResult"));
   }
-  // not a bordered status notice carrying the result's words, not a failed turn with Retry, and shown with tool calls off
   const notices = [...container.querySelectorAll("[role=status]")].map((element) => element.textContent ?? "");
   expect(notices.some((text) => text.includes("revenue by region") || text.includes("rows with no region"))).toBe(false);
   expect(container.textContent).not.toContain(t("chat.retry"));

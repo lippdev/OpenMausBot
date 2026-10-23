@@ -1,8 +1,3 @@
-// Who a room row should name. A bot's text bubbles carry the name, including
-// the first bubble after the person speaks and after chips that do not
-// themselves show one (a hidden tool run, a digest, a comm line). A tool run
-// or card keeps the name only when no text bubble of that bot follows it.
-
 import type { ActivityTranscriptItem } from "./activity-runs";
 import { localDay } from "./transcript-derivations";
 
@@ -23,7 +18,6 @@ function laterTextOwns(items: readonly ActivityTranscriptItem[], index: number, 
   return false;
 }
 
-/** The first text bubble of a bot's group, and again after another speaker or a new day. */
 export function botTextShowsSpeaker(items: readonly ActivityTranscriptItem[], index: number): boolean {
   const item = items[index];
   if (!item || item.kind !== "message" || !isBotText(item.message)) return false;
@@ -46,7 +40,6 @@ export function botTextShowsSpeaker(items: readonly ActivityTranscriptItem[], in
   return true;
 }
 
-/** A folded tool run names its bot only when the following text will not. */
 export function runShowsSpeaker(items: readonly ActivityTranscriptItem[], index: number, showToolCalls: boolean): boolean {
   if (!showToolCalls) return false;
   const item = items[index];

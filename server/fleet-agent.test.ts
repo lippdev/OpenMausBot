@@ -98,7 +98,6 @@ describe.skipIf(process.platform === "win32")("fleet agent over its socket", () 
     const logs = await boot(m);
     expect(logs[0]).toContain("fleet agent listening");
     expect(fleetAvailable(socketPath)).toBe(true);
-    // the socket itself is the authorisation: owner and group only
     if (process.platform !== "win32") expect(statSync(socketPath).mode & 0o777).toBe(0o660);
 
     const created = await fleetRequest(socketPath, "POST", "/workspaces", { slug: "acme", admins: ["ada@example.test"], members: ["@acme.test"], cap: 40, anthropicKey: "sk-ant-fixture", brandJson: '{"name":"Acme"}', portalUrl: "https://admin.example.test", anthropicUrl: "https://admin.example.test/api/gateway/acme/anthropic" });
@@ -198,7 +197,6 @@ describe.skipIf(process.platform === "win32")("fleet agent over its socket", () 
       await vi.waitFor(() => expect(m.calls.some((call) => call.endsWith("omb-alpha"))).toBe(true));
       expect(await fleetRequest(socketPath, "GET", "/workspaces")).toMatchObject({ status: 200, body: { workspaces: [{ slug: "alpha", status: "provisioning", accountCreated: false, live: "provisioning" }] } });
       const beta = fleetRequest(socketPath, "POST", "/workspaces", { slug: "beta", admins: ["b@example.test"] });
-      // A health request reaches the server while the second mutation is queued.
       expect((await fleetRequest(socketPath, "GET", "/health")).status).toBe(200);
       expect(m.calls.some((call) => call.endsWith("omb-beta"))).toBe(false);
       release();

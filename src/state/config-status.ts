@@ -9,7 +9,13 @@ export interface ConfigStatus {
   mistral?: { configured: boolean };
   cerebras?: { configured: boolean };
   groq?: { configured: boolean };
+  deepseek?: { configured: boolean };
   meta?: { configured: boolean };
+  /** X research comes with MausBot Cloud plans: `included` while this server holds the plan's relay credential;
+   * `unavailable` when the Admin said no to this desktop's paid sign-in. */
+  xResearch?: { included: boolean; unavailable?: boolean };
+  /** The person's own treg key for research: configured or not, never the key. */
+  treg?: { configured: boolean };
   /** `everyClaudeBot`: the key runs every Claude bot, not only "Claude (API key)". */
   anthropic?: { configured: boolean; everyClaudeBot?: boolean };
   openai?: { configured: boolean };
@@ -64,12 +70,15 @@ export interface ConfigStatus {
   /** The decision model: switches and whether a key is on file. The key
    * itself never comes back. `enabled` is the switch as it takes effect
    * (off while no key is saved). `included`: Cloud Pro's decisions, no key
-   * saved. */
+   * saved. OpenRouter only: `keySource` says which key is in use (its own, or
+   * the one under Settings → API keys); `sharedKey`: that one is on file. */
   decider?: {
     provider: "jev" | "openrouter";
     /** The OpenRouter model in use; present only while OpenRouter is the provider. */
     model?: string;
     configured: boolean;
+    keySource?: "own" | "shared";
+    sharedKey?: boolean;
     included?: boolean;
     enabled: boolean;
     jobs: { roomRouting: boolean };
@@ -88,11 +97,11 @@ export interface ConfigStatus {
     customKeyConfigured?: boolean;
   };
   /** who's using the app — collected in onboarding, shown in the sidebar */
-  profile?: { name: string; email: string; aboutMe?: string };
+  profile?: { name: string; email: string; aboutMe?: string; avatarUrl?: string };
   /** UI language override; "" (or absent) follows the system language. */
   language?: string;
   /** Opt-in flags. Absent means off. */
-  features?: { skillAuthoring: boolean; skillReview?: boolean; skillReviewSteps?: number; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean; skillsLibrary?: boolean; roomMemoryCapture?: boolean };
+  features?: { skillAuthoring: boolean; skillReview?: boolean; skillReviewSteps?: number; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean; skillsLibrary?: boolean; shareLearnedSkills?: "off" | "ask" | "auto"; roomMemoryCapture?: boolean };
   /** First-run progress: whether the welcome tour was finished and which
    * one-time hints were dismissed. Server-owned so it follows the workspace. */
   onboarding?: OnboardingStatus;
@@ -107,6 +116,9 @@ export interface ConfigStatus {
   /** This server is an OMB Cloud home: it offers no "this computer" and no
    * Local VM (server/cloud-home.ts). Absent everywhere else. */
   cloudHome?: boolean;
+  /** A Team Cloud: the team this server is the home of, and the Plan page (MausBot Cloud) where its people and plan
+   * are managed. Absent everywhere else. */
+  team?: { id: string; name: string; cloudPage?: string };
 }
 
 export interface ManagedPolicySummary {
@@ -124,11 +136,16 @@ export interface BrowserEngineSummary {
   reason?: string;
   installable?: boolean;
   version?: string;
+  /** The browser the engine starts, e.g. "Google Chrome 153 (installed)", or while Chrome for Testing downloads,
+   * "Chrome for Testing 153.0.8010.47 (downloading: 52 of 182 MB)". */
+  chrome?: string;
   installing?: boolean;
   installError?: string;
   /** Whether a browser profile can use "My Chrome", the person's own running
    * Chrome: only where the bots run on their computer (the desktop app). */
   myChrome?: boolean;
+  /** browserEngine.engine: "chrome" when the bots' browsers run on OpenMausBot's own Chrome driver. */
+  engine?: "agent-browser" | "chrome";
 }
 
 export interface BrowserProfile {

@@ -10,11 +10,8 @@ export const addressPreview = (value: string): string => {
   return `${value.slice(0, 10)}…${value.slice(-6)}`;
 };
 
-/** Routes are operational details, not credentials. They stay compact until
- * explicitly revealed so the normal setup UI never leads with network noise. */
 export function ConnectionDetail({ label, value }: { label: string; value: string }) {
   const [revealed, setRevealed] = useState(false);
-  // Clipboard access is best effort; the Reveal action remains available.
   const { state: copyState, copy } = useCopyFeedback(value);
 
   return (

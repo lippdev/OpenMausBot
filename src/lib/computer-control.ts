@@ -5,14 +5,11 @@ export type ComputerControlAction = "take" | "release";
 export interface ComputerControlSnapshot {
   held: boolean;
   helpReason: string | null;
-  /** The sign-in card the bot's open plea stands for. */
   help?: ComputerHelpRef | null;
 }
 
 const HELP_PLACES = new Set(["browser", "local", "vm", "cloud"]);
 
-/** A plea's card reference from the wire, or null for anything malformed:
- * the panel only ever settles a card it can name exactly. */
 export function parseComputerHelp(value: unknown): ComputerHelpRef | null {
   const ref = value as Partial<Record<keyof ComputerHelpRef, unknown>> | null;
   if (!ref || typeof ref !== "object") return null;
@@ -28,9 +25,7 @@ export type BrowserControlTransitionFailure =
   | "durable-release"
   | "native-release";
 
-/** BrowserPanel owns a two-phase lease because direct scoped host tokens can
- * bypass the renderer. Take is native-first; release is durable-first. A
- * failed take stays locally held, and a failed release reasserts the hold. */
+/** Scoped host tokens can bypass the renderer: take is native-first, release durable-first, and a failure stays held. */
 export async function transitionBrowserControlLease(input: {
   action: "take" | "release";
   requestDurableControl: (action: "take" | "release") => Promise<boolean>;
@@ -51,9 +46,7 @@ export async function transitionBrowserControlLease(input: {
   return { ok: true };
 }
 
-/** Positive-only authoritative sync. A held snapshot always tightens the
- * Electron gate; false snapshots never release it because loopback callers
- * can influence server state. Trusted release flows clear it explicitly. */
+/** Positive-only: loopback callers can influence server state, so a false snapshot never releases the Electron gate. */
 export function heldComputerControlBotIds(
   snapshots: Record<string, Pick<ComputerControlSnapshot, "held">>,
 ): string[] {
@@ -62,9 +55,7 @@ export function heldComputerControlBotIds(
     .map(([botId]) => botId);
 }
 
-/** Coordinate the public server lease with Electron's private browser gate.
- * Take is local-first; release is server-first. BrowserPanel passes
- * `syncNativeBrowser: false` because it owns the same choreography itself. */
+/** Take is local-first, release server-first; BrowserPanel owns the same choreography itself. */
 export async function transitionComputerControlLease<
   Action extends ComputerControlAction,
   Snapshot extends ComputerControlSnapshot,

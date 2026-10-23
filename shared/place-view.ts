@@ -1,16 +1,8 @@
-// Where a bot works, said once: one plain line and at most one next action
-// for every state a place can be in, from the facts the server and the app
-// already hold. The server words a failed turn's row from it (English, the
-// language phones read), and every control that shows or picks a place
-// (the Computer panel's cards and Simple grid, the composer chip, the failed
-// turn row, the bot's Access settings) renders the same state from it in the
-// person's language. Nothing else decides what a place is called or what to
-// do when it can't be used.
-//
-// The English below mirrors src/locales/en.json `place.view.*`,
-// `place.action.*` and `place.askAdmin`/`place.backOnAuto` exactly (a test
-// holds them together), the way shared/live-approval.ts mirrors its keys:
-// the server has no i18n.
+// Where a bot works, said once: one plain line and at most one next action for
+// every state a place can be in. The server words a failed turn's row from it
+// in English; the app renders the same state in the person's language. The
+// English mirrors src/locales/en.json `place.*` exactly (a test holds them
+// together): the server has no i18n.
 
 export type Place = "cloud" | "vm" | "local" | "browser";
 
@@ -96,11 +88,11 @@ export interface PlaceFacts {
   engine: {
     name: string;
     model?: string;
-    /** It can use computer tools (capabilities.computerMcp). */
+    /** It can use computer tools. */
     computer: boolean;
-    /** It can use the built-in browser (capabilities.browserMcp). */
+    /** It can use the built-in browser. */
     browser: boolean;
-    /** Not waiting on a sign-in (src/lib/failed-turn.ts engineSignedOut). */
+    /** Not waiting on a sign-in. */
     signedIn: boolean;
   };
   /** The bot's tool selection includes the computer. */
@@ -122,51 +114,51 @@ export interface PlaceFacts {
 /** The English catalog, mirrored by en.json. */
 export const PLACE_EN = {
   "place.view.auto.short": "Chooses for you",
-  "place.view.auto.lineMyCloud": "Uses the built-in browser. In a chat, it starts its cloud computer by itself when a task needs desktop apps.",
+  "place.view.auto.lineMyCloud": "Uses the built-in browser. In a chat, it starts its cloud desktop by itself when a task needs desktop apps.",
   "place.view.auto.lineDesktop": "Uses the built-in browser, a private desktop on this computer, or this computer's screen, whichever the task needs.",
-  "place.view.auto.lineLinux": "Uses the built-in browser, or a running Local VM when a task needs a desktop.",
+  "place.view.auto.lineLinux": "Uses the built-in browser, or a running private desktop when a task needs one.",
   "place.view.autoTeam.short": "Shared",
-  "place.view.autoTeam.line": "Uses {computer}, the cloud computer this team shares.",
+  "place.view.autoTeam.line": "Uses {computer}, the cloud desktop this department shares.",
   "place.view.ccCannot.short": "Not with this model",
-  "place.view.ccCannot.line": "{model} can't use a computer. Choose a model that can, such as Claude or ChatGPT.",
+  "place.view.ccCannot.line": "{model} can't use a desktop. Choose a model that can, such as Claude or ChatGPT.",
   "place.view.ccToolsOff.short": "Not allowed",
-  "place.view.ccToolsOff.line": "What {bot} can use doesn't include a computer.",
+  "place.view.ccToolsOff.line": "What {bot} can use doesn't include a desktop.",
   "place.view.ccSignIn.short": "Sign in first",
-  "place.view.ccSignIn.line": "Sign in to {engine} first. {bot} uses it on the cloud computer too.",
-  "place.view.ccSignIn.lineMyCloud": "Sign in to {engine} on My Cloud first. {bot} uses it on the cloud computer too.",
+  "place.view.ccSignIn.line": "Sign in to {engine} first. {bot} uses it on its cloud desktop too.",
+  "place.view.ccSignIn.lineMyCloud": "Sign in to {engine} in the Cloud first. {bot} uses it on its cloud desktop too.",
   "place.view.ccNew.short": "Ready",
-  "place.view.ccNew.line": "{bot} gets its own cloud computer the first time a task needs one. The first start takes about a minute.",
+  "place.view.ccNew.line": "{bot} gets its own cloud desktop the first time a task needs one. The first start takes about a minute.",
   "place.view.ccStarting.short": "Starting…",
-  "place.view.ccStarting.line": "Starting {bot}'s cloud computer. The first start takes about a minute.",
+  "place.view.ccStarting.line": "Starting {bot}'s cloud desktop. The first start takes about a minute.",
   "place.view.ccWaking.short": "Waking…",
-  "place.view.ccWaking.line": "Waking {bot}'s cloud computer. This takes a few seconds.",
+  "place.view.ccWaking.line": "Waking {bot}'s cloud desktop. This takes a few seconds.",
   "place.view.ccOn.short": "On",
-  "place.view.ccOn.line": "{bot}'s cloud computer is on.",
+  "place.view.ccOn.line": "{bot}'s cloud desktop is on. It goes to sleep after 10 minutes without use.",
   "place.view.ccAsleep.short": "Asleep",
-  "place.view.ccAsleep.line": "{bot}'s cloud computer is asleep. It wakes in a few seconds when {bot} needs it.",
+  "place.view.ccAsleep.line": "{bot}'s cloud desktop is asleep. It wakes in a few seconds when {bot} needs it.",
   "place.view.ccNoHours.short": "No hours left",
-  "place.view.ccNoHours.line": "This month's {hours} cloud computer hours are used up. They come back on 1 {month}.",
-  "place.view.ccNoHours.lineUnknown": "This month's cloud computer hours are used up.",
+  "place.view.ccNoHours.line": "This month's {hours} cloud desktop hours are used up. They come back on 1 {month}.",
+  "place.view.ccNoHours.lineUnknown": "This month's cloud desktop hours are used up.",
   "place.view.ccAtOnce.short": "In use",
-  "place.view.ccAtOnce.lineOne": "Your {plan} plan includes 1 cloud computer, and {holders} has it.",
-  "place.view.ccAtOnce.lineMany": "Your {plan} plan includes {max} cloud computers, and {holders} have them.",
-  "place.view.ccAtOnce.lineUnknown": "All the cloud computers your plan includes are in use.",
+  "place.view.ccAtOnce.lineOne": "Your {plan} plan includes 1 cloud desktop, and {holders} has it.",
+  "place.view.ccAtOnce.lineMany": "Your {plan} plan includes {max} cloud desktops, and {holders} have them.",
+  "place.view.ccAtOnce.lineUnknown": "All the cloud desktops your plan includes are in use.",
   "place.view.ccUnavailable.short": "Not available now",
-  "place.view.ccUnavailable.line": "Cloud computers can't start right now. It isn't anything you did.",
+  "place.view.ccUnavailable.line": "Cloud desktops can't start right now. It isn't anything you did.",
   "place.view.ccEnded.short": "Plan ended",
-  "place.view.ccEnded.line": "Your MausBot Cloud plan has ended, so cloud computers are off.",
+  "place.view.ccEnded.line": "Your MausBot Cloud plan has ended, so cloud desktops are off.",
   "place.view.ccNoStart.short": "Didn't start",
-  "place.view.ccNoStart.line": "{bot}'s cloud computer didn't start.",
+  "place.view.ccNoStart.line": "{bot}'s cloud desktop didn't start.",
   "place.view.ccClearing.short": "Clearing up",
-  "place.view.ccClearing.line": "{bot}'s previous cloud computer is still being removed.",
+  "place.view.ccClearing.line": "{bot}'s previous cloud desktop is still being removed.",
   "place.view.ccProvider.short": "Couldn't start",
-  "place.view.ccProvider.line": "Your Boat account couldn't start {bot}'s cloud computer: {words}",
-  "place.view.ccOnMyCloud.short": "On My Cloud",
-  "place.view.ccOnMyCloud.line": "Cloud computers from your plan work for bots on My Cloud for now.",
+  "place.view.ccProvider.line": "Your Boat account couldn't start {bot}'s cloud desktop: {words}",
+  "place.view.ccOnMyCloud.short": "For Cloud bots",
+  "place.view.ccOnMyCloud.line": "Cloud desktops from your plan work for Cloud bots for now.",
   "place.view.ccNeedsKey.short": "Needs a Boat key",
-  "place.view.ccNeedsKey.line": "A cloud computer here needs your own Boat key, a paid service.",
-  "place.view.vps.short": "Your server",
-  "place.view.vps.line": "Uses your own server, connected over SSH.",
+  "place.view.ccNeedsKey.line": "A cloud desktop here needs your own Boat key, a paid service.",
+  "place.view.vps.short": "Your own machine",
+  "place.view.vps.line": "Uses your own Linux machine, connected over SSH.",
   "place.view.browser.short": "Web pages only",
   "place.view.browser.line": "Works in the built-in browser only: web pages, no desktop apps.",
   "place.view.browserOff.short": "Browser is off",
@@ -180,7 +172,7 @@ export const PLACE_EN = {
   "place.view.vm.short": "Private desktop",
   "place.view.vm.line": "A private Linux desktop on this device, separate from your own screen.",
   "place.view.vmCannot.short": "Not with this model",
-  "place.view.vmCannot.line": "{model} can't use a Local VM. Choose a model that can, such as Claude or ChatGPT.",
+  "place.view.vmCannot.line": "{model} can't use a private desktop. Choose a model that can, such as Claude or ChatGPT.",
   "place.view.placeFailed.short": "Didn't start",
   "place.view.placeFailed.line": "{cause}",
   "place.view.off.short": "No screen",
@@ -192,17 +184,17 @@ export const PLACE_EN = {
   "place.action.wake": "Wake it now",
   "place.action.watch": "Watch",
   "place.action.seePlan": "See your plan",
-  "place.action.manageComputers": "Manage cloud computers",
+  "place.action.manageComputers": "Manage cloud desktops",
   "place.action.tryAgain": "Try again",
-  "place.action.openMyCloud": "Open My Cloud",
+  "place.action.openMyCloud": "Open the Cloud",
   "place.action.addBoatKey": "Add Boat key",
   "place.action.turnOnBrowser": "Turn on the browser",
   "place.action.openTeamMap": "Open Team map",
-  "place.action.openVmSettings": "Local VM settings",
+  "place.action.openVmSettings": "Private desktop settings",
   "place.action.clearPin": "Clear this conversation's place",
   "place.action.usePlace": "Use {place}",
   "place.action.changeRoutine": "Change where it runs",
-  "place.action.openComputerPanel": "Open Computer panel",
+  "place.action.openComputerPanel": "Open the Screen panel",
   "place.askAdmin": "Ask an Admin to change it.",
   "place.backOnAuto": "This conversation is back on Auto.",
 } as const;
@@ -215,20 +207,20 @@ export const PLACE_WORDS: Record<PlaceActionId, string> = {
   "choose-model": "Choose another model in {bot}'s settings.",
   "open-tools": "Change what {bot} can use in its settings.",
   "sign-in": "Sign in to {engine} in Settings.",
-  start: "Start it from the Computer panel.",
-  wake: "Wake it from the Computer panel.",
-  watch: "Watch it from the Computer panel.",
+  start: "Start it from the Screen panel.",
+  wake: "Wake it from the Screen panel.",
+  watch: "Watch it from the Screen panel.",
   "see-plan": "See your plan on the Plan page.",
-  "manage-computers": "Manage your cloud computers in Settings → Local VM.",
+  "manage-computers": "Manage your cloud desktops in Settings → Bot desktops.",
   "try-again": "Try again.",
   "open-my-cloud": "Open My Cloud from the menu at the top of the sidebar.",
   "add-boat-key": "Add a Boat key in Settings → API keys.",
-  "turn-on-browser": "Turn on the built-in browser in the Computer panel.",
+  "turn-on-browser": "Turn on the built-in browser in the Screen panel.",
   "open-team-map": "Open Team map to manage it.",
-  "open-vm-settings": "Check it in Settings → Local VM.",
+  "open-vm-settings": "Check it in Settings → Bot desktops.",
   "clear-pin": "Clear this conversation's place in the composer to continue.",
   "change-routine": "Change where this routine runs.",
-  "open-computer-panel": "Check it in the Computer panel.",
+  "open-computer-panel": "Check it in the Screen panel.",
 };
 
 /** The words a person reads, in some language: the app passes its t(), the
@@ -308,8 +300,6 @@ const ACTION_KEY: Record<PlaceActionId, PlaceKey> = {
   "open-computer-panel": "place.action.openComputerPanel",
 };
 
-/** The state and its params, from the facts. Pure: the panel, the chip, the
- * Access line and the server all ask this. */
 export function placeState(facts: PlaceFacts): { state: PlaceState; params: PlaceParams } {
   const bot = facts.bot;
   const model = facts.engine.model || facts.engine.name;
@@ -331,8 +321,7 @@ export function placeState(facts: PlaceFacts): { state: PlaceState; params: Plac
   if (facts.place === "vm") {
     return facts.engine.computer ? { state: "vm", params: { bot } } : { state: "vm-cannot", params: { bot, model } };
   }
-  // The cloud computer: on the person's own server (VPS) or on Boat, one
-  // rule for both (shared/cloud-computer.ts).
+  // On the person's own server (VPS) or on Boat, one rule for both.
   const vps = facts.backend === "vps";
   if (!facts.engine.computer) return { state: "cc-cannot", params: { bot, model } };
   if (!facts.toolsAllowComputer) return { state: "cc-tools-off", params: { bot } };
@@ -464,7 +453,6 @@ export function placeRowText(row: PlaceRow, server?: ServerKind): string {
   return `${view.line} ${words}`;
 }
 
-// ── Reading a failed start ──────────────────────────────────────────────
 
 const MONTH = "(January|February|March|April|May|June|July|August|September|October|November|December)";
 const HOURS_USED = new RegExp(`Your (.+?) plan's (\\d+) cloud computer hours for \\w+ are used up\\. They reset on 1 ${MONTH}`);
@@ -481,11 +469,9 @@ const NO_START_WORDS = [
 ];
 const CLEARING_WORDS = [/is being deleted/i, /previous cloud computer deletion/i, /deletion was not confirmed/i, /deletion is still being reconciled/i];
 
-/** Read a failed cloud computer start as a state. The Admin's own codes come
- * first; until every refusal has one, its English is read (the words below
- * are exactly the Admin's, server/cloud-services.ts). `included`: the plan's
- * computers, not the person's own Boat key, whose provider's words are shown
- * as they are. */
+/** The Admin's own codes come first; until every refusal has one, its English
+ * is read. `included`: the plan's computers, not the person's own Boat key,
+ * whose provider's words are shown as they are. */
 export function cloudRefusal(failure: { message: string; code?: string; status?: number }, included: boolean): { state: PlaceState; params: PlaceParams } {
   const message = failure.message.trim();
   const code = failure.code;

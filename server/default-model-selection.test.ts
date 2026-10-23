@@ -121,9 +121,6 @@ describe("new bot default model selection", () => {
     expect(selectDefaultModelSelection([disabled, signedOutCodex])).toEqual({ instanceId: "codex", model: "codex-default" });
   });
 
-  // One rule for every server, enrolled or not: an engine that can run a turn
-  // now wins (Claude first), then any available one. A bot moved off a
-  // removed engine gets exactly this choice too (computer-engine-removal.ts).
   it("prefers an engine that can run a turn now over a signed-out Claude", () => {
     const signedOut = { ...claude, snapshot: { state: "available", authenticated: false } satisfies ProviderSnapshot };
     expect(selectDefaultModelSelection([signedOut, codex])).toEqual({ instanceId: "codex", model: "codex-default" });
@@ -131,7 +128,6 @@ describe("new bot default model selection", () => {
     // Nothing can run yet: the first available engine, Claude first.
     const codexOut = { ...codex, snapshot: { state: "available", authenticated: false } satisfies ProviderSnapshot };
     expect(selectDefaultModelSelection([codexOut, signedOut])).toEqual({ instanceId: "claude", model: "claude-default" });
-    // A custom endpoint brings its own credential, so its sign-in does not count.
     const custom = { ...codexOut, instanceId: "router", access: "custom" as const };
     expect(selectDefaultModelSelection([signedOut, custom])).toEqual({ instanceId: "router", model: "codex-default" });
   });
@@ -150,7 +146,6 @@ describe("new bot default model selection while enrolled in an organisation", ()
   it("picks a Company model that can run over an installed but signed-out personal Claude", () => {
     expect(selectDefaultModelSelection([signedOut, companyClaude], undefined, { company }))
       .toEqual({ instanceId: "company.fixture.anthropic", model: "company-claude" });
-    // Claude first among Company models, whatever order they are listed in.
     expect(selectDefaultModelSelection([signedOut, companyRouter, companyClaude], undefined, { company }))
       .toEqual({ instanceId: "company.fixture.anthropic", model: "company-claude" });
     expect(selectDefaultModelSelection([signedOut, companyRouter], undefined, { company }))
@@ -189,7 +184,6 @@ describe("new bot default model selection while enrolled in an organisation", ()
     const noClaude = (instance: { driverKind: string }) => instance.driverKind === "claudeAgent" ? "Fixture Company does not allow the Claude engine on this computer." : undefined;
     expect(selectDefaultModelSelection([claude, companyClaude, companyRouter], undefined, { company, refusal: noClaude }))
       .toEqual({ instanceId: "company.fixture.openrouter", model: "company/router" });
-    // A saved choice the organisation refuses sends new bots to setup, never elsewhere.
     expect(selectDefaultModelSelection([claude, companyRouter], { instanceId: "claude", model: "claude-default" }, { company, refusal: companyOnly }))
       .toEqual({ instanceId: "", model: "" });
   });
@@ -220,12 +214,11 @@ describe("new bot default model selection wiring in index.ts", () => {
       version: 1, companyModelsOnly: true, allowedEngines: "all", mcp: { allowCustom: true, allowlist: [] },
       computers: { thisComputer: true, localVm: true, box: true, vps: true }, remoteAccess: true });
     const managedDesktop = { owns: (instanceId: string) => enrolled && instanceId.startsWith("company.") };
-    // A Cloud home's trial Claude credit (cloud-credit-provider.ts), when there is one.
     const cloudCredit = credit ? { owns: (instanceId: string) => instanceId === credit } : null;
     const describe = vi.fn(async () => instances);
-    const defaultSelection = new Function("hostedModels", "cfg", "registry", "managedDesktop", "managedPolicy", "BUILT_IN_DRIVERS", "selectDefaultModelSelection", "cloudCredit", "providerConfigs",
+    const defaultSelection = new Function("hostedModels", "cfg", "registry", "managedDesktop", "managedPolicy", "BUILT_IN_DRIVERS", "selectDefaultModelSelection", "cloudCredit", "providerConfigs", "heldKeys",
       `${code}; return defaultSelection;`)(undefined, { defaultModelSelection: saved }, { describe }, managedDesktop, managedPolicy,
-      [{ driverKind: "claudeAgent", metadata: { displayName: "Claude" } }], selectDefaultModelSelection, cloudCredit, () => configs) as (saved?: ModelSelection | null, instances?: readonly SelectableInstance[]) => Promise<ModelSelection>;
+      [{ driverKind: "claudeAgent", metadata: { displayName: "Claude" } }], selectDefaultModelSelection, cloudCredit, () => configs, null) as (saved?: ModelSelection | null, instances?: readonly SelectableInstance[]) => Promise<ModelSelection>;
     return { defaultSelection, describe, close: () => managedPolicy.close() };
   }
 
@@ -254,7 +247,6 @@ describe("new bot default model selection wiring in index.ts", () => {
       models: { default: "claude-haiku-4-5", options: [{ id: "claude-haiku-4-5", label: "Claude Haiku 4.5" }] } };
     // Their Claude is signed out: the credit, not a sign-in screen.
     await expect(server([signedOut, credit], { credit: "trial-credit" }).defaultSelection()).resolves.toEqual({ instanceId: "trial-credit", model: "claude-haiku-4-5" });
-    // Their own engine can run: it wins, wherever the credit is listed.
     await expect(server([credit, claude], { credit: "trial-credit" }).defaultSelection()).resolves.toEqual({ instanceId: "claude", model: "claude-default" });
     await expect(server([credit, codex], { credit: "trial-credit" }).defaultSelection()).resolves.toMatchObject({ instanceId: "codex" });
   });

@@ -1,6 +1,3 @@
-// The transcript export through the route table, over a real store: a chat
-// widget (kind "widget") exports as its text fallback in Markdown, and whole
-// in JSON. Only what the export route reads is supplied.
 import { rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -27,7 +24,7 @@ afterEach(async () => {
 async function serve(store: Store): Promise<string> {
   const deps = {
     store,
-    cfg: { profile: { name: "Milind" } },
+    userName: () => "Milind",
     viewerFor: () => ({}),
     visibleTo: () => ({ bot: () => true, group: () => true }),
     workspaceAccess: () => null,
@@ -79,7 +76,6 @@ describe("GET /api/threads/:id/export", () => {
       "**Milind:**", "", "Merge the two ready", "",
     ]);
 
-    // The JSON export is the stored rows: the tree and how it was answered travel with it.
     const exported = await (await fetch(`${base}/api/threads/${bot.threadId}/export?format=json`)).json() as { messages: Array<Record<string, any>> };
     expect(exported.messages.map((message) => message.kind)).toEqual(["text", "widget", "text"]);
     expect(exported.messages[1]).toMatchObject({ id: shown.messageId, widget: { v: 1, root: { type: "ListView", title: "Pull requests" }, settled: { ref: "confirm", label: "Merge the two ready", tone: "confirm" } } });

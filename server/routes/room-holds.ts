@@ -1,13 +1,10 @@
-// Stop or resume one member of a room without stopping the room: the same
-// hold "stop @Bot" sets. Holding a member that is mid-turn ends that
-// member's turn only. POST /api/groups/<room>/holds {botId, held}.
+// POST /api/groups/<room>/holds {botId, held}: holding a member mid-turn ends that member's turn only.
 import { z } from "zod";
 import type { WireGroup } from "../../shared/wire.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 
 export interface RoomHoldRouteDeps {
   group(id: string): { dm?: unknown; memberIds: readonly string[] } | undefined;
-  /** Sets the hold; the room's public state after it, or null when the room is gone. */
   setHold(groupId: string, botId: string, held: boolean): WireGroup | null;
 }
 

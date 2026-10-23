@@ -1,10 +1,3 @@
-// A room's conversations: its tasks (create, switch, rename, pin, delete),
-// rename or mark the room, read receipts, delete the room, send a message,
-// cancel or steer a queued one, "compact now" for one member, and Stop.
-// Moved from server/index.ts's inline routes into the route table
-// (server/routes/README.md); the table runs after the auth gate, scope
-// rules stay keyed by path in server/request-auth.ts. Creating a room and
-// its setup are in groups.ts, holds in room-holds.ts.
 import { z } from "zod";
 import type { ResolvedSender, WireGroup } from "../../shared/wire.ts";
 import { admit } from "../admission.ts";
@@ -22,7 +15,7 @@ import { DATA_DIR, type AppConfig } from "../config.ts";
 import type { ProviderInstance, SteerOutcome } from "../contracts.ts";
 import { cancelledChatFollowup } from "../message-db.ts";
 import type { PhoneSecretSubmissionRegistry } from "../phone-secret.ts";
-import { promptWithReply } from "../replies.ts";
+import { promptWithReply, type PersonName } from "../replies.ts";
 import { clientGroupPatchViolation, requestSource, type RequestAuth } from "../request-auth.ts";
 import type { RoomContextTracker } from "../room-context.ts";
 import { parseConversationTurnTimeout } from "../room-turn-timeout.ts";
@@ -30,25 +23,26 @@ import type { RoutineManager } from "../routines.ts";
 import { acceptedSendMatch, parseSendId, sendFingerprint, type SendSequencer } from "../send-idempotency.ts";
 import type { SkillReview } from "../skill-review.ts";
 import { assertWithinBudget } from "../spend.ts";
-import type { BotRecord, GroupRecord, Message, Store } from "../store.ts";
+import type { BotRecord, GroupRecord, GroupTaskPatch, Message, Store } from "../store.ts";
 import type { ThreadStarters } from "../thread-starters.ts";
 import { extractSteerImages } from "../turn-images.ts";
 import type { UsageTrigger } from "../usage-ledger.ts";
+import { bulkDeleteThreadIds, type BulkDeleteRefusal } from "./bulk-delete.ts";
 import { PASS, type RouteHandler } from "./table.ts";
+import { sawThread } from "../thread-presence.ts";
+import { readThreadNotifications } from "./notifications.ts";
 
-/** A transcript page as index.ts's messagePage builds it: the whole thread,
- * or a bounded tail with `hasMore`. */
 export type MessagePage = { messages: Array<Message | Record<string, unknown>>; hasMore?: boolean; activeLeafId: string | null };
 
 export interface ChannelRouteDeps {
   store: Pick<Store,
-    | "group" | "groupTaskByThread" | "bot" | "switchGroupTask" | "setGroupTaskTurnTimeout" | "setGroupTaskPinned"
-    | "renameGroupTask" | "patchGroup" | "messagesFor" | "groupTasks" | "deleteGroupTask" | "deleteGroup"
+    | "group" | "groupTaskByThread" | "bot" | "switchGroupTask" | "patchGroupTask" | "patchGroup" | "messagesFor" | "groupTasks" | "deleteGroupTasks" | "deleteGroup"
     | "createGroupTask" | "appendMessage">;
-  cfg: Pick<AppConfig, "profile" | "budgets">;
+  cfg: Pick<AppConfig, "budgets">;
+  /** What people's lines are called in this conversation (replies.ts PersonName). */
+  userName(threadId: string): PersonName;
   /** The desktop app owns this server, so a loopback caller is its owner. */
   desktopManaged: boolean;
-  /** Assigned at boot, after the routes are built, so it is read per request. */
   routines(): Pick<RoutineManager, "disableForGroup"> | null;
   broadcast(payload: Record<string, unknown>): void;
   actorKey(auth: RequestAuth & { kind: "session" }): string;
@@ -57,17 +51,13 @@ export interface ChannelRouteDeps {
   sendSequencer: Pick<SendSequencer, "run">;
   roomMemberContexts: Pick<RoomContextTracker, "request">;
   skillReview: Pick<SkillReview, "dropThread">;
-  /** The live speaker on each room thread, read here only. */
   groupSpeakers: ReadonlyMap<string, { botId: string }>;
-  /** A room's running turn operations, read here only. */
   groupTurnOperations: ReadonlyMap<string, ReadonlySet<{ threadId: string; cancelled: boolean }>>;
-  /** The last reply per thread; a deleted thread's entry goes with it. */
   lastReply: Pick<Map<string, string>, "delete">;
   cloudThreadRefusal(auth: RequestAuth, threadId: string): string | null;
   messageSender(auth: RequestAuth): ResolvedSender | undefined;
   usageTriggerFor(auth: RequestAuth): UsageTrigger;
   publicGroupState(record: GroupRecord): WireGroup;
-  /** A room with its transcript page, as a task create or delete reply carries it. */
   groupWithThread(group: GroupRecord): WireGroup;
   updateChannel(groupId: string, value: unknown): GroupRecord;
   groupIsWorking(group: GroupRecord): boolean;
@@ -76,9 +66,7 @@ export interface ChannelRouteDeps {
   pageSize(raw: string | null): number | null | undefined;
   messagePage(threadId: string, limit: number | undefined): MessagePage;
   resolveReplyTarget(threadId: string, value: unknown): Message | undefined;
-  /** The engine running a bot's turn on a thread, if any. */
   runningTurnInstance(bot: BotRecord | null | undefined, threadId: string): ProviderInstance | null;
-  /** The engine takes pictures with a mid-turn steer (index.ts engineSteersImages). */
   engineSteersImages(instance: ProviderInstance | null | undefined): boolean;
   startGroupTurn(
     groupId: string,
@@ -111,14 +99,30 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
     stagedSkillCleanupsForThread, rejectDeletedThreadSkillStages,
   } = deps;
   const DESKTOP_MANAGED = deps.desktopManaged;
+  const deleteRefusal = (auth: RequestAuth, groupId: string, threadId: string): { status: 403 | 404 | 409; error: string } | null => {
+    if (phoneSecretSubmissions.hasThread(threadId)) {
+      return { status: 409, error: "this task is securely saving a credential — try again when it finishes" };
+    }
+    if (groupThreadIsWorking(groupId, threadId)) return { status: 409, error: "this task is running — stop it first" };
+    if (!store.groupTaskByThread(groupId, threadId)) return { status: 404, error: "no such channel task" };
+    const notYours = cloudThreadRefusal(auth, threadId);
+    return notYours ? { status: 403, error: notYours } : null;
+  };
+  const deleteGroupTasks = (groupId: string, threadIds: string[]) => {
+    const stagedSkillCleanups = new Map(threadIds.map((threadId) => [threadId, stagedSkillCleanupsForThread(threadId)]));
+    const result = store.deleteGroupTasks(groupId, threadIds);
+    for (const threadId of result?.deleted ?? []) {
+      lastReply.delete(threadId);
+      clearTurnDigestState(threadId);
+      skillReview.dropThread(threadId);
+      revokeInternalCapabilitiesForThread(threadId);
+      rejectDeletedThreadSkillStages(stagedSkillCleanups.get(threadId) ?? []);
+    }
+    return result;
+  };
   return async ({ req, res, url, path, method, auth, json, readBody }) => {
-    /** scratch for route matches, shared by every `path.match` below */
     let m: RegExpMatchArray | null = null;
     const routines = deps.routines();
-    // ── channel tasks: separate conversations for the same team ────────
-
-
-
 
     m = path.match(/^\/api\/groups\/([\w-]+)\/tasks$/);
     if (m && method === "POST") {
@@ -126,7 +130,6 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       const group = store.group(m[1]);
       if (!group) return json(res, 404, { error: "no such channel" });
       if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
-// Navigation and thread creation stay unblocked while other threads work
       if (phoneSecretSubmissions.hasGroup(group.id)) {
         return json(res, 409, { error: "this channel is securely saving a credential — try again when it finishes" });
       }
@@ -142,6 +145,26 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       return json(res, 201, { group: groupWithThread(store.group(group.id)!), task });
     }
 
+    m = path.match(/^\/api\/groups\/([\w-]+)\/tasks\/delete$/);
+    if (m && method === "POST") {
+      const parsed = bulkDeleteThreadIds(await readBody(req));
+      if (!parsed.ok) return json(res, 400, { error: parsed.error });
+      const group = store.group(m[1]);
+      if (!group) return json(res, 404, { error: "no such channel" });
+      if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
+      const allowed: string[] = [];
+      const refused: BulkDeleteRefusal[] = [];
+      for (const threadId of parsed.threadIds) {
+        const refusal = deleteRefusal(auth, group.id, threadId);
+        if (!refusal) allowed.push(threadId);
+        else refused.push({ threadId, reason: refusal.status === 409 ? "busy" : "not-found" });
+      }
+      if (allowed.length >= (group.tasks?.length ?? 1)) return json(res, 400, { error: "a channel keeps at least one task" });
+      const result = deleteGroupTasks(group.id, allowed);
+      if (!result) return json(res, 400, { error: "a channel keeps at least one task" });
+      return json(res, 200, { group: groupWithThread(result.group), deleted: result.deleted, refused });
+    }
+
     m = path.match(/^\/api\/groups\/([\w-]+)\/tasks\/([\w-]+)$/);
     if (m && method === "POST") {
       const group = store.group(m[1]);
@@ -150,20 +173,15 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (phoneSecretSubmissions.hasGroup(group.id)) {
         return json(res, 409, { error: "this channel is securely saving a credential — try again when it finishes" });
       }
-// Navigation between tasks is always allowed
-      // Parsed before the switch: a rejected parameter must not leave the
-      // channel pointing at another thread.
+      // Parsed before the switch: a rejected parameter must not leave the channel on another thread.
       const requestedMessages = url.searchParams.get("messages");
       const switchLimit = pageSize(requestedMessages);
       if (switchLimit === null) return json(res, 400, { error: "messages must be a non-negative whole number" });
       const switched = store.switchGroupTask(group.id, m[2]);
       if (!switched) return json(res, 404, { error: "no such channel task" });
+      readThreadNotifications(switched.threadId, broadcast);
       const switchedSettings = publicGroupState(switched);
-      // "0" predates paging and means settings only — no `messages` key at
-      // all, which clients tell apart from an empty page. A positive page is
-      // the transcript a client can actually hold; omitting the parameter
-      // keeps the whole transcript, as it always did — and only that branch
-      // materialises it.
+      // "0": settings only (no `messages` key); a positive page: that tail; omitted: the whole transcript.
       const responseGroup = requestedMessages === "0"
         ? switchedSettings
         : { ...switchedSettings, ...messagePage(switched.threadId, switchLimit) };
@@ -189,57 +207,31 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (renaming && typeof body.title !== "string") return json(res, 400, { error: "title must be a string" });
       const parsedLimit = limiting ? parseConversationTurnTimeout(body.turnTimeoutMinutes) : null;
       if (parsedLimit && !parsedLimit.ok) return json(res, 400, { error: parsedLimit.error });
-      // Echoing the current title lets a newer client pin on an older server
-      // without the old handler turning a missing title into "Untitled".
-      // That echo is not a rename. A real rename stays blocked while working.
+      // Echoing the current title is not a rename: newer clients send it so an older server keeps the title.
       const titleChange = renaming && body.title !== existing.title;
       const notYours = titleChange ? cloudThreadRefusal(auth, m[2]) : null;
       if (notYours) return json(res, 403, { error: notYours });
-      // A longer limit applies to the next turn, so it can be saved while
-      // this one is still running. A rename still waits.
       if (titleChange && groupThreadIsWorking(group.id, m[2])) {
         return json(res, 409, { error: "this task is running — stop it first" });
       }
-      let task = existing;
-      if (limiting && parsedLimit?.ok) {
-        const limited = store.setGroupTaskTurnTimeout(group.id, m[2], parsedLimit.minutes);
-        if (!limited) return json(res, 404, { error: "no such channel task" });
-        task = limited;
-      }
-      if (pinning) {
-        const pinned = store.setGroupTaskPinned(group.id, m[2], body.pinned === true);
-        if (!pinned) return json(res, 404, { error: "no such channel task" });
-        task = pinned;
-      }
-      if (titleChange) {
-        const renamed = store.renameGroupTask(group.id, m[2], body.title);
-        if (!renamed) return json(res, 404, { error: "no such channel task" });
-        task = renamed;
-      }
+      const patch: GroupTaskPatch = {
+        ...(parsedLimit?.ok ? { turnTimeoutMinutes: parsedLimit.minutes } : {}),
+        ...(pinning ? { pinned: body.pinned === true } : {}),
+        ...(titleChange ? { title: body.title } : {}),
+      };
+      const task = Object.keys(patch).length ? store.patchGroupTask(group.id, m[2], patch) : existing;
+      if (!task) return json(res, 404, { error: "no such channel task" });
       return json(res, 200, { task });
     }
     if (m && method === "DELETE") {
       const group = store.group(m[1]);
       if (!group) return json(res, 404, { error: "no such channel" });
       if (group.dm) return json(res, 400, { error: "bot-to-bot channels keep one canonical conversation" });
-      if (phoneSecretSubmissions.hasThread(m[2])) {
-        return json(res, 409, { error: "this task is securely saving a credential — try again when it finishes" });
-      }
-      if (groupThreadIsWorking(group.id, m[2])) {
-        return json(res, 409, { error: "this task is running — stop it first" });
-      }
-      if (!store.groupTaskByThread(group.id, m[2])) return json(res, 404, { error: "no such channel task" });
-      const notYours = cloudThreadRefusal(auth, m[2]);
-      if (notYours) return json(res, 403, { error: notYours });
-      const stagedSkillCleanups = stagedSkillCleanupsForThread(m[2]);
-      lastReply.delete(m[2]);
-      const updated = store.deleteGroupTask(group.id, m[2]);
-      if (!updated) return json(res, 400, { error: "a channel keeps at least one task" });
-      clearTurnDigestState(m[2]);
-      skillReview.dropThread(m[2]);
-      revokeInternalCapabilitiesForThread(m[2]);
-      rejectDeletedThreadSkillStages(stagedSkillCleanups);
-      return json(res, 200, { group: groupWithThread(updated) });
+      const refusal = deleteRefusal(auth, group.id, m[2]);
+      if (refusal) return json(res, refusal.status, { error: refusal.error });
+      const updated = deleteGroupTasks(group.id, [m[2]]);
+      if (!updated?.deleted.length) return json(res, 400, { error: "a channel keeps at least one task" });
+      return json(res, 200, { group: groupWithThread(updated.group) });
     }
 
     m = path.match(/^\/api\/groups\/([\w-]+)$/);
@@ -249,7 +241,6 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
         const field = clientGroupPatchViolation(body);
         if (field) return json(res, 403, { error: `forbidden: this session may rename or mark a room, not change "${field}" (needs the admin scope)` });
       }
-      // On a Cloud home a room's name and bulletin are its opener's (or the owner's).
       const renamed = store.group(m[1]);
       if (renamed && body && typeof body === "object" &&
         ((body.name !== undefined && body.name !== renamed.name) || (body.bulletin !== undefined && body.bulletin !== (renamed.bulletin ?? "")))) {
@@ -263,7 +254,9 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
     if (m && method === "POST") {
       const room = store.group(m[1]);
       if (!room) return json(res, 404, { error: "no such room" });
+      sawThread(room.threadId);
       const group = store.patchGroup(room.id, { unread: false, ...readCursor(room.threadId) })!;
+      readThreadNotifications(room.threadId, broadcast);
       broadcast({ kind: "group", group: publicGroupState(group) });
       return json(res, 200, { group: publicGroupState(group) });
     }
@@ -324,14 +317,8 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       }
       const sendId = parseSendId(body.sendId);
       const replyTo = resolveReplyTarget(threadId, body.replyToId);
-      // Who is this "user"? On a headless server loopback is the owner by
-      // design, and a bot's shell is a loopback caller too. A request with
-      // no paired session and no browser origin cannot be told from a
-      // script, so its message is stamped rather than trusted as typed —
-      // the room's readers, its posting budget and its transcript all look
-      // at that stamp — and the send is logged where the operator can see
-      // it. The desktop app never gets here: its owner capability is
-      // checked before this handler runs.
+      // A bot's shell is a loopback caller too: with no paired session and no browser origin the message
+      // is stamped, not trusted as typed (readers, posting budget and transcript see the stamp), and logged.
       const browserOrigin = typeof req.headers.origin === "string" && req.headers.origin.trim() !== "";
       const via: "api" | undefined =
         auth.kind === "loopback" && !DESKTOP_MANAGED && !browserOrigin ? "api" : undefined;
@@ -373,8 +360,6 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
               status: 404,
             });
           }
-          // "stop @Bot" / "@Bot resume" act now, even when the message itself
-          // waits in the queue: a stop must reach a member working right now.
           if (channelMode === "chat") applyRoomHoldsFromMessage(current.id, text);
           const threadWorking = groupThreadIsWorking(current.id, threadId);
           const decision = admit("room", {}, { roomWorking: threadWorking, threadWorking });
@@ -405,11 +390,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       return json(res, 200, { ok: true });
     }
 
-    // Steer a queued room message into the RUNNING room turn (no interrupt).
-    // Only the head steers — room queues drain one item at a time — and the
-    // engine that receives it is the thread's live speaker. A room whose
-    // running driver cannot steer keeps its queue, exactly like an incapable
-    // 1:1 engine; this never ends the running turn.
+    // Steers the queued head into the running room turn without interrupting it; a driver that cannot steer keeps the queue.
     m = path.match(/^\/api\/groups\/([\w-]+)\/queue\/([\w-]+)\/steer$/);
     if (m && method === "POST") {
       const body = await readBody(req);
@@ -429,31 +410,18 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       if (!ownsThread) {
         return json(res, 409, { error: "the channel switched tasks before it could receive the message" });
       }
-      // Steering folds words into the running room turn; who pressed Steer
-      // does not re-book that turn (its sender was captured when it started).
       const current = store.group(group.id);
       if (!current) return json(res, 404, { error: "no such room" });
-      // Which engine owns the running room turn on this thread? The same
-      // resolution the room's own Stop uses: the live speaker, else the busy
-      // bot on the channel's main thread.
       const speakerBotId =
         groupSpeakers.get(targetThreadId)?.botId ??
         (targetThreadId === current.threadId ? current.busyBotId : undefined);
       const speaker = speakerBotId ? store.bot(speakerBotId) : undefined;
       const instance = speaker ? runningTurnInstance(speaker, targetThreadId) : undefined;
-      // Lift the queue atomically: the room settling can drain it as the
-      // next follow-up, or this request can steer its head into the live
-      // turn — never both for the same words.
+      // Hold the queue atomically: the room's settle drains it or this request steers its head, never both.
       const held = holdChannelQueue(current.id, targetThreadId, m[2]);
       if (!held) return json(res, 404, { error: "no such queued message" });
-      // M2: the head may be a coalesced group (one sender's contiguous
-      // burst); Steer folds that whole group into the live turn as one.
       const headGroup = headChannelGroup(held.items);
       const [head] = headGroup;
-      // Attachments steer only into a speaker that takes images mid-turn
-      // (steerImages), as the native blocks the drained turn would carry;
-      // elsewhere — the same rule as the 1:1 queue — attachment words wait
-      // for a real turn where central admission hands the images over.
       const steerInput = extractSteerImages(headGroup.map((item) => item.text));
       const decision = admit("room-steer", {
         speakerPresent: Boolean(speaker),
@@ -475,15 +443,8 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
           ...(decision.action === "queue" && decision.blockedBy ? { blockedBy: decision.blockedBy } : {}),
         });
       }
-      // A reply target that cannot be resolved restores the held queue
-      // before the request fails — the room's normal drain keeps the head.
       const replyTo = resolveHeldReplyTarget(held, resolveReplyTarget);
-      // Each burst line keeps its own reply relationship: the fold renders
-      // per-item reply context (the head through the helper above, the rest
-      // resolved here) so a mixed burst does not inherit the head's quote
-      // or drop its own. A target that cannot be resolved restores the held
-      // queue before the request fails, mirroring the helper's contract.
-      const speakerName = cfg.profile?.name?.trim() || "User";
+      const speakerName = deps.userName(targetThreadId);
       let foldedPrompt: string;
       try {
         foldedPrompt = headGroup
@@ -503,28 +464,19 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
         restoreHeldChannelQueue(held);
         throw error;
       }
-      // steer was offered only when a live speaker instance could take it;
-      // the check carries that invariant to the type system.
       const steered: SteerOutcome = instance?.adapter.steer
         ? await (steerInput.images.length > 0
             ? instance.adapter.steer(targetThreadId, foldedPrompt, steerInput.images)
             : instance.adapter.steer(targetThreadId, foldedPrompt))
             .catch((): SteerOutcome => "indeterminate")
         : "refused";
-      // The steer was awaited adapter work: re-read every ownership
-      // invariant before writing anything, exactly like the 1:1 path. A
-      // speaker change, a channel switch, or a settled room restores the
-      // queue instead of recording words the new turn never saw.
+      // The steer awaited adapter work: re-read every ownership invariant before writing anything.
       const after = store.group(current.id);
       const afterSpeakerBotId = after
         ? groupSpeakers.get(targetThreadId)?.botId ??
           (targetThreadId === after.threadId ? after.busyBotId : undefined)
         : undefined;
-      // "indeterminate" (timeout after delivery, lost transport, a settle
-      // race) never restores: the words may already be folded into the turn
-      // that was live when they were sent, and replaying them into a new
-      // turn would run them twice. Record them once — even under a new
-      // speaker — and settle the head.
+      // "indeterminate" never restores: the words may already be in the live turn, and a replay would run them twice.
       const delivered = steered !== "refused";
       if (after && delivered && (steered === "indeterminate" || afterSpeakerBotId === speakerBotId)) {
         const messages = headGroup.map((item) => store.appendMessage(targetThreadId, {
@@ -549,20 +501,14 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
         });
       }
       if (steered === "indeterminate" && !after) {
-        // The room vanished while the answer was lost: settle the head so a
-        // restart cannot replay words the dead turn may already have run.
+        // Settle the head so a restart cannot replay words the dead turn may have run.
         settleHeldChannelQueueHead(held);
         return json(res, 404, { error: "no such room" });
       }
       restoreHeldChannelQueue(held);
-      // The room may have settled while the steer was refused; a queue that
-      // is now drainable must not strand behind a missed settle.
       if (after && !groupThreadIsWorking(after.id, targetThreadId)) drainQueuedChannelSends();
       return json(res, 200, { ok: true, queued: true, threadId: targetThreadId });
     }
-    // "Compact now" for one member of a room: its next turn in the room's
-    // active thread starts on a fresh provider session (room-context.ts).
-    // Nothing runs now and the transcript is untouched.
     m = path.match(/^\/api\/groups\/([\w-]+)\/members\/([\w-]+)\/compact$/);
     if (m && method === "POST") {
       const group = store.group(m[1]);
@@ -599,10 +545,6 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
       }
       const activeOperations = [...(groupTurnOperations.get(group.id) ?? [])]
         .filter((operation) => !operation.cancelled);
-      // Without an explicit task, Stop means the room's live operation—not
-      // merely whichever task the UI was showing when a detached routine
-      // began. There is normally one operation; cancel every active thread
-      // defensively so no queued handoff survives a room-level stop.
       const targetThreadIds = body.threadId !== undefined
         ? [body.threadId]
         : activeOperations.length > 0
@@ -620,9 +562,7 @@ export function createChannelRoutes(deps: ChannelRouteDeps): RouteHandler {
           instance: busy ? runningTurnInstance(busy, threadId) : undefined,
         };
       });
-      // Abort every queued operation before the first provider round trip;
-      // otherwise one queued task could begin while Stop awaits interruption
-      // of the task ahead of it.
+      // Abort every queued operation before the first provider round trip, so none begins while Stop awaits.
       for (const { threadId } of interruptTargets) cancelGroupTurnOperations(group.id, threadId);
       for (const { threadId, instance } of interruptTargets) {
         revokeInternalCapabilitiesForThread(threadId);

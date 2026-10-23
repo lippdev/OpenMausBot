@@ -1,20 +1,13 @@
-// Boat's deletion operation (DELETE /sandboxes/{id} answers 202 with one; poll
-// GET /deletion-operations/{id}): what OpenMausBot accepts from it, and what
-// its status and stage mean for a delete (https://docs.boat.dev/data-retention/delete,
-// https://docs.boat.dev/api/reference/account/get-deletion-operation). The
-// durable fence lives in boat-delete-journal.ts; boat.ts drives both.
-//
-// The sandbox leaves every list, restore and fork as soon as the operation
-// exists, a delete can never be cancelled, and Boat retries the purge itself.
-// So `blocked` is not a failure: it says what the background erase waits for.
+// Boat's deletion operation: DELETE /sandboxes/{id} answers 202 with one, polled at GET /deletion-operations/{id}
+// (https://docs.boat.dev/data-retention/delete, https://docs.boat.dev/api/reference/account/get-deletion-operation).
+// The sandbox leaves every list, restore and fork at once, a delete can never be cancelled, and Boat retries the purge
+// itself, so `blocked` is not a failure: it says what the background erase waits for.
 
 const OPERATION_ID = /^bdop_[a-f0-9]{32}$/;
 const STATUSES = new Set(["pending", "processing", "blocked", "completed"]);
 
-/** A blocked purge in these stages ends with nobody's help: the data goes at
- * `expectedBy` once the last upload link issued for it expires (at most six
- * hours after the last upload), after a restore that reads it ends, or on
- * Boat's own retry (`removing` and `completed` say it is going or gone). */
+/** Boat finishes these on its own: at `expectedBy` once the last upload link expires (≤ 6 h after the last upload), after a
+ * restore that reads the data ends, or on Boat's own retry. */
 const SELF_FINISHING_STAGES = new Set(["removing", "waiting_for_uploads", "waiting_for_restore", "retrying", "completed"]);
 
 export interface BoatDeletionOperation {
@@ -26,9 +19,7 @@ export interface BoatDeletionOperation {
   stage: string | null;
 }
 
-/** Accept only the immutable identity fields needed to follow a delete. Any
- * malformed success envelope falls back to a direct Boat read instead of
- * authorizing journal retirement. */
+/** Only the immutable identity fields; a malformed success envelope falls back to a direct read, never journal retirement. */
 export function boatDeletionOperation(
   body: any,
   boxId: string,
@@ -56,8 +47,7 @@ export const blockedUntilBoatFinishes = (operation: BoatDeletionOperation) =>
 export const keptForNewerSnapshots = (operation: BoatDeletionOperation) =>
   operation.status === "blocked" && operation.stage === "kept_for_newer_snapshots";
 
-/** A blocked delete that needs the person, in words they can act on. Never
- * "retry": Boat accepted the delete and retries the purge itself. */
+/** Never "retry": Boat accepted the delete and retries the purge itself. */
 export function deletionBlockedError(boxId: string, kept: boolean): Error & { status: number } {
   return Object.assign(new Error(kept
     ? `boat.dev deleted cloud computer ${boxId} but is keeping its stored data, because a fork or named snapshot made from it still uses that data. To erase the data, delete those in boat.dev.`

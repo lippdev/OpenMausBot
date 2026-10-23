@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { LAST_CONVERSATION_KEY, readLastConversation, rememberConversation } from "./last-conversation";
 
-/** A storage surface the test fills and reads back, the way the app does. */
 const surface = (initial: Record<string, string> = {}) => {
   const stored = new Map<string, string>(Object.entries(initial));
   return {
@@ -21,8 +20,6 @@ describe("last conversation", () => {
   });
 
   it("readLastConversation ignores a corrupt value", () => {
-    // a record left behind by an interrupted write, and one that is not a
-    // conversation id at all: both read as absent rather than resuming
     vi.stubGlobal("localStorage", surface({ [LAST_CONVERSATION_KEY]: "   " }));
     expect(readLastConversation()).toBeNull();
     vi.stubGlobal("localStorage", { getItem: () => 42, setItem: () => {} });

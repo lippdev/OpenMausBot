@@ -1,10 +1,3 @@
-// A bot's settings beside the broad PATCH (bot-patch.ts), moved out of
-// server/index.ts's inline routes into the route table
-// (server/routes/README.md): a generated avatar, the paired-safe profile
-// edit, the bot's model, the read receipt, the command allow-list and a
-// standing always-allow grant. The table runs after the auth gate; scope
-// rules stay keyed by path in server/request-auth.ts.
-
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode.ts";
 import { botAvatarUrlFromStoredPath } from "../../shared/bot-avatar.ts";
 import type { CommandAllowlistResponse } from "../../shared/command-allowlist.ts";
@@ -25,40 +18,32 @@ import type { BotRecord, GroupRecord, Store } from "../store.ts";
 import type { ModelSelectionCheck } from "./bots-create.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 import { pinnedClientThreadGuard } from "./pinned-client-thread.ts";
+import { sawThread } from "../thread-presence.ts";
+import { readThreadNotifications } from "./notifications.ts";
 
 export interface BotSettingsRouteDeps {
   store: Store;
   cfg: AppConfig;
   registry: Pick<ProviderRegistry, "get">;
   commandAllowlist: Pick<CommandAllowlistStore, "add" | "remove">;
-  /** The driver kinds whose approvals carry a structured command. */
   commandAllowlistDrivers: ReadonlySet<string>;
-  /** This server is a Cloud home. */
   cloudHome: boolean;
-  /** The profile fields only the Cloud owner's own devices may change. */
   cloudOwnerProfileFields: readonly ("name" | "title" | "description" | "soul" | "notifications")[];
   hostedModels: ReturnType<typeof hostedModelPolicy>;
   supportsApprovalMode: ReturnType<typeof createApprovalModeSupport>;
-  /** The live bot record of the direct turn running in a thread, if one is. */
   directTurnBots: { get(threadId: string): BotRecord | undefined };
   broadcast(payload: Record<string, unknown>): void;
-  /** The bot as HTTP replies carry it. */
   wireBot(bot: BotRecord): WireBot;
-  /** Whether a request comes from one of the Cloud owner's own devices. */
   cloudOwnerSession(auth: RequestAuth): boolean;
   storedAvatarExists(avatarUrl: string): boolean;
-  /** The bot as the named thread sees it (its task's own settings), or a
-   * thrown 400/404 the handler's catch-all answers. */
   requestedTaskBot(botId: string, rawThreadId: unknown): BotRecord;
   threadBusy(botId: string, threadId: string): boolean;
   activeGroupTurnForBot(botId: string): { group: GroupRecord; threadId: string } | null;
   checkedModelSelection(raw: unknown, current?: { selection: ModelSelection; busy: boolean }, requireAvailableModel?: boolean): ModelSelectionCheck;
   engineSwitchNeedsAsk(mode: ApprovalMode, from: ModelSelection, to: ModelSelection): boolean;
-  /** The newest message on a thread's active path, for a read receipt. */
   readCursor(threadId: string): { lastReadMessageId?: string };
   canManageCommandAllowlist(auth: RequestAuth): boolean;
   commandAllowlistResponse(bot: BotRecord): CommandAllowlistResponse;
-  /** Why this caller may not answer a card, or null when they may. */
   cardAnswerRefusal(auth: RequestAuth, threadId: string, requestId: string, behavior: string): string | null;
 }
 
@@ -72,16 +57,13 @@ export function createBotSettingsRoutes(deps: BotSettingsRouteDeps): RouteHandle
   } = deps;
   const pinnedClientThread = pinnedClientThreadGuard(store);
   return async ({ req, res, url, path, method, auth, json, readBody }) => {
-    /** scratch for route matches, shared by every `path.match` below */
     let m: RegExpMatchArray | null = null;
     const requirePinnedClientThread = pinnedClientThread(auth, req);
     m = path.match(/^\/api\/bots\/([\w-]+)\/avatar\/generate$/);
     if (m && method === "POST") {
       const existing = store.bot(m[1]);
       if (!existing) return json(res, 404, { error: "no such bot" });
-      // Generation is slow and both desktop and companion clients may edit or
-      // delete this bot while it is in flight. Snapshot the two fields this
-      // request owns before the first await so a late result cannot win.
+      // Snapshot the fields this request owns before the first await, so a late result cannot win.
       const initialAvatar = snapshotAvatarGenerationState(existing);
       const parsed = avatarGenerationRequestSchema.safeParse(await readBody(req));
       if (!parsed.success) {
@@ -101,8 +83,6 @@ export function createBotSettingsRoutes(deps: BotSettingsRouteDeps): RouteHandle
         : "circle";
       const bot = store.patchBot(current.id, { avatarUrl, avatarCrop });
       if (!bot) {
-        // There are no awaits between the refreshed lookup and this patch, but
-        // keep the attachment invariant explicit if the store ever changes.
         deleteAttachment(saved.path);
         return json(res, 404, { error: "no such bot" });
       }
@@ -118,10 +98,7 @@ export function createBotSettingsRoutes(deps: BotSettingsRouteDeps): RouteHandle
         return json(res, 400, { error: "avatarUrl must reference an existing stored image" });
       }
       const existingBot = store.bot(m[1]);
-      // On a Cloud home a bot's name, title, description and standing
-      // instructions ride every one of the owner's turns (and a lent Mac):
-      // only the owner's own devices change them. Anyone else keeps the
-      // picture and the voice. Resending an unchanged value is not a change.
+      // On a Cloud home these fields ride every owner turn: only the owner's own devices change them.
       if (CLOUD_HOME && existingBot && !cloudOwnerSession(auth)) {
         const changed = CLOUD_OWNER_PROFILE_FIELDS.find((field) => parsed.patch[field] !== undefined && (field === "notifications"
           ? (parsed.patch.notifications !== false) !== (existingBot.notifications !== false)
@@ -171,10 +148,6 @@ export function createBotSettingsRoutes(deps: BotSettingsRouteDeps): RouteHandle
           error: "Changing providers with elevated permissions requires choosing Ask first",
         });
       }
-      // patchBot persists first and emits the canonical bot change, which the
-      // store listener above turns into the slim wire-format SSE broadcast.
-      // Every thread that follows the bot moves with it; the selected thread
-      // follows it from now on too, as if picked there.
       const bot = store.patchBot(existing.id, { modelSelection: checked.selection });
       if (!bot) return json(res, 404, { error: "no such bot" });
       store.patchTask(bot.id, selected.threadId, { modelSelection: undefined,
@@ -186,7 +159,9 @@ export function createBotSettingsRoutes(deps: BotSettingsRouteDeps): RouteHandle
       const body = await readBody(req);
       requirePinnedClientThread(m[1], body?.threadId);
       const current = requestedTaskBot(m[1], body?.threadId);
+      sawThread(current.threadId);
       store.patchTask(current.id, current.threadId, { unread: false, ...readCursor(current.threadId) });
+      readThreadNotifications(current.threadId, broadcast);
       const bot = store.bot(current.id)!;
       const visible = wireBot(bot);
       broadcast({ kind: "bot", bot: visible });
@@ -229,14 +204,9 @@ export function createBotSettingsRoutes(deps: BotSettingsRouteDeps): RouteHandle
       if (!pending) {
         return json(res, 409, { error: "that grant is not on a pending approval for this bot" });
       }
-      // A standing grant is an approval: the same people who may approve
-      // the card it came from may remember it.
+      // A standing grant is an approval: only those who may approve the card may remember it.
       const refusal = cardAnswerRefusal(auth, bot.threadId, pending.card!.requestId!, "allow");
       if (refusal) return json(res, 403, { error: refusal });
-      // This is a standing permission for the bot, not merely for the thread
-      // that happened to raise the card. Save it on the bot defaults so a
-      // fresh direct or delegated task inherits it, while also updating the
-      // current task's independent permission snapshot immediately.
       const savedBot = store.bot(bot.id)!;
       store.patchBot(bot.id, {
         alwaysAllow: [...new Set([...(savedBot.alwaysAllow ?? []), allowKey])].slice(0, 200),

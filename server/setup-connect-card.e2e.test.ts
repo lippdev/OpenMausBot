@@ -1,10 +1,4 @@
-// /setup "set up my Gmail", end to end: a bot whose connected apps are on is
-// told to connect the app itself, its turn mounts the connected-apps tools,
-// and the connection it starts through them is a Connect card in the chat,
-// not a trip to settings. A bot with connected apps switched off is told the
-// one switch to flip and gets no tools to call. Real server, the real
-// connected-apps bridge, a fake Claude CLI that starts the connection the way
-// a model does, and a loopback stand-in for the managed connection service.
+// Real server and connected-apps bridge, a fake Claude CLI that starts the connection as a model does, and a loopback connection service.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -49,7 +43,6 @@ describe("/setup connects an app through a Connect card, against the real server
   const idle = (botId: string) => until(
     async () => (await api("GET", "/api/bots?messages=0")).bots.find((bot: any) => bot.id === botId),
     (bot: any) => bot && !bot.busy, "idle bot");
-  /** One /setup turn: what the engine was told, and what the chat holds after. */
   const setupTurn = async (bot: { id: string; threadId: string }) => {
     rmSync(dump, { force: true });
     await api("POST", `/api/bots/${bot.id}/messages`, { text: "/setup set up my Gmail", threadId: bot.threadId });
@@ -64,8 +57,7 @@ describe("/setup connects an app through a Connect card, against the real server
     data = join(home, "data");
     dump = join(home, "fake-claude-dump.json");
     mkdirSync(data);
-    // The managed connection service: present, so connected apps are set up
-    // for the workspace, but it knows no accounts, so Gmail is not connected.
+    // The managed connection service is present but knows no accounts, so Gmail is not connected.
     broker = createServer((req, res) => {
       req.resume();
       res.writeHead(404, { "content-type": "application/json" });
@@ -76,8 +68,7 @@ describe("/setup connects an app through a Connect card, against the real server
     writeFileSync(join(data, "config.json"), JSON.stringify({
       instances: { claude: {
         driver: "claudeAgent", config: { cli: join(ROOT, "server/testing/fake-claude-cli.ts") },
-        // Every turn that has the connected-apps tools starts a Gmail
-        // connection through them, as a model told to connect it does.
+        // Every turn with the connected-apps tools starts a Gmail connection through them, as a model told to would.
         environment: { FAKE_CLAUDE_CONNECT_APPS: "gmail", FAKE_CLAUDE_DUMP: dump },
       } },
     }));
@@ -113,7 +104,6 @@ describe("/setup connects an app through a Connect card, against the real server
     expect(seen.mcpConfig.mcpServers.composio).toBeDefined();
     expect(seen.systemPrompt).toContain("make COMPOSIO_MANAGE_CONNECTIONS for its toolkit (for example gmail) your last tool call");
     expect(seen.systemPrompt).not.toContain("point them to the Access section");
-    // the call went through the bridge, which answered with the card
     const call = chat.find(message => message.tool?.name === "mcp__composio__COMPOSIO_MANAGE_CONNECTIONS");
     expect(call?.tool).toMatchObject({ ok: true, output: expect.stringContaining("showed the user a secure connection card for gmail") });
     const card = chat.find(message => message.kind === "connector");

@@ -1,5 +1,3 @@
-// Which server a verb talks to and with what credential, and how a failure
-// becomes the words and exit code a script reads.
 import "../testing/scrub-ambient-omb-env.ts";
 
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -57,12 +55,10 @@ describe("explain", () => {
     expect(await explain(status(401))).toMatchObject({ exitCode: 5, hint: expect.stringContaining("--token-file") });
     expect(await explain(status(403, "admin scope required"))).toMatchObject({ exitCode: 5, message: "not allowed: admin scope required" });
     expect(await explain(status(409, "stop this bot's turn first"))).toMatchObject({ exitCode: 1, message: "stop this bot's turn first" });
-    // the server's own words, not the raw body around them
     expect(await explain(status(409, 'OpenMausBot API error (409): {"error":"stop this bot\'s turn first","code":"thread_busy"}')))
       .toMatchObject({ exitCode: 1, message: "stop this bot's turn first" });
     expect(await explain(status(403, 'OpenMausBot API error (403): {"error":"admin scope required"}'))).toMatchObject({ message: "not allowed: admin scope required" });
     expect(await explain(status(502, "OpenMausBot API error (502): <html>Bad gateway</html>"))).toMatchObject({ message: "OpenMausBot API error (502): <html>Bad gateway</html>" });
-    // an id that names nothing is a usage error, like a name that matches nothing
     expect(await explain(status(404, 'OpenMausBot API error (404): {"error":"no such bot"}'))).toMatchObject({ exitCode: 2, message: "no such bot" });
     expect(await explain(status(404, "OpenMausBot API error (404): not found"))).toMatchObject({ exitCode: 1 });
     expect(await explain(new TypeError("fetch failed"), "http://127.0.0.1:1")).toMatchObject({ exitCode: 5, message: "cannot reach OpenMausBot at http://127.0.0.1:1" });

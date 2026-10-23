@@ -1,6 +1,3 @@
-// The event stream as JSON lines: which frames a filter keeps, the
-// server-sent events read out of a byte stream however it is chunked, and
-// against a stand-in server: a refusal ends it, a drop resumes from the cursor.
 import "../testing/scrub-ambient-omb-env.ts";
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -30,7 +27,6 @@ describe("which frames are printed", () => {
     expect(wantFrame({ kind: "message", threadId: "t9" }, kinds, threads)).toBe(false);
     expect(wantFrame({ kind: "message", threadId: "t9" }, kinds, null)).toBe(true);
     expect(wantFrame({ kind: "bot", bot: { threadId: "t0", tasks: [{ threadId: "t1" }] } }, kinds, threads)).toBe(true);
-    // token-level events only when asked for
     expect(wantFrame({ kind: "runtime", event: { threadId: "t1" } }, kinds, threads)).toBe(false);
     expect(wantFrame({ kind: "runtime", event: { threadId: "t1" } }, new Set(["runtime"]), threads)).toBe(true);
   });

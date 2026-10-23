@@ -1,6 +1,3 @@
-// The sheet store: ids that never repeat, update in place, pruning that
-// drops result tables, a restart that fails a running card, a corrupt file
-// that starts empty, and one broadcast per change.
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,7 +45,6 @@ describe("DataSheetStore", () => {
     const third = await sheet.addCard({ kind: "table", title: "Again", by: "person" });
     expect(third.id).toBe("c_3");
     expect(sheet.nextResultName()).toBe("q_4");
-    // Every change reached the clients with the whole sheet and no counter.
     expect(frames.length).toBe(5);
     expect(frames.at(-1)).toMatchObject({ kind: "data", botId: "bot-1" });
     expect((frames.at(-1)!.sheet as unknown as Record<string, unknown>).seq).toBeUndefined();
@@ -81,7 +77,6 @@ describe("DataSheetStore", () => {
     await sheet.addCard({ kind: "table", title: "d", by: "bot", status: "ready", result: "c_4" });
     expect(sheet.cards().map((card) => card.id)).toEqual(["c_1", "c_3", "c_4"]);
     expect(dropped).toEqual(["c_2"]);
-    // Everything pinned: the oldest pinned card goes rather than growing past the cap.
     sheet.updateCard("c_3", { pinned: true });
     sheet.updateCard("c_4", { pinned: true });
     await sheet.addCard({ kind: "table", title: "e", by: "bot", status: "ready", result: "c_5" });
@@ -106,7 +101,6 @@ describe("DataSheetStore", () => {
     sheet.recordSource({ name: "people", ...base });
     expect(frames).toHaveLength(3);
     expect(sheet.sheet().sources.map((source) => [source.name, source.rowCount])).toEqual([["orders", 5], ["people", 3]]);
-    // DuckDB owns the table list; a sheet written by an older build loses its stale copy on the next save.
     expect(sheet.sheet()).not.toHaveProperty("tables");
     expect(JSON.parse(readFileSync(join(dir, SHEET_FILE), "utf8"))).not.toHaveProperty("tables");
     sheet.removeSource("orders");
@@ -124,7 +118,6 @@ describe("DataSheetStore", () => {
     expect(dropped).toEqual(["b1:c_1"]);
     registry.forget("b1");
     expect(registry.for("b1").cards()).toEqual([]);
-    // deleting a bot removes its sheet file as well as the store
     await registry.for("b2").addCard({ kind: "text", title: "note", text: "x", by: "person", status: "ready" });
     expect(existsSync(join(dir, "b2", SHEET_FILE))).toBe(true);
     registry.delete("b2");

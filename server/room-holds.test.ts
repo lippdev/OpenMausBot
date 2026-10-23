@@ -19,6 +19,17 @@ describe("room member holds", () => {
     expect(classifyHoldDirective("STOP @Scout and @Pixel", ["scout", "pixel"]).hold).toEqual(["scout", "pixel"]);
   });
 
+  it("reads a stop word with an object as a task, not a hold", () => {
+    expect(classifyHoldDirective("@Engineer stop this bridge and uninstall it", ["engineer"])).toEqual({ hold: [], holdAll: false, release: ["engineer"], releaseAll: false });
+    expect(classifyHoldDirective("@Scout pause the render at 10s", ["scout"]).hold).toEqual([]);
+    expect(classifyHoldDirective("@Scout stop that", ["scout"]).hold).toEqual(["scout"]);
+    expect(classifyHoldDirective("@Scout stop it now", ["scout"]).hold).toEqual(["scout"]);
+    expect(classifyHoldDirective("stop the @Scout", ["scout"]).hold).toEqual(["scout"]);
+    expect(classifyHoldDirective("@Scout stop that now", ["scout"]).hold).toEqual(["scout"]);
+    expect(classifyHoldDirective("@Scout stop this right now", ["scout"]).hold).toEqual(["scout"]);
+    expect(classifyHoldDirective("@Scout pause your work", ["scout"]).hold).toEqual(["scout"]);
+  });
+
   it("releases a member addressed directly without a stop word", () => {
     expect(classifyHoldDirective("@Scout resume", ["scout"])).toEqual({ hold: [], holdAll: false, release: ["scout"], releaseAll: false });
     expect(classifyHoldDirective("@Scout what did you find?", ["scout"]).release).toEqual(["scout"]);
@@ -33,7 +44,6 @@ describe("room member holds", () => {
     expect(stopWordPlacement("@Scout what does `stop` do?")).toBeNull();
     expect(stopWordPlacement('@Scout the log said "stop"')).toBeNull();
     expect(stopWordPlacement("@Scout look:\n```\nstop\n```")).toBeNull();
-    // a quoted line keeps its @mention but not its stop word
     expect(stopWordPlacement("> stop @Scout\nwhat did they mean?")).toBeNull();
     expect(classifyHoldDirective("> stop @Scout\nwhat did they mean?", ["scout"]).release).toEqual(["scout"]);
   });
@@ -53,7 +63,6 @@ describe("room member holds", () => {
   it("applies directives to the room's holds and reports what changed", () => {
     const first = applyHoldDirective(undefined, classifyHoldDirective("stop @Scout", ["scout"]), members, 10);
     expect(first).toEqual({ holds: { scout: { at: 10 } }, held: ["scout"], released: [] });
-    // Holding again changes nothing (the first stop's time stands).
     const again = applyHoldDirective(first.holds, classifyHoldDirective("stop @Scout", ["scout"]), members, 20);
     expect(again.holds).toBe(first.holds);
     expect(again.held).toEqual([]);

@@ -16,8 +16,8 @@ const deepEqual = (left: unknown, right: unknown): boolean => JSON.stringify(lef
 
 const fmt = (value: unknown): string => JSON.stringify(value, null, 2);
 
-/** The per-turn clock line (server/turn-clock.ts) rides between the update
- * and the person's text. Only that one leading line is dropped. */
+/** The per-turn clock line rides between the update and the person's text.
+ * Only that one leading line is dropped. */
 function withoutLeadingTurnClock(suffix: string): string {
   const lead = "\n\n" + TURN_CLOCK_LEAD;
   if (!suffix.startsWith(lead)) return suffix;

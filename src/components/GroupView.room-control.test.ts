@@ -1,6 +1,4 @@
 // @vitest-environment happy-dom
-// A room reads as each member's final answer (working notes fold into one
-// reversible row above it), and a held member is listed with a way back.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -68,7 +66,6 @@ describe("a member's room reply", () => {
     const toggle = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Worked for"))!;
     flushSync(() => toggle.click());
     expect(host.textContent).toContain("Good, correct layer id");
-    // the notes open above the answer
     expect(host.textContent!.indexOf("Good, correct layer id")).toBeLessThan(host.textContent!.indexOf("Fixed: the title"));
   });
 

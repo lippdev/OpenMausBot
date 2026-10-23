@@ -36,6 +36,28 @@ describe("mention display ranges", () => {
   });
 });
 
+describe("the person's tag in display ranges", () => {
+  const person = { profileName: "Sam" };
+  const ranges = (text: string, roster = peers, everyone = false) => mentionRanges(text, roster, everyone, person)
+    .map(({ start, end, you }) => [text.slice(start, end), you ?? false]);
+
+  it("marks @you and the profile name as the person's, beside bot tags", () => {
+    expect(ranges("@Atlas asks @you and @SAM; mail sam@you.com")).toEqual([
+      ["@Atlas", false], ["@you", true], ["@SAM", true],
+    ]);
+  });
+  it("is off unless a caller asks for it, as in the composer", () => {
+    expect(matches("@you @Sam")).toEqual([]);
+  });
+  it("lets a bot with the same name keep its mentions", () => {
+    expect(ranges("@you @Sam", [{ name: "You" }, { name: "Sam" }])).toEqual([["@you", false], ["@Sam", false]]);
+    expect(ranges("@you", [{ name: "You", hidden: true }])).toEqual([["@you", true]]);
+  });
+  it("leaves @everyone as it was", () => {
+    expect(ranges("@everyone then @you", peers, true)).toEqual([["@everyone", false], ["@you", true]]);
+  });
+});
+
 describe("mention picker choices", () => {
   const choices = ["everyone", "One", "Two", "Three", "Four", "Five", "Six"]
     .map((name, index) => ({ id: String(index), name }));

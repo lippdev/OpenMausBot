@@ -1,5 +1,3 @@
-// The content nodes that hold no nodes of their own: an image, a badge, a
-// progress bar. (An Icon is a WidgetGlyph and a Chart is WidgetChart.)
 import type { CSSProperties } from "react";
 import { ImageOff } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -9,9 +7,10 @@ import { useWidgetForm } from "./WidgetControls";
 import type { WidgetWhere } from "./WidgetNodes";
 import { BADGE_DOT, BADGE_INK, BADGE_SIZE, BADGE_SOLID, boxStyle } from "./widget-style";
 
-/** A remote image waits for a click, the way one in a bot's Markdown does
- * (AttachmentPreview): a widget is bot-authored, and mounting the image is a
- * request to whatever address the bot wrote. One click loads the card's images. */
+/**
+ * Security: a remote image waits for a click; a widget is bot-authored, and mounting it requests whatever address the
+ * bot wrote.
+ */
 export function WidgetImage({ node, where }: { node: WidgetNode; where: WidgetWhere }) {
   const form = useWidgetForm();
   const src = widgetString(node, "src");
@@ -79,7 +78,6 @@ export function WidgetBadge({ node }: { node: WidgetNode }) {
         "inline-flex shrink-0 items-center whitespace-nowrap font-medium", BADGE_SIZE[widgetString(node, "size") ?? "md"] ?? BADGE_SIZE.md,
         node.pill === false ? "rounded-[7px]" : "rounded-full",
         variant === "solid" ? BADGE_SOLID[color] ?? BADGE_SOLID.secondary : BADGE_INK[color] ?? BADGE_INK.secondary,
-        // soft and outline take their one colour from the ink they carry
         variant === "outline" && "shadow-[inset_0_0_0_1px_color-mix(in_srgb,currentColor_45%,transparent)]",
         variant !== "solid" && variant !== "outline" && "bg-[color:color-mix(in_srgb,currentColor_13%,transparent)]",
       )}

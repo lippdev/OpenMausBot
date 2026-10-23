@@ -1,16 +1,6 @@
-// Durable, atomic file replace: write to a sibling temp file, fsync it, then
-// rename over the target. rename(2) is atomic on the same filesystem, so a
-// crash or power loss mid-write can never leave a truncated file behind — a
-// reader always sees either the complete old contents or the complete new
-// ones. Without this, an interrupted writeFileSync produces half-written JSON
-// that fails to parse on next boot and is silently treated as empty state.
-//
-// The fsync is the expensive part: on macOS it is F_FULLFSYNC, about 4 ms of
-// blocked event loop per call. `durable: false` drops only the fsync, for
-// files whose loss after a power cut costs nothing (a derived cache, a
-// session-scoped token). The temp file and rename stay, so an app crash or
-// kill -9 still never leaves a torn file; only a power loss or kernel panic
-// can leave such a file empty.
+// Temp file, fsync, rename: rename(2) is atomic on one filesystem, so a reader sees the whole old or the whole new file.
+// The fsync (F_FULLFSYNC on macOS, ~4 ms) is what `durable: false` drops: a crash still never tears the file, only a power
+// loss can leave it empty.
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -31,30 +21,16 @@ export type AtomicWriteOptions = {
   durable?: boolean;
 };
 
-/** Windows refuses a rename onto an existing path while anything else holds a
- * handle to either file, and a virus scanner or the search indexer opening a
- * just-closed file for a few milliseconds is enough. It surfaces as EPERM or
- * EACCES from an operation that is correct and would succeed a moment later —
- * so it is retried rather than reported. Everything else throws immediately;
- * a real permission problem must not be papered over by a busy-wait.
- *
- * Total worst case is ~155 ms across 6 attempts. Kept synchronous because
- * every caller is a synchronous save path, and making one of them async is a
- * much larger change than this bug warrants.
- *
- * ponytail: fixed backoff, no jitter. If contention turns out to be heavy
- * enough that these collide, jitter it then. */
+/** Windows refuses a rename onto a path while anything (a virus scanner, the indexer) holds a handle, as EPERM or EACCES
+ * that would succeed a moment later, so those are retried (~155 ms worst case); everything else throws. */
 const RENAME_RETRY_DELAYS_MS = [5, 10, 20, 40, 80];
 const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 
 function sleepSync(ms: number): void {
-  // No synchronous sleep in Node without a syscall: a zero-length read on a
-  // shared array with a timeout is the standard trick and does not spin the CPU.
+  // Node has no synchronous sleep: Atomics.wait on a shared buffer blocks without spinning the CPU.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** `rename` is injectable for tests only — there is no portable way to make a
- * real filesystem produce a transient EPERM on demand. */
 export function renameWithRetry(
   tmp: string,
   path: string,
@@ -76,9 +52,7 @@ export function writeFileAtomic(path: string, data: string | Uint8Array, options
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let fd: number | null = null;
   try {
-    // Apply sensitive-file permissions to the temporary inode itself. The
-    // final rename preserves them and never leaves a broader-permission
-    // config file visible between the write and a later chmod.
+    // Permissions go on the temp inode itself, so a broader-permission file is never visible before a chmod.
     fd = openSync(tmp, "w", options.mode);
     writeFileSync(fd, data);
     if (options.durable !== false) fsyncSync(fd);
@@ -90,26 +64,17 @@ export function writeFileAtomic(path: string, data: string | Uint8Array, options
       try {
         closeSync(fd);
       } catch {
-        /* best-effort cleanup */
       }
     }
     try {
       unlinkSync(tmp);
     } catch {
-      /* best-effort cleanup */
     }
     throw e;
   }
 }
 
-/** True only when `path` is already exactly `data`: a regular file (never a
- * symlink, FIFO or directory), owned by this user, with permissions no
- * broader than `mode`. Any doubt or error answers false, so the caller falls
- * back to a full write — this check must never be the reason a save fails.
- *
- * It reads the file on disk rather than remembering the last write: a
- * workspace restore or a hand edit can change the file underneath, and the
- * next save has to put its own bytes back exactly as before. */
+/** Any doubt answers false, so this check is never why a save fails; it reads the disk, since a restore or hand edit may have changed it. */
 function holdsExactly(path: string, data: string, mode: number | undefined): boolean {
   let fd: number | null = null;
   try {
@@ -118,9 +83,7 @@ function holdsExactly(path: string, data: string, mode: number | undefined): boo
       if (!lstatSync(path).isFile()) return false;
       fd = openSync(path, "r");
     } else {
-      // Inspect and read the same inode the open landed on, so a swap
-      // between a stat and the read cannot be mistaken for a match.
-      // O_NONBLOCK keeps a FIFO planted at the path from hanging the open.
+      // Inspect the inode the open landed on, so a swap cannot pass as a match; O_NONBLOCK keeps a planted FIFO from hanging the open.
       fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     }
     const stat = fstatSync(fd);
@@ -129,8 +92,6 @@ function holdsExactly(path: string, data: string, mode: number | undefined): boo
     if (uid !== undefined && stat.uid !== uid) return false;
     // Windows reports 0o666 for any writable file; its mode bits mean nothing.
     if (mode !== undefined && process.platform !== "win32" && (stat.mode & 0o777 & ~mode) !== 0) return false;
-    // Bytes, not strings: decoding and comparing a megabyte-sized registry as
-    // a JS string costs several times more than a memcmp of the raw bytes.
     return readFileSync(fd).equals(Buffer.from(data));
   } catch {
     return false;
@@ -139,16 +100,11 @@ function holdsExactly(path: string, data: string, mode: number | undefined): boo
       try {
         closeSync(fd);
       } catch {
-        /* best-effort cleanup */
       }
     }
   }
 }
 
-/** writeFileAtomic for saves that often repeat what the file already holds.
- * A save that changes nothing costs one open and read instead of a temp
- * file, a rename and an fsync; a save whose size differs pays only an
- * open and fstat before the normal write. Returns whether it wrote. */
 export function writeFileAtomicIfChanged(path: string, data: string, options: AtomicWriteOptions = {}): boolean {
   if (holdsExactly(path, data, options.mode)) return false;
   writeFileAtomic(path, data, options);

@@ -207,7 +207,6 @@ describe("OpenMaus-managed Boat inventory", () => {
     boats = [{ id: boxId, name: legacyNameFor(botId), state: "ready" }];
 
     expect((await boat.listManagedBoats(cfg, [{ botId, name: "Legacy", inUse: false }])).available).toBe(true);
-    // Refreshing the same provider row must not grow the ownership journal.
     requests.length = 0;
     expect((await boat.listManagedBoats(cfg, [{ botId, name: "Legacy", inUse: false }])).available).toBe(true);
     expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
@@ -532,11 +531,8 @@ describe("OpenMaus-managed Boat inventory", () => {
     });
   });
 
-  // Measured 2026-10-13: after file uploads, DELETE answered 202 and the
-  // operation stayed blocked in waiting_for_uploads for about an hour, while
-  // the sandbox was gone and billing had stopped. Boat erases such data on its
-  // own, so the delete is done. The sandbox still answers its direct read here:
-  // Boat's stage alone proves it, not a race with that read.
+  // Measured 2026-10-13: after file uploads, DELETE answered 202 and the operation stayed blocked in waiting_for_uploads for
+  // about an hour while the sandbox was gone and billing stopped; Boat erases such data on its own.
   it.each([
     ["waiting_for_uploads", ["pending", "blocked"]],
     ["waiting_for_uploads", ["blocked"]],
@@ -557,7 +553,6 @@ describe("OpenMaus-managed Boat inventory", () => {
     await expect(boat.deleteManagedBoat(cfg, owners, boxId, managedName)).resolves.toEqual({ ok: true });
     expect(deleteJournal.boatDeletionSnapshot()).toEqual([]);
     expect(journal.boatCreateRecoverySnapshot().some((record) => record.boxId === boxId)).toBe(false);
-    // No fence is left: the bot can be given a new computer.
     boats = [];
     await expect(boat.findBoat(cfg, botId)).resolves.toBeNull();
   });
@@ -572,15 +567,12 @@ describe("OpenMaus-managed Boat inventory", () => {
     journal.resolveBoatCreate(journal.rememberCreatedBoat(attempt.request, boxId));
     deletionStatuses = [...statuses];
     blockedStage = "kept_for_newer_snapshots";
-    // The sandbox already answers 404, as Boat hides it at once: Boat's own
-    // word, not that race, decides what the person is told.
 
     await expect(boat.deleteManagedBoat(cfg, owners, boxId, managedName))
       .rejects.toThrow(`boat.dev deleted cloud computer ${boxId} but is keeping its stored data, because a fork or named snapshot made from it still uses that data. To erase the data, delete those in boat.dev.`);
     expect(deleteJournal.boatDeletionSnapshot()).toEqual([expect.objectContaining({ boxId, phase: "blocked", status: "blocked" })]);
     expect(journal.boatCreateRecoverySnapshot()).toContainEqual({ botId, boxId, resolved: true });
 
-    // The next inventory refresh proves the sandbox gone and retires the fence.
     await expect(boat.listManagedBoats(cfg, owners)).resolves.toMatchObject({ available: true, instances: [] });
     expect(deleteJournal.boatDeletionSnapshot()).toEqual([]);
     expect(journal.boatCreateRecoverySnapshot().some((record) => record.boxId === boxId)).toBe(false);
@@ -621,8 +613,6 @@ describe("OpenMaus-managed Boat inventory", () => {
     expect(journal.boatCreateRecoverySnapshot()).toContainEqual({ botId, boxId, resolved: true });
     expect(requests.some((request) => request.method === "DELETE")).toBe(true);
 
-    // Once LIST drops the row, direct absence is authoritative and retires
-    // the recovery receipt on the next inventory refresh.
     boats = [];
     pageResponses = new Map([["", { sandboxes: [], nextCursor: null }]]);
     await expect(boat.listManagedBoats(cfg, owners)).resolves.toMatchObject({ instances: [] });
@@ -742,15 +732,12 @@ describe("OpenMaus-managed Boat inventory", () => {
     await expect(boat.findBoat(cfg, botId)).resolves.toMatchObject({ id: "bx_456789ab" }); // caches the id
     directHangs = true;
     requests.length = 0;
-    // The direct read's own deadline expires at once instead of after 20 s;
-    // the listing behind it keeps its real one. Without a deadline the read
-    // waits on the stalled relay and this test times out.
+    // The direct read's own deadline expires at once instead of after 20 s; without one the read waits on the stalled relay.
     const deadline = vi.spyOn(AbortSignal, "timeout")
       .mockImplementationOnce(() => AbortSignal.abort(new DOMException("deadline", "TimeoutError")));
     try {
       await expect(boat.findBoat(cfg, botId)).resolves.toMatchObject({ id: "bx_456789ab" });
       expect(deadline).toHaveBeenNthCalledWith(1, 20_000);
-      // Gave up on the direct read and answered from the listing.
       expect(requests.map(request => `${request.method} ${request.path}`)).toEqual(["GET /api/v1/sandboxes"]);
     } finally {
       deadline.mockRestore();

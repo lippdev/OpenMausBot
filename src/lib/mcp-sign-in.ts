@@ -1,8 +1,3 @@
-// Signing in to a URL MCP server: the server starts the sign-in and waits
-// for the browser's return (on its own machine, or at its own https address
-// for a browser elsewhere); the app opens the sign-in page, offers
-// paste-back when the return cannot reach the server, and polls.
-
 export type McpSignInPhase = "waiting" | "succeeded" | "failed" | "cancelled" | "expired";
 
 export interface McpSignInStatus {
@@ -11,8 +6,6 @@ export interface McpSignInStatus {
   authorizationUrl: string | null;
   expiresAt?: string;
   message?: string;
-  /** The browser ends on a page on the server's own machine that cannot
-   * load here: the person pastes its address instead. */
   pasteBack?: boolean;
 }
 
@@ -37,9 +30,6 @@ export function mcpSignInLink(value: string | null | undefined): string | null {
   }
 }
 
-/** Start a sign-in for `name`, open its page, and resolve when it ends.
- * A start the server refuses (a server without OAuth, another owner's flow)
- * rejects with the server's message. */
 export async function runMcpSignIn(name: string, deps: Deps): Promise<McpSignInStatus> {
   const base = `/api/mcp/servers/${encodeURIComponent(name)}/sign-in`;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -76,8 +66,6 @@ export async function runMcpSignIn(name: string, deps: Deps): Promise<McpSignInS
     if (deps.signal?.aborted) return cancelledStatus;
     let status = started;
     while (status.phase === "waiting") {
-      // A pasted callback already returns the final status. Do not make the
-      // form wait for another poll (or leave it waiting after clearing input).
       const submitted = await Promise.race([completed, cancelled, sleep(POLL_MS).then(() => null)]);
       if (deps.signal?.aborted) return cancelledStatus;
       if (submitted) return submitted;

@@ -1,9 +1,10 @@
 import type { Message } from "@/state/store";
-import { t } from "./i18n";
+import type { LiveStatus } from "@/state/turn-status";
+import { activeLocale, t } from "./i18n";
 import type { LocaleKey } from "@/locales";
+import { progressSize } from "../../shared/turn-progress";
 
-// keys, not labels: t() reads the active pack when it is called, and this
-// array is built once at import time
+// Keys, not labels: this array is built at import time, and t() reads the active pack when called.
 const FALLBACK_LABELS: Array<[RegExp, LocaleKey]> = [
   [/\b(?:bash|shell|terminal|exec|command|run_command)\b/i, "chat.activity.runCommand"],
   [/\b(?:read|read_file|view|open_file)\b/i, "chat.activity.readFile"],
@@ -18,6 +19,7 @@ const FALLBACK_LABELS: Array<[RegExp, LocaleKey]> = [
   [/\b(?:list_bots|list_agents)\b/i, "chat.activity.whosAround"],
   [/\blist_rooms\b/i, "chat.activity.rooms"],
   [/\bpost_to_room\b/i, "chat.activity.postRoom"],
+  [/\bpublish_page\b/i, "chat.activity.publishPage"],
   [/\bdelegate_bot\b/i, "chat.activity.handoff"],
   [/\b(?:ask_bot|send_message)\b/i, "chat.activity.askTeammate"],
 ];
@@ -28,19 +30,10 @@ function sentenceCase(value: string): string {
   return `${trimmed[0].toUpperCase()}${trimmed.slice(1)}`;
 }
 
-/**
- * The one quiet line shown while an agent is working. This follows t3code's
- * live-activity model: thinking before a tool starts, then the current verb.
- * The server-provided narration is authoritative; fallbacks cover older
- * messages and third-party drivers that only report a tool name.
- */
 export function liveActivityLabel(message?: Message): string {
   return liveActivityPhrases(message).phrases[0];
 }
 
-// Alternates for the rotating presence line. The first phrase of each phase
-// is the plain label above, so the sidebar and the opening seconds of a
-// phase read exactly as before. Keys, not labels, for the same reason.
 const ALTERNATES: Partial<Record<LocaleKey, LocaleKey[]>> = {
   "chat.activity.thinking": [
     "chat.activity.alt.mullingItOver",
@@ -70,20 +63,16 @@ const ALTERNATES: Partial<Record<LocaleKey, LocaleKey[]>> = {
 };
 
 export type LiveActivityPhrases = {
-  /** what the bot is doing now: a stable key that changes only with the phase */
   phase: string;
-  /** the plain label first, then gentle alternates */
   phrases: string[];
+  /** How much of the file the call has written so far ("14 KB"), shown apart so a growing size never re-fades the phrase. */
+  size?: string;
 };
 
 function phaseOf(key: LocaleKey): LiveActivityPhrases {
   return { phase: key, phrases: [key, ...(ALTERNATES[key] ?? [])].map((k) => t(k)) };
 }
 
-/**
- * The phrases the presence line rotates through for the current step. Server
- * narration is exact, so it stays a single phrase and never rotates.
- */
 export function liveActivityPhrases(message?: Message): LiveActivityPhrases {
   if (
     message?.kind !== "activity" ||
@@ -96,11 +85,57 @@ export function liveActivityPhrases(message?: Message): LiveActivityPhrases {
   return toolActivityPhrases(message.tool);
 }
 
-/** A step's name as people read it, running or finished: the server's
- * narration when it has one, else a plain label for the kind of tool. Never
- * the tool's arguments ("Bash: pnpm test" reads "Running a command"). */
 export function activityStepLabel(tool: { name: string; spoken?: string }): string {
   return toolActivityPhrases(tool).phrases[0];
+}
+
+/** The status line's "now": the engine's own report when it made one, else the tool call still running in the chat,
+ * else nothing, and the line shows its timer alone. */
+export function turnNowPhrases(status: LiveStatus | null, message?: Message): LiveActivityPhrases | null {
+  if (status) return liveStatusPhrases(status);
+  if (message?.kind !== "activity" || !message.tool || message.tool.ok !== undefined || message.comm) return null;
+  const phrases = toolActivityPhrases(message.tool);
+  return phrases.phase === "chat.activity.working" ? null : phrases;
+}
+
+export function formatProgressSize(bytes: number | undefined): string | undefined {
+  const size = progressSize(bytes);
+  if (!size) return undefined;
+  const count = new Intl.NumberFormat(activeLocale(), { maximumFractionDigits: 1 }).format(size.count);
+  return t(size.unit === "kb" ? "chat.activity.sizeKb" : "chat.activity.sizeMb", { count });
+}
+
+function liveStatusPhrases(status: LiveStatus): LiveActivityPhrases | null {
+  switch (status.activity) {
+    case "thinking":
+      return phaseOf("chat.activity.thinking");
+    case "reply":
+      return phaseOf("chat.activity.reply");
+    case "write":
+    case "edit": {
+      const named = status.file
+        ? t(status.activity === "write" ? "chat.activity.writingNamed" : "chat.activity.editingNamed", { file: status.file })
+        : t(status.activity === "write" ? "chat.activity.writeFile" : "chat.activity.editFile");
+      const size = formatProgressSize(status.bytes);
+      return { phase: `live:${status.itemId ?? ""}:${named}`, phrases: [named], ...(size ? { size } : {}) };
+    }
+    case "read":
+      return status.file
+        ? { phase: `live:read:${status.file}`, phrases: [t("chat.activity.readingNamed", { file: status.file })] }
+        : phaseOf("chat.activity.readFile");
+    case "command":
+      return phaseOf("chat.activity.runCommand");
+    case "web":
+      return phaseOf("chat.activity.searchWeb");
+    case "fetch":
+      return phaseOf("chat.activity.readPage");
+    case "search":
+      return phaseOf("chat.activity.searching");
+    default: {
+      const phrases = status.tool ? toolActivityPhrases({ name: status.tool }) : null;
+      return phrases && phrases.phase !== "chat.activity.working" ? phrases : null;
+    }
+  }
 }
 
 function toolActivityPhrases(tool: { name: string; spoken?: string }): LiveActivityPhrases {
@@ -123,12 +158,6 @@ function hash(value: string): number {
   return h >>> 0;
 }
 
-/**
- * Which phrase shows at `step` within a phase. Step 0 is always the plain
- * label. Later steps walk the alternates in an order seeded by the turn and
- * the phase, so two turns don't read alike but one turn is reproducible, and
- * the same phrase never shows twice in a row.
- */
 export function phraseAt(phrases: readonly string[], seed: string, step: number): string {
   if (phrases.length < 2 || step <= 0) return phrases[0] ?? "";
   const rest = phrases.slice(1);
@@ -136,12 +165,10 @@ export function phraseAt(phrases: readonly string[], seed: string, step: number)
     .map((phrase, index) => ({ phrase, rank: hash(`${seed}|${index}`) }))
     .sort((a, b) => a.rank - b.rank)
     .map((entry) => entry.phrase);
-  // after the alternates run out, come back to the plain label and go again
   const cycle = [...order, phrases[0]];
   return cycle[(step - 1) % cycle.length];
 }
 
-/** How long `step` stays up: 4 to 6 seconds, fixed by the seed. */
 export function phraseHoldMs(seed: string, step: number): number {
   return 4000 + (hash(`${seed}#${step}`) % 2001);
 }

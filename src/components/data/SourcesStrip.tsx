@@ -2,7 +2,6 @@ import type { DataSource } from "../../../shared/data-surface";
 import { t } from "@/lib/i18n";
 import { formatCount } from "./data-format";
 
-/** Quiet table references for writing SQL; the list does not change the result. */
 export function SourcesStrip({ sources }: { sources: Array<Pick<DataSource, "name" | "rowCount"> & { sqlName?: string }> }) {
   if (sources.length === 0) return null;
   return (

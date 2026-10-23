@@ -1,6 +1,5 @@
 // @vitest-environment happy-dom
-// Escape has to close this dialog when focus never entered it. Static markup
-// does not run the listener, so this mounts the dialog and presses the key.
+// Static markup does not run the listener, so this mounts the dialog and presses the key.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";

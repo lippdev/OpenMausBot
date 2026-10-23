@@ -1,7 +1,3 @@
-// App settings → Workspaces: the operator's view of the client workspaces on
-// this server, through the fleet agent (server/fleet-agent.ts). Create one,
-// add or remove a person, suspend, resume, delete, upgrade all. Enterprise
-// `admin` entitlement, and only where an agent exists.
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Plus, RefreshCw } from "lucide-react";
 import { api, useStore, type ConfigStatus } from "@/state/store";
@@ -34,7 +30,6 @@ export function workspacesAvailable(config: ConfigStatus | null | undefined): bo
 
 const fetchFleet = (): Promise<FleetView> => api("/api/fleet");
 
-/** The list alone, so it renders the same from a fetch or a fixture. */
 export function WorkspacesTable({ fleet, onAct, busy }: { fleet: FleetView; onAct: (slug: string, action: "suspend" | "resume" | "delete" | "users") => void; busy: string | null }) {
   if (fleet.workspaces.length === 0) return <div className="text-[13px] text-ink-secondary">{t("workspaces.empty", { domain: fleet.domain })}</div>;
   return (

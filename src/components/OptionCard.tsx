@@ -9,13 +9,10 @@ import { ExpandableText } from "./ExpandableText";
 
 const LETTERS = ["A", "B", "C", "D", "E", "F"];
 
-/** First-run quiz, not a live provider ask (those carry requestId). */
 export function isOnboardingCard(message: Message): boolean {
   return message.kind === "options" && !!message.card && !message.card.requestId;
 }
 
-/** Hide the quiz once they have talked past it — picked an option, typed in
- * the composer, or dismissed it. Live asks are never this card. */
 export function shouldHideOnboardingCard(message: Message, transcript: Message[]): boolean {
   if (!isOnboardingCard(message) || !message.card) return false;
   if (message.card.dismissed || message.card.answered) return true;
@@ -33,7 +30,6 @@ export function OptionCard({
   botId,
   threadId,
   message,
-  /** set when the card is in a room: the answer belongs to the room's thread */
   groupId,
 }: {
   botId: string;
@@ -46,14 +42,11 @@ export function OptionCard({
   const card = message.card;
   const bot = state.bots.find((candidate) => candidate.id === botId);
   const transcript = bot ? visibleMessages(bot) : [];
-  // Full thread, not the mounted window: a search-focus slice can omit the
-  // later user message that means they already talked past this quiz.
+  // Full thread, not the mounted window: a search-focus slice can omit the later message that hides this quiz.
   if (!card || shouldHideOnboardingCard(message, transcript) || (card.requestId && card.dismissed && card.answered)) return null;
 
   const title = card.title;
   const subtitle = card.subtitle;
-  // Cards saved before the server flattened `ask_user` choices can still hold
-  // `{ label }` rows; a label is drawable, an object as a React child is not.
   const options = parseChoices(card.options, LETTERS.length) ?? [];
 
   const answer = (text: string) => {
@@ -66,11 +59,7 @@ export function OptionCard({
     ? () => dispatch({ type: "dismissCard", botId, threadId, messageId: message.id, groupId })
     : undefined;
 
-  // A live ask that has been answered folds into one line: what was asked,
-  // then what was picked. The first-run quiz never gets here, it hides.
   if (card.requestId && card.answered) {
-    // `answered` is the verdict for a permission-shaped ask and the picked
-    // label for a flat one; a deny or a run that ended is no answer at all.
     const closed = !card.answeredText && (card.answered === "deny" || card.answered === "unavailable");
     const picked = closed
       ? undefined
@@ -112,17 +101,11 @@ export function OptionCard({
               className={cn(
                 "flex w-full items-center gap-2.5 px-3 py-2 text-start text-[13px] font-medium leading-5 text-ink",
                 i > 0 && "border-t border-hairline/40",
-                // `raised` is the wrong fill here: the light skins define it as
-                // pure white, the same value as the card underneath, so a
-                // hovered or answered row used to be invisible. `raised-hover`
-                // is the one tone every skin guarantees stands off a surface.
                 (card.answeredText ?? card.answered) === opt
                   ? "bg-raised-hover"
                   : "hover:bg-raised-hover/60 disabled:hover:bg-transparent",
               )}
             >
-              {/* `control` is the chip tone every skin guarantees on a card; the
-                  hairline keeps it a chip even on a row that is itself filled */}
               <span className="flex size-5 shrink-0 items-center justify-center rounded-md border border-hairline/50 bg-control text-[11px] font-medium text-ink-secondary">
                 {LETTERS[i]}
               </span>
@@ -132,9 +115,7 @@ export function OptionCard({
         </div>
       )}
 
-      {/* a permission ask has no free-text answer — the broker only accepts
-          allow/deny, so typing here used to fail silently */}
-      {!card.answered && !card.tool && (
+      {!card.answered && !card.tool && !card.fixedOptions && (
         <input
           dir="auto"
           value={custom}

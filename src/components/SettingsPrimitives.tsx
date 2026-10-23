@@ -49,7 +49,6 @@ export function Card({
   );
 }
 
-/** Simple preferences share an aligned row; forms with several fields keep a Card. */
 export function SettingRow({
   title,
   subtitle,
@@ -78,9 +77,7 @@ export function SettingRow({
   );
 }
 
-/** A command the user is meant to run, with one-click copy. */
 export function CommandLine({ command, copyLabel = "Copy command" }: { command: string; copyLabel?: string }) {
-  // The command stays select-all when clipboard permission is denied.
   const { state, copy } = useCopyFeedback(command);
 
   return (

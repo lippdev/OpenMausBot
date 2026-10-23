@@ -1,14 +1,8 @@
 #!/usr/bin/env node
-// Offline stand-in for xAI's `grok` CLI in its sign-in role: `--version` and
-// `login --device-auth`, printing the device instructions the way grok 1.0.25
-// does. It never opens a network connection and writes no real credential.
-// Explicit opt-in and a disposable HOME are required.
-//
-// FAKE_GROK_MODE: success (signs in shortly), approve (signs in once
-// HOME/.omb-fake-grok-approved exists), waiting, complete (the page carries
-// the code), evil (a page on another host), expired, denied, crash,
-// no-credential (exits 0 without signing in), old (no --device-auth),
-// ignore-term (waits and ignores SIGTERM).
+// Offline stand-in for xAI's `grok` CLI sign-in (`--version`, `login --device-auth` printing grok 1.0.25's
+// device instructions): no network, no real credential; needs explicit opt-in and a disposable HOME.
+//   FAKE_GROK_MODE  success | approve (once HOME/.omb-fake-grok-approved exists) | waiting | complete |
+//     evil (a page on another host) | expired | denied | crash | no-credential | old (no --device-auth) | ignore-term
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 

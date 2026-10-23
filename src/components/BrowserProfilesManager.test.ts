@@ -39,8 +39,6 @@ describe("browser profile manager", () => {
     expect(html).toContain('value="guest"');
     expect(html).toContain("Bots on a shared profile use the same logins.");
     expect(html).not.toMatch(/<details[^>]*\bopen/);
-    // Initial auth is unresolved: never offer active mutations until owner
-    // scope has been checked, including on a self-hosted browser origin.
     expect(html.match(/<select[^>]*>/)?.[0]).toContain('disabled=""');
   });
 
@@ -75,9 +73,7 @@ describe("browser profile manager", () => {
     expect(html).toContain('<option value="chrome" selected="">My Chrome</option>');
     expect(html).toContain("Bots on this profile act inside your real Chrome, signed in as you");
     expect(html).toContain("chrome://inspect/#remote-debugging");
-    // Its sign-ins are Chrome's own: OMB neither lists nor clears them.
     expect(html).not.toContain("Signed-in sites");
-    // The bot on it gets the same explanation instead of a sites list.
     const botHtml = renderToStaticMarkup(createElement(BrowserProfilesManager, { bot }));
     expect(botHtml).toContain("act inside your real Chrome");
   });
@@ -87,7 +83,7 @@ describe("browser profile manager", () => {
     fixture.profiles = [{ id: "work", name: "Work", browser: "chrome" }];
     const html = renderToStaticMarkup(createElement(BrowserProfilesManager));
     expect(html).toContain('<option value="chrome" disabled="" selected="">My Chrome</option>');
-    expect(html).toContain("My Chrome is for the desktop app, where bots run on your own computer. On Cloud and on a server there is no Chrome of yours to use, so every profile uses the built-in browser.");
+    expect(html).toContain("My Chrome is for the desktop app, where bots run on your own computer. Anywhere else, such as the Cloud, there is no Chrome of yours to use, so every profile uses the built-in browser.");
     expect(html).not.toContain("act inside your real Chrome");
     expect(html).toContain("Signed-in sites");
   });
@@ -95,10 +91,10 @@ describe("browser profile manager", () => {
   it("lists the bot's own browser's sites, shared by nobody, and none for a temporary browser", () => {
     fixture.bots = [{ ...bot, browserProfile: undefined }];
     const own = renderToStaticMarkup(createElement(BrowserProfilesManager, { bot: fixture.bots[0] }));
-    expect(own.match(/Signed-in sites/g)).toHaveLength(2); // the bot's own, and the Work profile's
+    expect(own.match(/Signed-in sites/g)).toHaveLength(2);
     expect(own).not.toContain("share this browser");
     fixture.bots = [{ ...bot, browserProfile: "guest" }];
     const guest = renderToStaticMarkup(createElement(BrowserProfilesManager, { bot: fixture.bots[0] }));
-    expect(guest.match(/Signed-in sites/g)).toHaveLength(1); // only the Work profile's
+    expect(guest.match(/Signed-in sites/g)).toHaveLength(1);
   });
 });

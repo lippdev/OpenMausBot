@@ -219,7 +219,6 @@ describe("independent bot threads", () => {
     expect(state.bots[0]?.messages).toEqual([replacement]);
     expect(state.bots[0]?.activeLeafId).toBe(replacement.id);
     expect(state.bots[0]?.awaitingThreadSnapshot).toBe(false);
-    // A delayed HTTP duplicate must not undo a later server patch.
     const edited = { ...replacement, text: "Newer state" };
     state = reducer(state, { type: "messagePatched", threadId: "second", message: edited });
     state = reducer(state, { type: "botPatched", bot: response });
@@ -260,7 +259,6 @@ describe("independent bot threads", () => {
     expect(state.bots[0]).toMatchObject({ threadId: replacement.threadId, tasks: [replacement], messages: [], activeLeafId: null, awaitingThreadSnapshot: false });
     expect(state.selectedId).toBe(bot.id);
     expect(state.bots[1]).toBe(otherBot);
-    // A late event for the deleted thread cannot repopulate its replacement.
     expect(reducer(state, { type: "messageAdded", threadId: onlyThread.threadId, message: onlyThread.messages[0]! })).toBe(state);
   });
 
@@ -344,7 +342,6 @@ describe("independent bot threads", () => {
     const unpinned = reducer(autoPinned, { type: "updateTask", botId: bot.id, threadId: "first", patch: { surface: null } });
     expect(unpinned.bots[0]?.tasks?.[0]?.surface).toBeUndefined();
     expect(unpinned.bots[0]?.tasks?.[0]?.surfaceAuto).toBeUndefined();
-    // Any other thread edit leaves the machine's record as it is.
     const listPinned = reducer(autoPinned, { type: "updateTask", botId: bot.id, threadId: "first", patch: { pinned: true } });
     expect(listPinned.bots[0]?.tasks?.[0]).toMatchObject({ surface: "browser", surfaceAuto: true });
   });
@@ -414,8 +411,6 @@ describe("connector grants persistence", () => {
       slack: { tools: "*" },
     };
     await persistBotUpdate("bot-1", { connectorTools: grants }, new AbortController().signal, request);
-    // Exact-set semantics: the wire body is the record verbatim, so a
-    // reload of what the server stored equals what the person picked.
     expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({ connectorTools: grants });
   });
 
@@ -504,7 +499,6 @@ describe("trusted approval-mode persistence", () => {
     await persistBotUpdate("bot-1", { approvalMode: "auto", applyToAllThreads: true }, new AbortController().signal, request, { setMode }, current);
     expect(setMode).toHaveBeenCalledWith("bot-1", "auto", { acknowledgeLocalAuto: false, allThreads: true });
     expect(request).not.toHaveBeenCalled();
-    // The bot's own panel, default only, never needs that channel for it.
     await persistBotUpdate("bot-1", { approvalMode: "auto" }, new AbortController().signal, request, { setMode }, current);
     expect(setMode).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({ approvalMode: "auto" });
@@ -722,7 +716,16 @@ describe("server-authoritative bot deletion", () => {
     await Promise.all([first, second]);
 
     expect(onConfirmed).toHaveBeenCalledTimes(1);
-    expect(onConfirmed).toHaveBeenCalledWith(bot.id);
+    expect(onConfirmed).toHaveBeenCalledWith(bot.id, undefined);
+  });
+
+  it("hands the server's answer on, so a deletion that left something behind can say so", async () => {
+    const onConfirmed = vi.fn();
+    const answer = { ok: true, notice: "Deleted. gone-vps could not be reached." };
+
+    await requestConfirmedBotDeletion(bot.id, async () => answer, onConfirmed);
+
+    expect(onConfirmed).toHaveBeenCalledWith(bot.id, answer);
   });
 
   it("keeps a visible pending marker until deletion settles or fails", () => {
@@ -840,8 +843,6 @@ describe("notification routing", () => {
   });
 
   it("opens the room when the thread is a group's — never a bot task switch that would 404", () => {
-    // room approval/question notifications carry the asker bot with the
-    // GROUP's thread id; the exact destination is the room itself
     const dispatch = vi.fn();
 
     openNotificationTarget(dispatch, { botId: "bot-1", threadId: "room-thread" }, { bots, groups }, true);
@@ -931,8 +932,6 @@ describe("notification routing", () => {
   });
 
   describe("openBot", () => {
-    // This window last opened "routine-report" from its activity row; the
-    // person last wrote in "later-chat", the bot's main thread.
     const bot: Bot = {
       id: "bot-1", threadId: "routine-report", mainThreadId: "later-chat", name: "Scout", title: "", description: "", color: "green",
       notifications: true, unread: true, modelSelection: { instanceId: "test", model: "test" }, messages: [],
@@ -954,17 +953,13 @@ describe("notification routing", () => {
     it("opens the bot's main thread while threads are hidden, the way its row would", () => {
       expect(opened(bot, false)).toEqual([{ type: "switchTask", botId: "bot-1", threadId: "later-chat" }]);
       expect(opened({ ...bot, threadId: "later-chat" }, false)).toEqual([{ type: "select", id: "bot-1" }]);
-      // A main thread this window has no row for yet, or none at all.
       expect(opened({ ...bot, tasks: undefined }, false)).toEqual([{ type: "select", id: "bot-1" }]);
       expect(opened({ ...bot, mainThreadId: undefined }, false)).toEqual([{ type: "select", id: "bot-1" }]);
-      // The switch selects the bot and leaves the thread it came from unread.
       const switched = reducer({ ...initialState, bots: [bot], selectedId: "other", activeView: "routines" }, opened(bot, false)[0] as Action);
       expect(switched).toMatchObject({ selectedId: "bot-1", activeView: "chat" });
       expect(switched.bots[0]!.tasks!.find((task) => task.threadId === "routine-report")!.unread).toBe(true);
     });
 
-    // A reply landed in "routine-report", where this window left the bot;
-    // a notification (or a chip, a link, a button) names another thread.
     const followed = (threadId: string, threadsShown: boolean) => {
       const dispatch = vi.fn();
       openNotificationTarget(dispatch, { botId: "bot-1", threadId }, { bots: [bot], groups: [] }, threadsShown);
@@ -974,11 +969,9 @@ describe("notification routing", () => {
     it("opens a thread a notification names without passing the reply the bot was left on as read, with threads hidden", () => {
       const actions = followed("later-chat", false);
       expect(actions).toEqual([{ type: "switchTask", botId: "bot-1", threadId: "later-chat" }]);
-      // With only an activity row to reach it, the reply stays unread.
       const opened = actions.reduce(reducer, { ...initialState, bots: [bot], selectedId: "other", activeView: "chat" });
       expect(opened).toMatchObject({ selectedId: "bot-1", activeView: "chat" });
       expect(opened.bots[0]!.tasks!.find((task) => task.threadId === "routine-report")!.unread).toBe(true);
-      // The thread it is on opens as it always did.
       expect(followed("routine-report", false)).toEqual([
         { type: "select", id: "bot-1" },
         { type: "switchTask", botId: "bot-1", threadId: "routine-report" },
@@ -1315,7 +1308,6 @@ describe("optimistic sent messages", () => {
       const confirmed = reducer(reconciled, { type: "threadActive", threadId: bot.threadId, activeLeafId: fork.id });
       const reply: Message = { id: "a2", role: "bot", kind: "text", text: "new answer", at: 5, parentId: fork.id };
       const answered = reducer(confirmed, { type: "messageAdded", threadId: bot.threadId, message: reply });
-      // the POST response for the same fork arrives last and must not rewind
       const late = reducer(answered, { type: "messageAdded", threadId: bot.threadId, message: fork });
       expect(visibleMessages(late.bots[0]!).map((message) => message.text)).toEqual(["Ready", "second try", "new answer"]);
       expect(late.bots[0]?.messages.some((message) => message.id.startsWith("optimistic-"))).toBe(false);
@@ -1550,6 +1542,24 @@ describe("computer destination announcements", () => {
   });
 });
 
+describe("VPS alias announcements", () => {
+  it.each(["botPatched", "taskSwitched", "botPatchedSwitch"] as const)("clears the bot's own server when the frame omits it via %s", (kind) => {
+    const bot: Bot = {
+      id: "vps-bot", threadId: "vps-thread", name: "Ziggy", title: "", description: "",
+      notifications: true, color: "green", unread: false,
+      modelSelection: { instanceId: "codex", model: "default" }, vpsAlias: "alpha-vps",
+      messages: [{ id: "message", role: "user", kind: "text", at: 1, text: "Keep this conversation" }],
+    };
+    const { vpsAlias: _oldAlias, ...announcement } = bot;
+    const next = reducer({ ...initialState, bots: [bot] }, {
+      type: kind === "taskSwitched" ? "taskSwitched" : "botPatched",
+      bot: { ...announcement, threadId: kind === "botPatchedSwitch" ? "replacement-thread" : bot.threadId },
+    });
+    expect(next.bots[0]?.vpsAlias).toBeUndefined();
+    expect(next.bots[0]?.messages).toEqual(bot.messages);
+  });
+});
+
 describe("tool selection announcements", () => {
   it.each(["botPatched", "taskSwitched", "botPatchedSwitch"] as const)("clears the saved restriction when the server returns to all tools via %s", kind => {
     const bot: Bot = { id: "scoped", threadId: "old", name: "Scope fixture", title: "", description: "",
@@ -1564,6 +1574,21 @@ describe("tool selection announcements", () => {
   });
 });
 
+describe("team access announcements", () => {
+  it.each(["botPatched", "taskSwitched", "botPatchedSwitch"] as const)("clears additional teams after a demote via %s", kind => {
+    const bot: Bot = { id: "chief", threadId: "old", name: "Chief fixture", title: "", description: "",
+      notifications: false, color: "green", unread: false, modelSelection: { instanceId: "pi", model: "local" },
+      chiefOfStaff: true, managedSections: ["Research", ""], messages: [] };
+    const { managedSections: _sections, ...demoted } = { ...bot, chiefOfStaff: false };
+    const next = reducer({ ...initialState, bots: [bot] }, {
+      type: kind === "taskSwitched" ? "taskSwitched" : "botPatched",
+      bot: { ...demoted, threadId: kind === "botPatchedSwitch" ? "new" : bot.threadId },
+    });
+    expect(next.bots[0]?.chiefOfStaff).toBe(false);
+    expect(next.bots[0]?.managedSections).toBeUndefined();
+  });
+});
+
 describe("teammate wait announcements", () => {
   const waiting: Bot = {
     id: "wait-bot", threadId: "wait-thread", name: "Scooter", title: "", description: "",
@@ -1571,7 +1596,6 @@ describe("teammate wait announcements", () => {
     modelSelection: { instanceId: "codex", model: "default" }, busy: true, activity: "working", waitingForTeammates: true,
     messages: [{ id: "message", role: "user", kind: "text", at: 1, text: "Keep this conversation" }],
   };
-  // The existing wire explicitly clears the coordination wait on settlement.
   it.each(["botPatched", "taskSwitched", "botPatchedSwitch"] as const)("clears the wait when a working frame reports settlement via %s", (kind) => {
     const announcement = { ...waiting, waitingForTeammates: false };
     const next = reducer({ ...initialState, bots: [waiting] }, {
@@ -2015,7 +2039,6 @@ describe("scrollback pages", () => {
       type: "olderMessages",
       threadId: "thread-1",
       generation: loading.transcriptGeneration["thread-1"] ?? 0,
-      // m3 overlaps the page this client already holds
       messages: [message("m1", 1), message("m2", 2), message("m3", 3)],
       hasMore: false,
     });
@@ -2029,7 +2052,6 @@ describe("scrollback pages", () => {
     const loading = reducer({ ...initialState, bots: [withLeaf] }, { type: "loadOlderMessages", threadId: "thread-1" });
     const generation = loading.transcriptGeneration["thread-1"] ?? 0;
 
-    // an edit rewinds the visible branch while the page is on the wire
     const rewound = reducer(loading, { type: "threadActive", threadId: "thread-1", activeLeafId: "m3" });
     expect(rewound.transcriptGeneration["thread-1"]).not.toBe(generation);
 
@@ -2066,14 +2088,12 @@ describe("scrollback pages", () => {
 
   it("keeps the open transcript's scrollback answer when a bot frame does not switch it", () => {
     const open = { ...bot, tasks: [{ threadId: "thread-1", title: "Long", createdAt: 1 }] } as never as Bot;
-    // Another client opened thread-2; its frame carries thread-2's page.
     const opened = reducer({ ...initialState, bots: [open] }, {
       type: "botPatched",
       bot: { ...open, threadId: "thread-2", tasks: [{ threadId: "thread-2", title: "New", createdAt: 2 }, ...open.tasks!], messages: [], hasMore: false } as never,
     });
     expect(opened.bots[0]).toMatchObject({ threadId: "thread-1", hasMore: true });
     expect(opened.bots[0].messages.map((m) => m.id)).toEqual(["m3", "m4"]);
-    // A reply with this thread's newest page leaves the scrollback already loaded.
     const loaded = { ...initialState, bots: [{ ...open, hasMore: false }] };
     const replied = reducer(loaded, { type: "botPatched", bot: { ...open, messages: [message("m4", 4)], hasMore: true } as never });
     expect(replied.bots[0].messages.map((m) => m.id)).toEqual(["m3", "m4"]);
@@ -2094,13 +2114,11 @@ describe("scrollback pages", () => {
       hasMore: true,
     } as never as Group;
     const withRoom = { ...initialState, groups: [group] };
-    // a frame that carries the whole thread and no page marker IS the thread
     const complete = reducer(withRoom, {
       type: "groupPatched",
       group: { id: "room", threadId: "room-thread", messages: [message("m8", 8), message("m9", 9)] } as never as Group,
     });
     expect(complete.groups[0].hasMore).toBe(false);
-    // a patch with no transcript leaves the answer alone
     const renamed = reducer(withRoom, { type: "groupPatched", group: { id: "room", name: "Renamed" } });
     expect(renamed.groups[0].hasMore).toBe(true);
   });
@@ -2128,14 +2146,108 @@ describe("messageAdded leaf adoption", () => {
   });
 
   it("keeps the leaf when a late artifact is chain-inserted mid-branch", () => {
-    // the settle-time screenshot arrives parented to m1 while m2 is the leaf
     const next = reducer(state, {
       type: "messageAdded",
       threadId: "thread-1",
       message: { id: "shot", at: 3, parentId: "m1", role: "bot", kind: "screen", png: "x" } as never as Message,
     });
-    expect(next.bots[0].activeLeafId).toBe("m2"); // the user's message stays the tail
+    expect(next.bots[0].activeLeafId).toBe("m2");
     expect(next.bots[0].messages.map((m) => m.id)).toContain("shot");
+  });
+});
+
+describe("thread ordering stamps", () => {
+  it.each(["bot", "group"] as const)("restores overlapping %s sends in every failure order", owner => {
+    const orders = [[0, 1], [1, 0], [0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+    const clock = vi.spyOn(Date, "now");
+    try {
+      for (const order of orders) {
+        const task = { threadId: "first", createdAt: 1, lastThreadOrderAt: 25 };
+        const bot = { id: "b", threadId: "first", messages: [], hasMore: true, tasks: [task] } as never as Bot;
+        const group = { id: "g", threadId: "first", createdAt: 1, messages: [], hasMore: true, tasks: [task] } as never as Group;
+        let state = { ...initialState, bots: owner === "bot" ? [bot] : [], groups: owner === "group" ? [group] : [] };
+        for (let i = 0; i < order.length; i++) {
+          clock.mockReturnValue(100 + i * 10);
+          state = reducer(state, owner === "bot"
+            ? { type: "send", botId: "b", text: "Pending", sendId: String(i) }
+            : { type: "sendGroup", groupId: "g", text: "Pending", sendId: String(i) });
+        }
+        for (const i of order) state = reducer(state, { type: "optimisticMessageRemoved", threadId: "first", sendId: String(i) });
+        const result = owner === "bot" ? state.bots[0] : state.groups[0];
+        expect(result.messages, `${owner}: ${order}`).toEqual([]);
+        expect(result.tasks?.[0]?.lastThreadOrderAt, `${owner}: ${order}`).toBe(25);
+      }
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each(["accepted-send", "completed-reply"] as const)("retains %s while another optimistic send rolls back", event => {
+    const bot = { id: "b", threadId: "first", messages: [], hasMore: true, tasks: [
+      { threadId: "first", createdAt: 1, lastThreadOrderAt: 25 },
+    ] } as never as Bot;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(100);
+    try {
+      let state = reducer({ ...initialState, bots: [bot] }, { type: "send", botId: "b", text: "First", sendId: "first" });
+      clock.mockReturnValue(110);
+      state = reducer(state, { type: "send", botId: "b", text: "Second", sendId: "second" });
+      const message: Message = event === "accepted-send"
+        ? { id: "accepted", at: 120, role: "user", kind: "text", sendId: "first", parentId: null }
+        : { id: "reply", at: 80, role: "bot", kind: "text", turnId: "turn", turnTerminal: true, turnCompletedAt: 120 };
+      state = reducer(state, { type: "messageAdded", threadId: "first", message });
+      state = reducer(state, { type: "optimisticMessageRemoved", threadId: "first", sendId: "first" });
+      state = reducer(state, { type: "optimisticMessageRemoved", threadId: "first", sendId: "second" });
+      expect(state.bots[0].messages.map(row => row.id)).toEqual([message.id]);
+      expect(state.bots[0].tasks?.[0]?.lastThreadOrderAt).toBe(120);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+  it.each(["first", "second"])("orders terminal completion in active and background threads: %s", threadId => {
+    const bot = { id: "b", threadId: "first", messages: [], tasks: [
+      { threadId: "first", createdAt: 1, lastThreadOrderAt: 25 },
+      { threadId: "second", createdAt: 2, lastThreadOrderAt: 5 },
+    ] } as never as Bot;
+    const message = { id: "reply", at: 20, role: "bot", kind: "text", turnId: "turn", turnTerminal: true, turnCompletedAt: 30 } as Message;
+    const state = reducer({ ...initialState, bots: [bot] }, { type: "messagePatched", threadId, message });
+    expect(state.bots[0].tasks?.find(task => task.threadId === threadId)?.lastThreadOrderAt).toBe(30);
+  });
+
+  it.each([false, true])("restores unloaded ordering history and retains newer loaded events: %s", laterReply => {
+    const bot = { id: "b", threadId: "first", messages: [], hasMore: true, tasks: [
+      { threadId: "first", createdAt: 1, lastThreadOrderAt: 25 },
+    ] } as never as Bot;
+    let state = reducer({ ...initialState, bots: [bot] }, { type: "send", botId: "b", text: "Pending", sendId: "send" });
+    if (laterReply) state = reducer(state, { type: "messageAdded", threadId: "first", message: { id: "reply", at: Date.now() + 10, role: "bot", kind: "text" } });
+    const expected = laterReply ? state.bots[0].messages.at(-1)!.at : 25;
+    state = reducer(state, { type: "optimisticMessageRemoved", threadId: "first", sendId: "send" });
+    expect(state.bots[0].tasks?.[0]?.lastThreadOrderAt).toBe(expected);
+  });
+
+  it("restores a channel stamp when rollback history is incomplete", () => {
+    const group = { id: "g", threadId: "room", createdAt: 1, messages: [], hasMore: true,
+      tasks: [{ threadId: "room", createdAt: 1, lastThreadOrderAt: 25 }] } as never as Group;
+    let state = reducer({ ...initialState, groups: [group] }, { type: "sendGroup", groupId: "g", text: "Pending", sendId: "send" });
+    state = reducer(state, { type: "optimisticMessageRemoved", threadId: "room", sendId: "send" });
+    expect(state.groups[0].tasks?.[0]?.lastThreadOrderAt).toBe(25);
+  });
+
+  it("leaves running activity in place, then moves completed replies and person messages", () => {
+    const bot = { id: "b", threadId: "first", messages: [], tasks: [
+      { threadId: "first", createdAt: 1, lastThreadOrderAt: 10 },
+      { threadId: "second", createdAt: 2, lastThreadOrderAt: 5 },
+    ] } as never as Bot;
+    let state = { ...initialState, bots: [bot] };
+    const add = (message: Message) => { state = reducer(state, { type: "messageAdded", threadId: "second", message }); };
+    add({ id: "reply", at: 20, role: "bot", kind: "text", text: "Working", turnId: "turn-1" });
+    add({ id: "peer", at: 21, role: "user", kind: "text", text: "Peer", peerAsk: { botId: "p", name: "Peer" } });
+    expect(state.bots[0].tasks?.[1]?.lastThreadOrderAt).toBe(5);
+    state = reducer(state, { type: "messagePatched", threadId: "second", message: { id: "reply", at: 20, role: "bot", kind: "text", text: "Done", turnId: "turn-1", turnTerminal: true } });
+    expect(state.bots[0].tasks?.[1]?.lastThreadOrderAt).toBe(20);
+    add({ id: "person", at: 22, role: "user", kind: "text", text: "Hello" });
+    expect(state.bots[0].tasks?.[1]?.lastThreadOrderAt).toBe(22);
+    state = reducer(state, { type: "hydrate", bots: [bot], groups: [], computerControl: {} });
+    expect(state.bots[0].tasks?.[1]?.lastThreadOrderAt).toBe(22);
   });
 });
 
@@ -2195,7 +2307,6 @@ describe("bot settings section", () => {
       open: true,
     });
     expect(next.botSettingsSection).toBe("soul");
-    // Bare reopen (mascot) must not auto-expand a leftover section.
     expect(next.botSettingsExpandAccordion).toBe(false);
   });
 
@@ -2232,7 +2343,6 @@ describe("bot settings section", () => {
     expect(next.selectedId).toBe(other.id);
     expect(next.activeView).toBe("team-map");
     expect(next.settingsOpen).toBe(true);
-    // the switch retargets the panel but keeps the section pointer
     expect(next.botSettingsSection).toBe("soul");
     expect(next.botSettingsExpandAccordion).toBe(false);
 
@@ -2265,7 +2375,6 @@ describe("bot settings section", () => {
   });
 
   it("a fresh bare open with a stored choice expands the remembered section", () => {
-    // the launch init put the stored section and its flag on the state
     const stored = { ...initialState, botSettingsSection: "model" as const, botSettingsSectionStored: true };
     const next = reducer(stored, { type: "toggleSettings", open: true });
     expect(next.settingsOpen).toBe(true);
@@ -2275,8 +2384,6 @@ describe("bot settings section", () => {
   });
 
   it("a bare open while the panel is open collapses the rail", () => {
-    // the search box and the re-click on the open row, whether the row was
-    // remembered-expanded or deep-linked
     const remembered = {
       ...initialState,
       settingsOpen: true,
@@ -2323,8 +2430,6 @@ describe("bot settings section", () => {
   });
 
   it("selecting a different bot or room keeps the section pointer", () => {
-    // The panel remounts per bot (App keys it by bot id), so everything the
-    // expansion rides on must survive a bot or room switch.
     let state = reducer(initialState, {
       type: "botAdded",
       bot: { ...bot, id: "bot-a", threadId: "thread-a" },
@@ -2358,8 +2463,6 @@ describe("bot settings section", () => {
 });
 
 describe("activity panel", () => {
-  // The activity panel is a sibling of the inspector and the computer panel:
-  // one side panel at a time, and any view change closes it.
   it("starts closed", () => {
     expect(initialState.activityOpen).toBe(false);
   });
@@ -2391,6 +2494,15 @@ describe("activity panel", () => {
     const open = { ...initialState, activityOpen: true };
     expect(reducer(open, { type: "showRoutines" }).activityOpen).toBe(false);
     expect(reducer(open, { type: "showTeamMap" }).activityOpen).toBe(false);
+  });
+
+  it("opens Files as its own page, carrying the folders it should offer to share only when asked", () => {
+    const open = { ...initialState, activityOpen: true, appSettingsOpen: true, settingsOpen: true };
+    const suggested = reducer(open, { type: "showFiles", suggest: ["/Users/ada/site"] });
+    expect(suggested).toMatchObject({ activeView: "files", filesSuggest: ["/Users/ada/site"], activityOpen: false, appSettingsOpen: false, settingsOpen: false });
+    expect(reducer(suggested, { type: "showFiles" })).toMatchObject({ activeView: "files", filesSuggest: null });
+    expect(reducer(suggested, { type: "showFiles", suggest: [] }).filesSuggest).toBeNull();
+    expect(reducer(suggested, { type: "showTeamMap" })).toMatchObject({ activeView: "team-map", filesSuggest: null });
   });
 });
 
@@ -2498,8 +2610,6 @@ describe("conversation model variant discoveries", () => {
   const discovery = (variants: ModelVariantState = { options: [{ id: "minimal", label: "Minimal" }], currentValue: "minimal" }, threadId = "first", turnId = "turn-1"): RuntimeEvent =>
     ({ ...base(threadId, turnId), type: "session.model-variants", model: selection.model, variants });
 
-  // The desktop shows a reply once it is finished, so a streamed delta has
-  // nothing to update; only the model-variant fold reads runtime frames.
   it("ignores reply and reasoning deltas but still folds model-variant frames", () => {
     const apply = (state: AppState, event: RuntimeEvent) => {
       const action = runtimeFrameAction(event);
@@ -2595,22 +2705,15 @@ describe("live call state", () => {
     expect(reducer(ended, { type: "liveCall", call: null }).liveCall).toBeNull();
   });
 
-  // GET /api/live/call races the event stream: an answer that left before a
-  // newer live.call frame landed must not put back an older line (a phantom
-  // bar for a call that has ended, or no bar for one that just began).
   it("takes a lookup of the line only if no newer frame landed while it was out", () => {
     const since = initialState.liveCallVersion;
     const framed = reducer(initialState, { type: "liveCall", call });
     expect(reducer(framed, { type: "liveCallLookup", call: null, since, seq: 1 })).toBe(framed);
     const fresh = reducer(framed, { type: "liveCallLookup", call: { ...call, status: "ended", endReason: "idle" }, since: framed.liveCallVersion, seq: 2 });
     expect(fresh.liveCall?.status).toBe("ended");
-    // a lookup is not newer news than the next lookup
     expect(fresh.liveCallVersion).toBe(framed.liveCallVersion);
   });
 
-  // Two snapshots can overlap (a reconnect while the first one is out):
-  // both lookups leave at the same version, and the answers can come back
-  // in either order.
   it("never lets an earlier lookup's answer replace a later one's", () => {
     const since = initialState.liveCallVersion;
     const later = reducer(initialState, { type: "liveCallLookup", call, since, seq: 2 });
@@ -2653,9 +2756,6 @@ describe("restoring the open conversation", () => {
     reducer(state, { type: "hydrate", bots, groups, computerControl: {}, resumeId });
 
   it("hydrate keeps a known live selection", () => {
-    // A snapshot arriving while the app is open never moves the person off
-    // what is on screen - not even for the conversation remembered for the
-    // next launch.
     expect(hydrating({ ...initialState, selectedId: "bot-2" }, "room-1").selectedId).toBe("bot-2");
     expect(hydrating({ ...initialState, selectedId: "room-1" }).selectedId).toBe("room-1");
   });
@@ -2682,8 +2782,7 @@ describe("restoring the open conversation", () => {
   });
 
   describe("the provider's own effect", () => {
-    // The provider opens the app's one stream and pulls the snapshot itself,
-    // so the fixture answers both the way a server would.
+    // The provider opens the one stream and pulls the snapshot itself, so the fixture answers both.
     class FixtureEventSource {
       static opened: FixtureEventSource[] = [];
       onopen: (() => void) | null = null;
@@ -2721,8 +2820,6 @@ describe("restoring the open conversation", () => {
       FixtureEventSource.opened.length = 0;
     });
 
-    /** Mount a provider whose storage starts at `seed` (or is the given
-     * surface) and wait for its initial load effect to open the app's stream. */
     const boot = async (seed: Record<string, string> = {}, storage?: { getItem: (key: string) => string | null; setItem: (key: string, value: string) => void }) => {
       const stored = new Map<string, string>(Object.entries(seed));
       const json = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body)));
@@ -2747,7 +2844,6 @@ describe("restoring the open conversation", () => {
       flushSync(() => root!.render(createElement(StoreProvider, null, createElement(Probe))));
       await settle();
       const [stream] = FixtureEventSource.opened;
-      // the provider mounted: its effects ran, with nothing selected yet
       expect(FixtureEventSource.opened).toHaveLength(1);
       expect(seen.selectedId).toBe("");
       return { stored, stream };
@@ -2757,17 +2853,13 @@ describe("restoring the open conversation", () => {
     it("the provider remembers each non-empty selection and never an empty one", async () => {
       const { stored, stream } = await boot();
 
-      // the empty selection at mount must not overwrite what the next launch
-      // is meant to restore
       expect(stored.has(LAST_CONVERSATION_KEY)).toBe(false);
 
-      // the first snapshot lands the first bot, which is what gets remembered
       stream.send(hello());
       await settle();
       expect(seen.selectedId).toBe("bot-1");
       expect(stored.get(LAST_CONVERSATION_KEY)).toBe("bot-1");
 
-      // every selection after it replaces the remembered conversation
       flushSync(() => dispatch({ type: "select", id: "bot-2" }));
       await settle();
       expect(seen.selectedId).toBe("bot-2");
@@ -2815,29 +2907,24 @@ describe("restoring the open conversation", () => {
       const { stored, stream } = await boot({ [LAST_BOT_SECTION_KEY]: "model" });
       stream.send(hello());
       await settle();
-      // the launch init adopted the stored section without writing it back
       expect(seen.botSettingsSection).toBe("model");
       expect(seen.botSettingsSectionStored).toBe(true);
       expect(stored.get(LAST_BOT_SECTION_KEY)).toBe("model");
 
-      // a remembered bare open expands the row and keeps the choice
       flushSync(() => dispatch({ type: "toggleSettings", open: true }));
       await settle();
       expect(seen.botSettingsExpandRemembered).toBe(true);
       expect(stored.get(LAST_BOT_SECTION_KEY)).toBe("model");
 
-      // a bare open while the panel is open collapses the rail and writes nothing
       flushSync(() => dispatch({ type: "toggleSettings", open: true }));
       await settle();
       expect(seen.botSettingsExpandAccordion).toBe(false);
       expect(stored.get(LAST_BOT_SECTION_KEY)).toBe("model");
 
-      // a rail click (a section with the accordion flag) writes that section
       flushSync(() => dispatch({ type: "toggleSettings", open: true, section: "usage" }));
       await settle();
       expect(stored.get(LAST_BOT_SECTION_KEY)).toBe("usage");
 
-      // closing never writes; the last viewed section stays the next launch's
       flushSync(() => dispatch({ type: "toggleSettings", open: false }));
       await settle();
       expect(stored.get(LAST_BOT_SECTION_KEY)).toBe("usage");
@@ -2848,12 +2935,10 @@ describe("restoring the open conversation", () => {
       stream.send(hello());
       await settle();
 
-      // a rail click on Overview writes it like any other section
       flushSync(() => dispatch({ type: "toggleSettings", open: true, section: "overview" }));
       await settle();
       expect(stored.get(LAST_BOT_SECTION_KEY)).toBe("overview");
 
-      // the next bare open expands the remembered Overview row
       flushSync(() => dispatch({ type: "toggleSettings", open: false }));
       await settle();
       flushSync(() => dispatch({ type: "toggleSettings", open: true }));
@@ -2878,7 +2963,6 @@ describe("restoring the open conversation", () => {
       expect(seen.botSettingsSectionStored).toBe(false);
       expect(seen.botSettingsExpandRemembered).toBe(false);
 
-      // a bare open behaves as nothing stored: the rail stays collapsed
       flushSync(() => dispatch({ type: "toggleSettings", open: true }));
       await settle();
       expect(seen.settingsOpen).toBe(true);
@@ -2886,5 +2970,149 @@ describe("restoring the open conversation", () => {
       expect(seen.botSettingsExpandAccordion).toBe(false);
       expect(seen.botSettingsExpandRemembered).toBe(false);
     });
+  });
+});
+
+describe("notifications feed", () => {
+  const entry = (id: string, at: number) => ({
+    id, at, kind: "done" as const, botId: "b1", botName: "Scout", threadId: "t1", title: `${id} finished`, body: "", read: false,
+  });
+
+  it("hydrates, then grows on each push without duplicating a replayed id", () => {
+    let state = reducer(initialState, { type: "notificationsHydrated", notifications: [entry("n1", 1)] });
+    expect(state.notifications.map((n) => n.id)).toEqual(["n1"]);
+    state = reducer(state, { type: "notificationReceived", entry: entry("n2", 2) });
+    expect(state.notifications.map((n) => n.id)).toEqual(["n2", "n1"]);
+    // the same frame replayed (a resumed SSE stream) must not duplicate the row
+    state = reducer(state, { type: "notificationReceived", entry: entry("n2", 2) });
+    expect(state.notifications.map((n) => n.id)).toEqual(["n2", "n1"]);
+  });
+
+  it("hydration keeps a live entry that arrived while the request was in flight, newest first", () => {
+    let state = reducer(initialState, { type: "notificationReceived", entry: entry("live", 5) });
+    state = reducer(state, { type: "notificationsHydrated", notifications: [entry("n2", 2), entry("n1", 1)] });
+    expect(state.notifications.map((n) => n.id)).toEqual(["live", "n2", "n1"]);
+  });
+
+  it("hydration takes the server's copy for an id both sides have (a failed mark-read resyncs to unread)", () => {
+    let state = reducer(initialState, { type: "notificationsHydrated", notifications: [entry("n1", 1)] });
+    state = reducer(state, { type: "notificationRead", id: "n1" });
+    state = reducer(state, { type: "notificationsHydrated", notifications: [entry("n1", 1)] });
+    expect(state.notifications[0].read).toBe(false);
+  });
+
+  it("showRoutines closes the feed so its rail is reachable again", () => {
+    const open = reducer(initialState, { type: "toggleNotifications", open: true });
+    expect(reducer(open, { type: "showRoutines" }).notificationsOpen).toBe(false);
+  });
+
+  it("marks one or all read without touching the rest", () => {
+    let state = reducer(initialState, {
+      type: "notificationsHydrated",
+      notifications: [entry("n1", 1), entry("n2", 2)],
+    });
+    state = reducer(state, { type: "notificationRead", id: "n1" });
+    expect(state.notifications.find((n) => n.id === "n1")?.read).toBe(true);
+    expect(state.notifications.find((n) => n.id === "n2")?.read).toBe(false);
+    state = reducer(state, { type: "notificationsMarkAllRead" });
+    expect(state.notifications.every((n) => n.read)).toBe(true);
+  });
+
+  it("marks the entries a conversation read elsewhere, and only those", () => {
+    let state = reducer(initialState, {
+      type: "notificationsHydrated",
+      notifications: [entry("n1", 1), entry("n2", 2), entry("n3", 3)],
+    });
+    state = reducer(state, { type: "notificationsRead", ids: ["n1", "n3", "gone"] });
+    expect(state.notifications.filter((n) => n.read).map((n) => n.id)).toEqual(["n3", "n1"]);
+  });
+
+  it("toggleNotifications closes the other docked panels, and vice versa", () => {
+    let state = reducer(initialState, { type: "toggleComputer", open: true });
+    expect(state.computerOpen).toBe(true);
+    state = reducer(state, { type: "toggleNotifications", open: true });
+    expect(state).toMatchObject({ notificationsOpen: true, computerOpen: false });
+    state = reducer(state, { type: "toggleActivity", open: true });
+    expect(state).toMatchObject({ activityOpen: true, notificationsOpen: false });
+  });
+
+  it("toggleNotificationsPinned flips independently of notificationsOpen", () => {
+    const state = reducer(initialState, { type: "toggleNotificationsPinned" });
+    expect(state).toMatchObject({ notificationsPinned: true, notificationsOpen: false });
+  });
+
+  it("survives a bot switch: select/switchTask never reset it", () => {
+    const withOpen = reducer(initialState, { type: "toggleNotifications", open: true });
+    const afterSwitch = reducer(withOpen, { type: "switchTask", botId: "other-bot", threadId: "other-thread" });
+    expect(afterSwitch.notificationsOpen).toBe(true);
+  });
+
+  it("pinned, the feed survives Computer/Inspector/Activity/AppSettings opening", () => {
+    const open = { ...reducer(initialState, { type: "toggleNotifications", open: true }), notificationsPinned: true };
+    for (const action of [
+      { type: "toggleComputer", open: true } as const,
+      { type: "toggleInspector", open: true } as const,
+      { type: "toggleActivity", open: true } as const,
+      { type: "toggleAppSettings", open: true } as const,
+    ]) {
+      expect(reducer(open, action).notificationsOpen).toBe(true);
+    }
+  });
+
+  it("unpinned, the same four still close it exactly as before (regression guard)", () => {
+    const open = reducer(initialState, { type: "toggleNotifications", open: true });
+    expect(open.notificationsPinned).toBe(false);
+    for (const action of [
+      { type: "toggleComputer", open: true } as const,
+      { type: "toggleInspector", open: true } as const,
+      { type: "toggleActivity", open: true } as const,
+      { type: "toggleAppSettings", open: true } as const,
+    ]) {
+      expect(reducer(open, action).notificationsOpen).toBe(false);
+    }
+  });
+});
+
+describe("a routine's answer and its broadcast", () => {
+  it("applies whichever arrives first and never steps back to an older edit", () => {
+    const routine = { id: "r1", name: "Daily", prompt: "Summarize", target: "bot", botId: "b1", runOn: "maus", enabled: true,
+      schedule: { type: "daily", time: "09:00", weekdays: [1] }, durationMinutes: 30, nextRunAt: 5, createdAt: 1, updatedAt: 10 } as AppState["routines"][number];
+    const paused = { ...routine, enabled: false, nextRunAt: null, updatedAt: 11 };
+    const resumed = { ...routine, updatedAt: 12 };
+    let state = reducer({ ...initialState, routines: [routine] }, { type: "routinePatched", routine: paused });
+    state = reducer(state, { type: "routinePatched", routine: resumed });
+    state = reducer(state, { type: "routinePatched", routine: paused });
+    expect(state.routines).toEqual([resumed]);
+    expect(reducer(state, { type: "routinePatched", routine: { ...resumed, failureStreak: 1 } }).routines[0]).toMatchObject({ failureStreak: 1 });
+  });
+});
+
+describe("fleet order from the server", () => {
+  const bot = (id: string): Bot => ({
+    id,
+    threadId: `${id}-thread`,
+    name: id,
+    title: "",
+    description: "",
+    notifications: false,
+    color: "green",
+    unread: false,
+    modelSelection: { instanceId: "acp", model: "fake" },
+    messages: [],
+  });
+  const hydrated = reducer(initialState, { type: "hydrate", bots: [bot("a"), bot("b"), bot("c"), bot("d")], groups: [], computerControl: {} });
+  const ids = (state: AppState) => state.bots.map((candidate) => candidate.id);
+
+  it("applies a bots.order frame as a stable partial reorder", () => {
+    expect(ids(reducer(hydrated, { type: "botsOrdered", botIds: ["d", "c", "b", "a"] }))).toEqual(["d", "c", "b", "a"]);
+    // Only c and a move, into the positions they already share; b and d stay put.
+    const partial = reducer(hydrated, { type: "botsOrdered", botIds: ["c", "a"] });
+    expect(ids(partial)).toEqual(["c", "b", "a", "d"]);
+    expect(partial.bots[0]).toBe(hydrated.bots[2]);
+  });
+
+  it("ignores ids it does not know and leaves an unchanged order alone", () => {
+    expect(ids(reducer(hydrated, { type: "botsOrdered", botIds: ["ghost", "b", "a"] }))).toEqual(["b", "a", "c", "d"]);
+    expect(reducer(hydrated, { type: "botsOrdered", botIds: ["a", "b", "c", "d"] })).toBe(hydrated);
   });
 });

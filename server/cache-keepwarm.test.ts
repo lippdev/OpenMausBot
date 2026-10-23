@@ -21,7 +21,6 @@ const T: KeepWarmTarget = { threadId: "t1", botId: "b1", instanceId: "claude" };
 const WARM: KeepWarmPingResult = { ok: true, input: 4, cacheRead: 154_000, cacheWrite: 30, output: 2, costUsd: 0.05, model: "claude-opus-5-5" };
 const BIG = { ok: true, contextTokens: 200_000 };
 
-/** A manual clock and every dependency as a recorded fake. */
 function harness(overrides: Partial<KeepWarmDeps> = {}) {
   let now = 1_000_000;
   let timers: Array<{ at: number; fn: () => void; live: boolean }> = [];
@@ -54,7 +53,6 @@ function harness(overrides: Partial<KeepWarmDeps> = {}) {
   };
   const keepWarm = createCacheKeepWarm(deps);
   const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
-  /** Moves the clock, firing each due timer in order. */
   const advance = async (ms: number) => {
     const end = now + ms;
     for (;;) {
@@ -107,7 +105,6 @@ describe("cache keep-warm", () => {
       h.keepWarm.noteTurnCompleted(T, BIG);
       await h.advance(3 * 60 * MIN);
       expect(h.pings).toHaveLength(1);
-      // the cold ping was paid for, so it is booked
       expect(h.booked).toHaveLength(1);
       expect(h.keepWarm.status("t1")).toMatchObject({ state: "stopped", stopped: expect.stringContaining("the cache was already gone") });
       expect(h.holds.at(-1)).toBeNull();
@@ -153,7 +150,6 @@ describe("cache keep-warm", () => {
     expect(h.aborted()).toBe(true);
     expect(h.keepWarm.status("t1")).toEqual({ state: "warm", until: expect.any(Number) });
     await h.settle(WARM);
-    // the ping that ran is booked; the turn decides what comes next
     expect(h.booked).toHaveLength(1);
     await h.advance(2 * 60 * MIN);
     expect(h.pings).toHaveLength(1);
@@ -217,7 +213,6 @@ describe("cache keep-warm", () => {
     await h.advance(3 * 60 * MIN);
     expect(h.pings).toEqual([]);
     expect(h.liveTimers()).toBe(0);
-    // a disposed keep-warm arms nothing new
     h.keepWarm.noteTurnCompleted(T, BIG);
     expect(h.liveTimers()).toBe(0);
   });

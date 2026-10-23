@@ -64,7 +64,6 @@ describe("what a failed request keeps", () => {
     expect(collapsePath("/invite/ada%40example.com")).toBe("/invite/#");
     expect(collapsePath("/files/9f86d081884c7d659a2feaa0c55ad015")).toBe("/files/#");
     expect(collapsePath("/reset/eyJhbGciOiJIUzI1NiJ9xYz12")).toBe("/reset/#");
-    // Words stay: a slug is a route, not a token.
     expect(collapsePath("/blog/how-to-launch-on-product-hunt-2026")).toBe("/blog/how-to-launch-on-product-hunt-2026");
     expect(collapsePath("/v2/items/42")).toBe("/v2/items/42");
   });
@@ -179,20 +178,15 @@ describe("reading a session's page health", () => {
     lists.errors.push({ text: "TypeError: x\n    at https://www.example.com/app.js:7:81", line: 7, column: 81, url: null },
       { text: "Error: theirs\n    at https://ads.tracker.net/t.js:1:1", line: 1, column: 1, url: null });
     const delta = (await health.read("s", read, "t1"))!;
-    // The evidence keeps everything new...
     expect(delta.requests.map((entry) => entry.path)).toEqual(["/v1/signup", "/logo.png", "/t.js"]);
     expect(delta.console).toEqual([{ level: "error", text: "boom" }]);
     expect(delta.errors.map((entry) => entry.firstParty)).toEqual([true, false]);
-    // ...the bot sees its own site's call, its own script's error and the console error.
     const shown = health.visible("s", delta);
     expect(shown.requests.map((entry) => entry.path)).toEqual(["/v1/signup"]);
     expect(shown.errors).toHaveLength(1);
     expect(shown.console).toHaveLength(1);
-    // The same failure again on the same page is not news to the bot.
     expect(health.visible("s", delta)).toEqual({ requests: [], errors: [], console: [] });
-    // A request it already read is not read as new again.
     expect((await health.read("s", read, "t1"))!.requests).toEqual([]);
-    // A new page visit may show it again.
     health.setPage("s", "https://www.example.com/pricing");
     expect(health.visible("s", delta).requests).toHaveLength(1);
   });
@@ -229,7 +223,6 @@ describe("reading a session's page health", () => {
     lists.console.push({ type: "error", text: "Wrong password for ada@example.com" });
     lists.errors.push({ text: "TypeError: during the person's sign-in", line: 1, column: 1, url: null });
     lists.requests.push({ requestId: "p1", url: "https://www.example.com/api/login", method: "POST", status: 401, resourceType: "Fetch" });
-    // A read that fails moves nothing: the person's part is still held back at the next one.
     expect(await health.read("s", async () => null, "t")).toBeNull();
     expect(await health.read("s", read, "t")).toEqual({ requests: [], errors: [], console: [] });
     lists.console.push({ type: "error", text: "the bot's own" });

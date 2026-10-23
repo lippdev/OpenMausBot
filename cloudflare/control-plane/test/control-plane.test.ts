@@ -199,8 +199,7 @@ describe("control-plane migrations and health", () => {
       "provider_account",
       "reclaim_requested_at",
     ]));
-    // The one-row table from 0006 stays (an older Worker still writes it) but
-    // capacity now lives per account.
+    // The one-row table from 0006 stays, since an older Worker still writes it.
     const capacityRows = await env.DB.prepare("SELECT id, scan_page FROM managed_endpoint_capacity")
       .all<{ id: number; scan_page: number }>();
     expect(capacityRows.results).toEqual([{ id: 1, scan_page: 1 }]);
@@ -279,7 +278,7 @@ describe("control-plane migrations and health", () => {
         status: "unknown",
         checkedAt: null,
         tunnels: { used: null, limit: 1000 },
-        dnsRecords: { used: null, limit: 1000 },
+        dnsRecords: { used: null, limit: 3500 },
         providerRejectedAt: null,
         reclaim: { mode: "on", pending: 0 },
       },
@@ -355,11 +354,8 @@ describe("control-plane migrations and health", () => {
       reclaimMode: "observe",
       tunnelLimit: 2500,
     });
-    // Reclaim can never be configured to treat a tunnel offline for less than
-    // a week as idle, and the sweep cannot outgrow its subrequest budget. A bad
-    // value falls back to the default instead of taking sign-in down, and a bad
-    // reclaim mode only observes.
-    expect(readConfig(withVars({ OMB_TUNNEL_OFFLINE_RECLAIM_DAYS: "6" })).capacity.offlineReclaimMs).toBe(21 * 24 * 60 * 60 * 1_000);
+    expect(readConfig(withVars({ OMB_TUNNEL_OFFLINE_RECLAIM_DAYS: "2" })).capacity.offlineReclaimMs).toBe(21 * 24 * 60 * 60 * 1_000);
+    expect(readConfig(withVars({ OMB_TUNNEL_OFFLINE_RECLAIM_DAYS: "3" })).capacity.offlineReclaimMs).toBe(3 * 24 * 60 * 60 * 1_000);
     expect(readConfig(withVars({ OMB_CLEANUP_SWEEP_LIMIT: "51" })).capacity.cleanupSweepLimit).toBe(20);
     expect(readConfig(withVars({ OMB_TUNNEL_LIMIT: "1e3" })).capacity.tunnelLimit).toBe(1000);
     expect(readConfig(withVars({ OMB_TUNNEL_RECLAIM: "yes" })).capacity.reclaimMode).toBe("observe");
@@ -379,6 +375,9 @@ describe("control-plane migrations and health", () => {
       CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
       CLOUDFLARE_ENDPOINT_ACCOUNTS: env.CLOUDFLARE_ENDPOINT_ACCOUNTS,
       CLOUDFLARE_API_TOKEN_MAUSBOT_SI: env.CLOUDFLARE_API_TOKEN_MAUSBOT_SI,
+      HIGHLEVEL_CLIENT_ID: env.HIGHLEVEL_CLIENT_ID,
+      HIGHLEVEL_REDIRECT_URL: env.HIGHLEVEL_REDIRECT_URL,
+      HIGHLEVEL_SCOPES: env.HIGHLEVEL_SCOPES,
       OMB_TUNNEL_LIMIT: env.OMB_TUNNEL_LIMIT,
       OMB_DNS_RECORD_LIMIT: env.OMB_DNS_RECORD_LIMIT,
       OMB_TUNNEL_RECLAIM: env.OMB_TUNNEL_RECLAIM,

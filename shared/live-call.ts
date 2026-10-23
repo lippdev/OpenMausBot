@@ -1,11 +1,6 @@
-// Pure pieces of a Live (GPT-Live) call, kept out of the component so they
-// can be tested without WebRTC.
-//
-// With client delegation GPT-Live says *that* it wants help, never *what*:
-// `session.delegation.created` carries an id and a timeline offset, and the
-// request has to be rebuilt from the input transcript. That reconstruction,
-// and the shaping of the bot's answer into the 500-token appends GPT-Live
-// accepts, live here.
+// Pure pieces of a Live (GPT-Live) call. With client delegation GPT-Live says
+// *that* it wants help, never *what*: `session.delegation.created` carries an id
+// and a timeline offset, so the request is rebuilt from the input transcript.
 
 export interface TranscriptSegment {
   text: string;

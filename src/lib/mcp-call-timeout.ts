@@ -1,5 +1,3 @@
-/** What the server uses while `mcp.callTimeoutMinutes` is unset — and all a
- * server older than the setting can do (server/config.ts). */
 export const DEFAULT_MCP_CALL_TIMEOUT_MINUTES = 10;
 export const MIN_MCP_CALL_TIMEOUT_MINUTES = 1;
 export const MAX_MCP_CALL_TIMEOUT_MINUTES = 60;
@@ -19,10 +17,6 @@ export function parseMcpCallTimeoutMinutes(value: string): McpCallTimeoutInput {
   return { ok: true, minutes };
 }
 
-/** The per-call ceiling a server's config reports. A server older than the
- * setting sends no `mcp` section at all (and a remote server or Cloud can be
- * older than this app), so every read goes through here, never
- * `config.mcp.callTimeoutMinutes` directly. */
 export function mcpCallTimeoutMinutes(config: { mcp?: { callTimeoutMinutes?: number } } | null | undefined): number {
   return config?.mcp?.callTimeoutMinutes ?? DEFAULT_MCP_CALL_TIMEOUT_MINUTES;
 }

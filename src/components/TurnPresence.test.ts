@@ -1,6 +1,4 @@
 // @vitest-environment happy-dom
-// The presence line rotates gently through a phase's phrases, starts over
-// when the bot moves to a new step, and crossfades in place.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -95,6 +93,36 @@ describe("TurnPresence phrases", () => {
     const markup = renderToStaticMarkup(createElement(TurnPresence, { avatar: null, visible: true, label: "Running a command", since: 1 }));
     expect(markup).toContain("Running a command");
     expect(markup).toContain("thinking-shimmer");
+  });
+});
+
+describe("the status line", () => {
+  const line = () => {
+    const shown = host.querySelector("[data-turn-status]")?.cloneNode(true) as HTMLElement | undefined;
+    shown?.querySelectorAll(".turn-phrase-out").forEach((node) => node.remove());
+    return shown?.textContent?.replace(/\s+/g, " ").trim();
+  };
+
+  it("reads Working, the time, what is happening now and how much is written", () => {
+    vi.setSystemTime(100_000);
+    render({ label: "Working", since: 28_000, phrases: ["Writing index.html"], phase: "live:w", size: "14 KB" });
+    expect(line()).toBe("Working · 1m 12s · Writing index.html · 14 KB");
+    expect(visibleText(), "the live part shimmers, the lead does not").toEqual(["Writing index.html"]);
+  });
+
+  it("is the lead and the timer alone when nothing is reported, and the lead shimmers", () => {
+    vi.setSystemTime(100_000);
+    render({ label: "Working", since: 88_000 });
+    expect(line()).toBe("Working · 12s");
+    expect(visibleText()).toEqual(["Working"]);
+    expect(host.querySelector("[data-turn-size]")).toBeNull();
+  });
+
+  it("fades the first phrase in from nothing, never from the lead", () => {
+    render({ label: "Working", since: null });
+    render({ label: "Working", since: null, phrases: ["Thinking"], phase: "think" });
+    expect(host.querySelector(".turn-phrase-out")).toBeNull();
+    expect(line()).toBe("Working · Thinking");
   });
 });
 

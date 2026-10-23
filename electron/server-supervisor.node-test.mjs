@@ -298,11 +298,9 @@ test("forgetting a remote environment keeps its sign-out confirmation and answer
 });
 
 test("forgetting a local environment whose folder the server child uses is refused with {error:active}", async () => {
-  // The window may show a remote server while the child still runs on this
-  // folder (A → remote R); activeId alone is not the folder in use.
+  // The window may show a remote server while the child still runs on this folder: activeId alone is not the folder in use.
   const { calls, context } = runForget({ environments: [LOCAL_FIXTURE], activeId: "r-remote" });
-  // Resolved like the guard resolves the entry's dir, so the comparison holds
-  // on Windows too (path.resolve turns the POSIX fixture into a drive path).
+  // Resolved like the guard resolves the entry's dir, so the comparison holds on Windows too.
   context.runningDataDir = path.resolve(LOCAL_FIXTURE.dataDir);
   assert.deepEqual(plain(await context.forgetEnvironment("l1", true)), { ok: false, error: "active" });
   assert.deepEqual(calls.rm, []);
@@ -370,8 +368,7 @@ function switchFixture(t, { startResults = [], releaseLeaseThrows = false, stopU
 }
 
 test("a failed switch with no live child reforks the active environment once and adopts it", async (t) => {
-  // releaseLease throws: the orchestrator rejects before any rollback, so
-  // without the safety net nothing would be serving this environment again.
+  // releaseLease throws, so the orchestrator rejects before any rollback: only the safety net serves this environment again.
   const { context, forks, targetDir } = switchFixture(t, { releaseLeaseThrows: true });
   const result = await context.switchLocalEnvironmentTo(targetDir, "l1");
   assert.deepEqual(plain(result), { ok: false, error: "switch-failed" });
@@ -380,8 +377,6 @@ test("a failed switch with no live child reforks the active environment once and
 });
 
 test("a failed switch whose rollback restored a child does not re-fork", async (t) => {
-  // startChild fails, rollback restarts the old environment: one fork for the
-  // attempt, one for the rollback, none for the safety net.
   const { context, forks, targetDir } = switchFixture(t, { startResults: [{ proc: null }, { proc: { pid: 55 } }] });
   const result = await context.switchLocalEnvironmentTo(targetDir, "l1");
   assert.deepEqual(plain(result), { ok: false, error: "switch-failed" });
@@ -406,7 +401,7 @@ test("a child that will not stop aborts the switch before its lease is handed aw
 });
 
 test("boot reads the environment decision before the boot lease and never creates the missing dir", () => {
-  const boot = MAIN_SOURCE.slice(MAIN_SOURCE.indexOf("environmentsState = readEnvironments();"), MAIN_SOURCE.indexOf("app.setAsDefaultProtocolClient"));
+  const boot = MAIN_SOURCE.slice(MAIN_SOURCE.indexOf("environmentsState = environmentsStore.read();"), MAIN_SOURCE.indexOf("app.setAsDefaultProtocolClient"));
   const decision = boot.indexOf("bootEnvironmentDir(");
   const lease = boot.indexOf("acquireDataDirLease(");
   assert.ok(decision > 0 && decision < lease, "the missing-dir decision must precede the boot lease");

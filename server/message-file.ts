@@ -1,7 +1,5 @@
-// A bot may link to a file it created in the workspace for one conversation.
-// Opening that link from a phone must not become a general-purpose host file
-// reader: the HTTP route supplies only roots derived from the exact bot
-// message, and this helper keeps the eventual file handle inside one of them.
+// A message file link must never become a general-purpose host file reader: every handle stays inside a root
+// derived from the exact bot message.
 import { constants } from "node:fs";
 import { lstat, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
@@ -23,7 +21,6 @@ export interface OpenedMessageFile {
 export function messageFileRoots(options: {
   senderWorkspace: string;
   attachments: string;
-  /** undefined = not pinned yet; null = explicitly pinned to no host root. */
   pinnedCwd: string | null | undefined;
   configuredCwd?: string;
 }): string[] {
@@ -39,16 +36,11 @@ function statusError(status: number, message: string, code?: string): Error & { 
   return Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
 }
 
-// The client offers "Show in folder" for exactly this refusal, so it carries a
-// stable code instead of being recognised by its English text.
 const outsideWorkspace = () =>
   statusError(403, "the linked file is outside this conversation's workspace", "outside_workspace");
 
 function decodePathWithSuffixRemoved(href: string): string {
-  // Split before decoding so an encoded `?` or `#` remains part of the
-  // filename, while a real Markdown query/fragment never reaches the file
-  // lookup. Decode exactly once so authorization and opening see the same
-  // path without making double-encoded input more privileged.
+  // Split before decoding, and decode exactly once, so authorization and opening see the same path.
   const path = href.split(/[?#]/, 1)[0]!;
   if (!path) throw statusError(400, "path must be a non-empty file link");
   try {
@@ -66,15 +58,11 @@ function referencedPath(
   if (!href || Buffer.byteLength(href) > 8_192 || href.includes("\0")) {
     throw statusError(400, "path must be a non-empty file link");
   }
-  // A Windows drive prefix is a path, not a one-letter URL scheme. UNC is
-  // also already an absolute local path on Windows and must not be mistaken
-  // for a protocol-relative web URL.
+  // A Windows drive prefix or a UNC path is a local path, not a URL scheme or a protocol-relative URL.
   if (/^[a-z]:[\\/]/i.test(href) || href.startsWith("\\\\")) {
     return decodePathWithSuffixRemoved(href);
   }
-  // In Markdown, //host/path is a protocol-relative web URL. It is accepted
-  // only as the normalized request spelling of an explicit file:// UNC link,
-  // never as the authored capability itself.
+  // In Markdown //host/path is a web URL: accepted only as the request spelling of an explicit file:// UNC link.
   if (href.startsWith("//")) {
     if (!allowForwardSlashUNC) {
       throw statusError(400, "protocol-relative web links are not local files");
@@ -107,22 +95,16 @@ function referencedPath(
     }
     try {
       const decoded = decodeURIComponent(url.pathname);
-      // WHATWG file URLs always spell drive paths as /C:/..., even when the
-      // URL is parsed on macOS or Linux. Strip only that drive sentinel; an
-      // ordinary /Users/... URL must remain a POSIX path on every host.
+      // WHATWG file URLs spell drive paths /C:/... on every host; strip only that sentinel.
       return /^\/[a-z]:[\\/]/i.test(decoded) ? decoded.slice(1) : decoded;
     } catch {
       throw statusError(400, "path must be a valid file link");
     }
   }
 
-  // Query strings and fragments belong to the Markdown link, not the local
-  // filename. Percent-encoding is common for spaces in relative hrefs.
   return decodePathWithSuffixRemoved(href);
 }
 
-/** The file name a rendered link or image names, as attach_file records a
- * delivery's name; null when the target is not a local file link. */
 export function referencedFileName(href: string): string | null {
   try {
     return referencedPath(href, true).split(/[\\/]/).at(-1) || null;
@@ -131,14 +113,7 @@ export function referencedFileName(href: string): string | null {
   }
 }
 
-/**
- * A lexical path identity used only for matching a requested file against a
- * rendered Markdown link. Native `resolve` and `fileURLToPath` follow the
- * runner OS, which makes a Unix link compare differently on Windows CI and a
- * Windows link compare differently on macOS. Keeping the path flavour in the
- * identity also prevents a POSIX path such as `/C:/notes.md` from being
- * mistaken for the Windows path `C:\\notes.md`.
- */
+/** Lexical on purpose: `resolve` and `fileURLToPath` follow the runner OS, and `/C:/notes.md` is not `C:\\notes.md`. */
 function referencedPathIdentity(href: string, allowForwardSlashUNC = true): string {
   const path = referencedPath(href, true, allowForwardSlashUNC);
   if (/^[a-z]:[\\/]/i.test(path) || path.startsWith("\\\\") || path.startsWith("//")) {
@@ -194,19 +169,13 @@ function renderedMarkdownTargets(markdown: string): string[] {
   return links;
 }
 
-/** The local files a message links to, as written: its rendered Markdown
- * link and image targets that are not web, mail or in-page links. Each is
- * still only readable through the message's own grant (the file route). */
 export function messageFileTargets(text: string): string[] {
   return [...new Set(renderedMarkdownTargets(text))].filter((target) =>
     !target.startsWith("#") && !target.startsWith("//") &&
     (/^[a-z]:[\\/]/i.test(target) || /^file:/i.test(target) || !/^[a-z][a-z\d+.-]*:/i.test(target)));
 }
 
-/** Resolve the local image authored at one Markdown source offset. The
- * browser can use this small message-scoped reference instead of putting an
- * absolute host path in a GET URL. Definitions are collected first because
- * CommonMark permits them to appear after the image reference. */
+/** Definitions are collected first: CommonMark lets them follow the reference. */
 export function messageImageTargetAt(text: string, sourceOffset: number): string | null {
   if (!Number.isSafeInteger(sourceOffset) || sourceOffset < 0) return null;
   const definitions = new Map<string, string>();
@@ -226,13 +195,7 @@ export function messageImageTargetAt(text: string, sourceOffset: number): string
   return direct ?? (reference ? definitions.get(reference) ?? null : null);
 }
 
-/**
- * Confirm that the requested path is carried by this message, tolerating the
- * one representation change native URL APIs make for us: a file href with
- * percent-encoded spaces arrives from iOS as a decoded filesystem path.
- * Normalisation is applied only to rendered Markdown link targets, never to
- * arbitrary prose in the message.
- */
+/** iOS delivers a percent-encoded file href as a decoded path; only rendered link targets are normalised, never prose. */
 export function messageReferencesFile(text: string, requested: string): boolean {
   let wanted: string;
   try {
@@ -245,15 +208,12 @@ export function messageReferencesFile(text: string, requested: string): boolean 
     try {
       if (referencedPathIdentity(target, false) === wanted) return true;
     } catch {
-      // A malformed candidate is not the link the client asked to open.
     }
   }
   return false;
 }
 
-/** Decode exactly the entity spellings the composer writes into an
- * attachment tag. A single pass is intentional: double-encoded input stays
- * encoded and must not turn into a path only while it is being authorised. */
+/** A single pass on purpose: double-encoded input stays encoded and must not become a path while being authorised. */
 export function decodeAttachmentAttribute(value: string): string {
   return value.replace(
     /&(quot|lt|gt|amp);|&#(9|10|13);/g,
@@ -282,8 +242,7 @@ function utf8Prefix(value: string, maximumBytes: number): string {
   return result;
 }
 
-/** Keep the eventual native filename below common 255-byte component limits.
- * 180 bytes leaves room for the app's temporary-file suffix. */
+/** Below common 255-byte name limits, with room for the app's temporary-file suffix. */
 function boundedDisplayName(value: string, maximumBytes = 180): string {
   if (Buffer.byteLength(value) <= maximumBytes) return value;
   const extension = extname(value);
@@ -308,13 +267,7 @@ function safeDisplayName(value: string): string {
   return boundedDisplayName(clean || "download");
 }
 
-/**
- * The user-facing name of the requested attachment when a stored user
- * message carries it as an exact standalone transport tag, else null. Plain
- * prose, inline examples, fenced code, and near-matching paths do not grant
- * access. The HTTP route pairs this message capability with ATTACHMENTS_DIR
- * containment, so this can never become an arbitrary host-file reader.
- */
+/** Only an exact standalone transport tag grants access; prose, examples, code and near-matches never do. */
 export function messageAttachmentName(text: string, requested: string): string | null {
   let wanted: string;
   try {
@@ -344,7 +297,6 @@ export function messageAttachmentName(text: string, requested: string): string |
           : decodeAttachmentAttribute(match[1]!));
       }
     } catch {
-      // A malformed transport tag grants no capability.
     }
   });
   return found;
@@ -394,13 +346,7 @@ export function mimeFor(path: string): string {
   }
 }
 
-/**
- * Open a message-linked file under one of the supplied roots. The returned
- * handle, not the pathname, is what the caller streams. We canonicalise both
- * before and after opening and compare the handle with the post-open path;
- * this rejects symlink escapes and directory swaps instead of checking a
- * path and then opening a potentially different file.
- */
+/** Canonicalised before and after opening, and the handle compared with the post-open path, to reject symlink escapes and directory swaps. */
 export async function openMessageFile(href: string, roots: readonly string[]): Promise<OpenedMessageFile> {
   const requested = referencedPath(href);
   const canonicalRoots = (await Promise.all(roots.map(async (root) => {
@@ -466,18 +412,10 @@ export async function openMessageFile(href: string, roots: readonly string[]): P
   throw statusError(404, "the linked file is unavailable");
 }
 
-/** Filesystems such as HFS+ and FAT keep whole or even seconds, so a file
- * written in the first moments of a turn can carry a slightly earlier time. */
+/** HFS+ and FAT keep whole or even seconds, so a file written early in a turn can carry a slightly earlier time. */
 const SAVED_SINCE_SLACK_MS = 2_000;
 
-/**
- * Open one file a turn saved outside every root, for a bot to deliver by copy
- * (server/bot-attachment.ts). This grants no folder and is never used for a
- * message link: only an absolute path to a regular file last written at or
- * after `since`, outside hidden folders and outside `refuse`. The open itself
- * is openMessageFile with the file's own folder as the root, so the realpath,
- * O_NOFOLLOW, regular file and size checks are exactly the ones above.
- */
+/** Grants no folder and is never used for a message link. */
 export async function openFileSavedSince(
   href: string,
   options: { since: number; refuse: readonly string[] },
@@ -522,18 +460,11 @@ export interface MessageFolderListing {
   truncated: boolean;
 }
 
-/**
- * List the regular files directly inside a message-linked folder, under the
- * same roots and canonical containment as openMessageFile. Subfolders,
- * sockets and any entry that resolves outside the root are left out. Each
- * entry is then opened by name through openMessageFile, which re-checks it.
- */
 export async function listMessageFolder(href: string, roots: readonly string[]): Promise<MessageFolderListing> {
   const { path: _path, ...listing } = await readMessageFolder(href, roots);
   return listing;
 }
 
-/** Open one file of a listed folder by its plain name, with every file check. */
 export async function openMessageFolderEntry(
   href: string,
   entry: string,
@@ -607,14 +538,12 @@ async function readMessageFolder(
   throw statusError(404, "the linked folder is unavailable");
 }
 
-/** One plain file name inside a listed folder; never a path or a dot entry. */
 export function messageFolderEntryName(value: unknown): string | null {
   if (typeof value !== "string" || !value || value.length > 255) return null;
   if (value === "." || value === ".." || /[\\/\0]/.test(value)) return null;
   return value;
 }
 
-/** A safe attachment header with a readable ASCII fallback and UTF-8 name. */
 export function messageFileDisposition(name: string): string {
   const safeName = safeDisplayName(name);
   const fallback = safeName
@@ -628,8 +557,7 @@ export function messageFileDisposition(name: string): string {
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-/** Keep a friendly transport name without allowing it to disguise the bytes'
- * canonical extension (for example PDF bytes named setup.exe). */
+/** A transport name must not disguise the bytes' canonical extension (PDF bytes named setup.exe). */
 export function messageFileDownloadName(displayName: string | undefined, canonicalName: string): string {
   const canonical = safeDisplayName(canonicalName);
   if (!displayName) return canonical;

@@ -1,9 +1,4 @@
-// A small MCP client for servers OpenMausBot does not start itself: the
-// current streamable HTTP transport and the older SSE one. It runs the
-// Test button (prove the handshake, list the tools) and the stdio proxy
-// (mcp-remote-proxy.ts) every engine except Claude Code reaches these
-// servers through, so a bot's turn opens the connection with the same
-// minimal handshake Test proved. It never logs a header value.
+// This client never logs a header value.
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
@@ -15,7 +10,6 @@ export type McpHttpFailure = "network" | "status" | "protocol";
 export class McpHttpError extends Error {
   readonly kind: McpHttpFailure;
   readonly status: number | undefined;
-  /** The server's `WWW-Authenticate` challenge on a 401: where to sign in. */
   readonly wwwAuthenticate: string | undefined;
 
   constructor(kind: McpHttpFailure, message: string, status?: number, wwwAuthenticate?: string) {
@@ -27,10 +21,6 @@ export class McpHttpError extends Error {
   }
 }
 
-/** The server answered the request with a JSON-RPC error object: its own
- * code (when it gave a whole number) and its own words. Unlike the other
- * protocol failures these are the server's reply, which a caller may relay
- * to the engine once it has removed anything secret. */
 export class McpRpcError extends McpHttpError {
   readonly code: number | undefined;
   readonly detail: string;
@@ -43,22 +33,13 @@ export class McpRpcError extends McpHttpError {
   }
 }
 
-/** Bytes of one response (or one SSE stream) this client reads, for the
- * Test button and for the stdio proxy alike. Whop's official server answers
- * tools/list with 425 tools in 1.2 MB of JSON, its largest single tool alone
- * ~51 KB, so a 1 MB cap refused it outright. Still bounded: a server that
- * keeps talking cannot fill memory. */
+/** Whop's official server lists 425 tools in 1.2 MB of JSON (one tool ~51 KB), so a 1 MB cap refused it. */
 export const MAX_REMOTE_MCP_BYTES = 32 * 1024 * 1024;
 const PROTOCOL_VERSION = "2025-06-18";
 
-/** How long a URL server may take to initialize and list its tools, over
- * the internet: the Test button's budget, and a searched server's at a bot's
- * startup. Command servers start on this computer and keep 8 s. */
 export const REMOTE_MCP_STARTUP_MS = 30_000;
 
-/** The private environment record one remote-proxy mount reads its settings
- * from, when several mounts share one environment (Codex): only this name
- * reaches argv, never the address or a header value. */
+/** Only this name reaches argv, never the address or a header value. */
 export const REMOTE_MCP_CONFIG_ENV = /^OMB_REMOTE_MCP_CONFIG_[a-f0-9]{64}$/;
 
 interface JsonRpcMessage {
@@ -111,7 +92,6 @@ function parseMessage(text: string): JsonRpcMessage | JsonRpcMessage[] | null {
   }
 }
 
-/** One SSE event: its type (default "message") and joined data lines. */
 interface SseEvent {
   event: string;
   data: string;
@@ -132,8 +112,6 @@ function parseSseBlock(block: string): SseEvent | null {
   return data.length ? { event, data: data.join("\n") } : null;
 }
 
-/** Read an event stream until the handler says stop, the server ends it,
- * or the signal fires. Bounded, so a chatty server cannot fill memory. */
 async function readSse(
   response: Response,
   signal: AbortSignal,
@@ -201,7 +179,6 @@ export class RemoteMcpClient {
   private protocolVersion: string | null = null;
   private nextId = 1;
   private closed = false;
-  /** Legacy SSE: one long GET stream carries every response. */
   private readonly pending = new Map<number, Pending>();
   private sseEndpoint: Promise<string> | null = null;
   private readonly sseAbort = new AbortController();
@@ -213,13 +190,26 @@ export class RemoteMcpClient {
     this.onNotification = options.onNotification;
   }
 
-  /** The MCP handshake: initialize, then the initialized notification. */
-  async initialize(clientName: string, signal: AbortSignal): Promise<unknown> {
-    const result = await this.request("initialize", {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: clientName, version: "1" },
-    }, signal);
+  extensions: "ok" | "refused" | undefined;
+
+  /** A strict server refuses an initialize field it does not know (HTTP 400 or a JSON-RPC error), so a
+   * refused handshake with `extensions` is sent once more without them. */
+  async initialize(clientName: string, signal: AbortSignal, options: { extensions?: Record<string, unknown> } = {}): Promise<unknown> {
+    const params = { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: clientName, version: "1" } };
+    let result: unknown;
+    if (options.extensions && Object.keys(options.extensions).length) {
+      try {
+        result = await this.request("initialize", { ...params, capabilities: { extensions: options.extensions } }, signal);
+        this.extensions = "ok";
+      } catch (error) {
+        if (signal.aborted || !(error instanceof McpRpcError || (error instanceof McpHttpError && error.status === 400))) throw error;
+        this.sessionId = null;
+        this.extensions = "refused";
+        result = await this.request("initialize", params, signal);
+      }
+    } else {
+      result = await this.request("initialize", params, signal);
+    }
     if (isRecord(result) && typeof result.protocolVersion === "string") this.protocolVersion = result.protocolVersion;
     await this.notify("notifications/initialized", undefined, signal);
     return result;
@@ -255,8 +245,7 @@ export class RemoteMcpClient {
     this.sseAbort.abort();
     for (const entry of this.pending.values()) entry.reject(new McpHttpError("network", "client closed"));
     this.pending.clear();
-    // Streamable HTTP: tell the server its session is over. Best effort —
-    // many servers answer 405 here, and a probe has nothing left to lose.
+    // Streamable HTTP: end the session. Many servers answer 405 here.
     if (this.sessionId && this.target.type !== "sse") {
       try {
         const headers = this.headers();
@@ -264,7 +253,6 @@ export class RemoteMcpClient {
         const response = await this.fetchImpl(this.target.url, { method: "DELETE", headers, signal: AbortSignal.timeout(2_000) });
         drain(response);
       } catch {
-        // the session lapses on its own
       }
     }
   }
@@ -297,8 +285,6 @@ export class RemoteMcpClient {
     return response;
   }
 
-  // ── streamable HTTP: each request is one POST; the answer is JSON or a
-  //    short event stream that carries the response among server messages ──
   private async streamableRequest(id: number, frame: unknown, signal: AbortSignal): Promise<unknown> {
     const response = await this.post(this.target.url, frame, signal);
     const type = (response.headers.get("content-type") ?? "").toLowerCase();
@@ -328,8 +314,6 @@ export class RemoteMcpClient {
     throw new McpHttpError("protocol", "unexpected content type");
   }
 
-  // ── legacy SSE: a GET opens the stream, its first event names where to
-  //    POST, and every response comes back over the stream ──
   private openSseStream(signal: AbortSignal): Promise<string> {
     if (this.sseEndpoint) return this.sseEndpoint;
     this.sseEndpoint = new Promise<string>((resolveEndpoint, rejectEndpoint) => {
@@ -344,8 +328,7 @@ export class RemoteMcpClient {
       };
       const headers = this.headers();
       headers.set("accept", "text/event-stream");
-      // the caller's signal covers the opening; once open, the stream lives
-      // until close(), because later requests are answered on it
+      // The caller's signal covers only the opening: later requests are answered on this stream.
       const opening = AbortSignal.any([signal, this.sseAbort.signal]);
       this.fetchImpl(this.target.url, { method: "GET", headers, signal: opening })
         .then(async (response) => {
@@ -420,11 +403,7 @@ export class RemoteMcpClient {
     });
   }
 
-  /** Server messages that are not this client's responses: notifications
-   * go to the caller; a ping is answered, as every MCP party must; any other
-   * request (elicitation, sampling, roots…) is refused at once, since this
-   * client offers none of them. Left unanswered, a server waiting on one
-   * holds its own reply until the call times out. */
+  /** Every MCP party must answer ping; other server requests are refused at once, or the server holds its reply until timeout. */
   private deliverNotifications(parsed: JsonRpcMessage | JsonRpcMessage[] | null): void {
     for (const message of Array.isArray(parsed) ? parsed : parsed ? [parsed] : []) {
       if (typeof message.method !== "string") continue;
@@ -442,27 +421,17 @@ export class RemoteMcpClient {
       if (this.target.type === "sse") await this.ssePost(frame, AbortSignal.timeout(10_000));
       else drain(await this.post(this.target.url, frame, AbortSignal.timeout(10_000)));
     } catch {
-      // the server's own timeout ends what it was waiting for
     }
   }
 }
 
-// ── plain http:// through the person's HTTP_PROXY ──
-// Node's own env-proxy mode is kept off for an http:// server (Node 24's
-// fetch hangs on a plain request sent through it; mcp-gate-config.ts), yet
-// an internal http:// server may be reachable only through that proxy, as
-// it was for an engine's own client. So such a request is sent to the proxy
-// itself, in absolute form, the way curl and the engines do. https:// stays
-// with fetch and its CONNECT tunnel.
+// Node 24's fetch hangs on plain http:// through its env proxy, so such a request goes to HTTP_PROXY in absolute form, as curl does.
 
-/** Hosts never sent through a proxy: this computer. */
 function isLoopback(host: string): boolean {
   return host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
 }
 
-/** Whether NO_PROXY (curl's rules: a name matches itself and its
- * subdomains, a leading dot or `*.` is ignored, `*` matches everything, an
- * optional port must match) or loopback keeps `target` off the proxy. */
+/** NO_PROXY by curl's rules: a name matches itself and subdomains, a leading dot or `*.` is ignored, `*` matches all, a port must match. */
 export function bypassesProxy(target: URL, noProxy: string): boolean {
   const host = target.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (isLoopback(host)) return true;
@@ -481,9 +450,6 @@ export function bypassesProxy(target: URL, noProxy: string): boolean {
   return false;
 }
 
-/** A fetch that sends plain http:// requests through `env`'s HTTP proxy
- * (http_proxy, then HTTP_PROXY) unless NO_PROXY or loopback exempts them;
- * everything else goes to `fallback`. Undefined when no HTTP proxy is set. */
 export function plainHttpProxyFetch(env: Record<string, string | undefined>, fallback: typeof fetch = fetch): typeof fetch | undefined {
   const configured = env.http_proxy || env.HTTP_PROXY;
   if (!configured) return undefined;

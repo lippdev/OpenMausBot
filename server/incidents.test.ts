@@ -1,4 +1,3 @@
-// Who hears about a broken run, how often, and in what words.
 import { describe, expect, it } from "vitest";
 
 import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentRequest, incidentText, type Incident } from "./incidents.ts";
@@ -35,7 +34,6 @@ describe("IncidentLedger", () => {
     expect(seen.map((entry) => entry.mayRetry)).toEqual([true, true, false, false, false, false]);
     expect(seen.map((entry) => entry.muted)).toEqual([false, false, false, false, false, true]);
     expect(INCIDENT_RETRY_LIMIT).toBe(2);
-    // another thread is its own count; an hour later the first is fresh again
     expect(ledger.note("t2")).toEqual({ count: 1, mayRetry: true, muted: false });
     now += 61 * 60_000;
     expect(ledger.note("t1")).toEqual({ count: 1, mayRetry: true, muted: false });
@@ -52,7 +50,6 @@ describe("IncidentLedger", () => {
     ledger.note("t1");
     ledger.note("t2");
     expect(ledger.lastAt("t1")).toBe(9_000);
-    // the hour window bounds the count, not this answer
     now += 2 * 60 * 60_000;
     expect(ledger.lastAt("t1")).toBe(9_000);
     ledger.forget("t1");
@@ -63,8 +60,6 @@ describe("IncidentLedger", () => {
 describe("incidentRequest", () => {
   const peerAsk = { botId: "clive", name: "Clive" };
   it("quotes a requester's words, not the note they were delivered under", () => {
-    // the note quotes the person's request too: in 300 characters the brief
-    // the Chief would correct never showed
     const delivered = withPeerProvenance("Reconcile the September invoices.", { botName: "Clive", delivery: "delegate_bot",
       origin: { kind: "user", request: "x".repeat(400) } });
     expect(incidentRequest([{ role: "user", kind: "text", text: delivered, peerAsk }])).toBe("Reconcile the September invoices.");

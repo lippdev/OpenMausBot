@@ -14,11 +14,19 @@ describe("new-bot templates", () => {
   it("stores Full as a plain preference, with no consent field, and creates new bots with it", () => {
     const defaults = newBotDefaultsSchema.parse({ profile: { name: "", approvalMode: "full" } });
     expect(defaults.profile).toEqual({ name: "", approvalMode: "full" });
-    // Bot creation applies the saved Full default as it does any other level.
     expect(resolveBotCreationDefaults(defaults, { name: "Ada" }).profile).toEqual({ name: "Ada", approvalMode: "full" });
     expect(resolveBotCreationDefaults(defaults, { settings: { approvalMode: "ask" } }).profile).toEqual({ approvalMode: "ask" });
     for (const field of ["id", "threadId", "approvalGrant", "acknowledgeLocalAuto", "acknowledgePeerScope", "busy"]) {
       expect(newBotDefaultsSchema.safeParse({ profile: { [field]: true } }).success, field).toBe(false);
+    }
+  });
+
+  it("takes the helper-model switch in the request that creates a bot, as a boolean and nothing else", () => {
+    expect(resolveBotCreationDefaults(undefined, { settings: { helperModel: false } }).profile).toEqual({ helperModel: false });
+    // beside a tool selection, as the sidebar's Duplicate sends them
+    expect(resolveBotCreationDefaults(undefined, { settings: { toolScope: { allow: [] }, helperModel: false } }).profile).toEqual({ toolScope: { allow: [] }, helperModel: false });
+    for (const wrong of ["false", 0, null]) {
+      expect(() => resolveBotCreationDefaults(undefined, { settings: { helperModel: wrong } }), JSON.stringify(wrong)).toThrow();
     }
   });
 

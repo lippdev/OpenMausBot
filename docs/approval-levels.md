@@ -22,7 +22,7 @@ from the operator's dedicated policy.
 | **Ask for approval** | Requests approval for commands and file changes, the way the provider's supervised mode does. |
 | **Auto-accept edits** | Approves file edits automatically; other actions can still require approval. Offered where the provider has such a mode (Claude, Grok, Antigravity). |
 | **Approve for me** | Uses the provider's automatic review on Codex, Claude, Cursor, and Grok to approve routine actions and ask about others. Providers without an equivalent fall back to asking. |
-| **Full access** | Enables the provider's permissive mode for commands, edits, and selected-computer actions, including potentially destructive or sensitive work. Residual native permission prompts are answered for you. OMB profile changes, routine actions, team setup, bot deletion, and enabled skill authoring apply without a second approval. Peer-review prompts are skipped within the bot's authorized scope. Work handed on with `coordinate_bots` uses the receiving bot's setting, never the sender's — except from a Chief of Staff, whose level flows down (below). Actual questions and missing credentials still need your input. |
+| **Full access** | Enables the provider's permissive mode for commands, edits, and selected-computer actions, including potentially destructive or sensitive work. Residual native permission prompts are answered for you. OMB profile changes, routine actions, team setup, bot deletion, and enabled skill authoring apply without a second approval. Peer-review prompts are skipped within the bot's authorized scope. Sends through connected apps (email, messages, posts, payments) go out without the "Send on your behalf?" card or a daily allowance; apps outside the bot's connected-app scope are still refused. Work handed on with `coordinate_bots` uses the receiving bot's setting, never the sender's — except from a Chief of Staff, whose level flows down (below). Actual questions and missing credentials still need your input. |
 | **Custom (`config.toml`)** | Codex only. OpenMausBot reads and reapplies the effective approval and sandbox settings from your Codex configuration. |
 
 Full access applies the moment you pick it: no confirmation dialog, no second
@@ -41,9 +41,9 @@ desktop app, where the choice crosses a private process channel rather than the
 bot-accessible HTTP API, because it holds restrictions you wrote yourself. It
 is hidden in development, standalone web, and remote pages.
 
-A team's sidebar menu has **Set for all bots in this team…**, for the owner
+A department's sidebar menu has **Set for all bots in this department…**, for the owner
 or an admin. It sets one approval level (Ask, Auto-accept edits, Approve for
-me or Full access), or one model and effort, on every bot in that team. It
+me or Full access), or one model and effort, on every bot in that department. It
 lists what each bot will get before anything changes, then saves the bots one
 at a time with the same request and checks as each bot's own settings. A bot
 that is working, or whose engine does not offer the level, model or effort,
@@ -72,9 +72,11 @@ set a level on follows the default, and so does each of its threads without a
 level of its own. Bots and threads that saved Ask before Full access became
 the default keep it: choose Full access in the bot's settings, or **Set for
 all bots in this team…**, to move a bot and every one of its threads at once.
-Ask, Auto, and Custom retain their existing OMB configuration review cards.
-Full actions return an applied result and leave a settled receipt, so the bot
-continues in the same turn. Invalid input, unavailable services, or failed
+OpenMausBot adds no review card of its own at any level: a bot's profile,
+working folder, model, skill, team setup and team memory changes apply at
+once and leave a one-line receipt with Undo, so the bot continues in the same
+turn. Routine requests keep their own rule until Triggers v2 replaces them,
+and on My Cloud a turn a guest or a webhook drove still waits for the owner. Invalid input, unavailable services, or failed
 writes return errors, not a request to approve again. An expired native
 permission request is not turned into another Allow/Deny card.
 
@@ -191,11 +193,19 @@ card for a person. What differs per engine is only how the ask travels:
 
 | Engine family | How an ask travels | Multiple questions at once |
 | --- | --- | --- |
-| Claude Code | Structured round-trip (its own `AskUserQuestion`) | Yes — capped at 4 by the CLI |
-| Codex | Structured round-trip | Yes — up to 6 |
-| Grok Build, Minimax, OpenAI-compatible endpoints | The injected `ask_user` tool | Yes — up to 6 |
-| ACP engines (Cursor, Antigravity, Gemini CLI, Qwen Code, OpenCode, …) | Option-match round-trip on the ACP permission request | One at a time — the request carries one choice set |
-| Pi | Free-text round-trip over `extension_ui_request` | One at a time |
+| Claude Code | Structured round-trip (its own `AskUserQuestion`). In Full access the CLI does not offer that tool, so the model uses the injected `ask_user` tool | Yes — capped at 4 by the CLI, up to 6 with `ask_user` |
+| Codex | Structured round-trip, or an async question that does not stop the turn | Yes — up to 6 |
+| Grok Build | Structured round-trip (its own `ask_user_question`, sent as `_x.ai/ask_user_question`) | Yes — up to 6 |
+| Cursor | Structured round-trip (its own `cursor/ask_question`). Cursor accepts only option ids, so an answer in your own words goes back as a skipped question with your words as the reason | Yes — up to 6 |
+| Grok (API), MiniMax, OpenAI-compatible endpoints | The injected `ask_user` tool | Yes — up to 6 |
+| Other ACP engines (Antigravity, Gemini CLI, Qwen Code, OpenCode, …) | Option-match round-trip on the ACP permission request | One at a time — the request carries one choice set |
+| Pi | The injected `ask_user` tool over `extension_ui_request`; each question is its own card | Up to 6 per call, shown one after another. One pick per question, no multi-select |
+
+Codex can also ask without waiting (its `request_user_input_async` tool).
+The question arrives with the bot's message as the same question card, and
+the turn keeps working. Your answer is steered into that turn while it runs.
+After the turn ends, the answer is sent as your reply, like any question
+answered late.
 
 Older conversations may still hold a question the removed Computer engine
 parsed out of model-authored output rather than a real tool call. Those
@@ -233,7 +243,7 @@ silently substitute unrestricted access when a mode is rejected.
 OpenMausBot's built-in agents MCP server describes its scoped reads with
 explicit read-only, non-destructive, idempotent, closed-world metadata:
 `list_bots`, `list_rooms`, `list_threads`, `assignment_status`,
-`session_search`, `session_read`, `list_routines`, and `skills_list`.
+`session_search`, `session_read`, `list_triggers`, and `skills_list`.
 Session recall still enforces own-bot access and records its existing room
 disclosure audit. These hints do not grant access to another bot's conversations.
 Writes, credential requests, proposals, and third-party tools do not inherit

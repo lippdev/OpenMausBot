@@ -16,8 +16,11 @@ const fixture = vi.hoisted(() => ({
   setShowRunCard: vi.fn(),
   sidebarDensity: "comfortable" as "comfortable" | "compact" | "icons",
   setSidebarDensity: vi.fn(),
+  toolsLayout: "rows" as "rows" | "toolbar",
+  setSidebarToolsLayout: vi.fn(),
   notificationSounds: true,
   setNotificationSounds: vi.fn(),
+  setNotificationFeed: vi.fn(),
   sendKey: "enter" as SendKey,
   setSendKey: vi.fn(),
   colorUserBubbles: false,
@@ -49,10 +52,16 @@ vi.mock("@/lib/sidebar-preferences", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/sidebar-preferences")>(),
   useSidebarDensity: () => fixture.sidebarDensity,
   setSidebarDensity: fixture.setSidebarDensity,
+  useSidebarToolsLayout: () => fixture.toolsLayout,
+  setSidebarToolsLayout: fixture.setSidebarToolsLayout,
 }));
 vi.mock("@/lib/notification-preferences", () => ({
   useNotificationSounds: () => fixture.notificationSounds,
   setNotificationSounds: fixture.setNotificationSounds,
+  useNotificationFeed: () => false,
+  setNotificationFeed: fixture.setNotificationFeed,
+  useFinishedNotifications: () => true,
+  setFinishedNotifications: vi.fn(),
 }));
 vi.mock("@/lib/send-key", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/send-key")>(),
@@ -85,6 +94,7 @@ beforeEach(() => {
   fixture.showThreads = true;
   fixture.showRunCard = true;
   fixture.sidebarDensity = "comfortable";
+  fixture.toolsLayout = "rows";
   fixture.notificationSounds = true;
   fixture.sendKey = "enter";
   fixture.colorUserBubbles = false;
@@ -126,6 +136,19 @@ describe("Settings → Appearance", () => {
 
   it("does not repeat the Advanced mode switch in Appearance on this computer", () => {
     expect(render()).not.toContain('aria-label="Advanced mode"');
+  });
+
+  it.each([true, false])("keeps the app language reachable from a paired remote client (Advanced %s)", (advanced) => {
+    fixture.advancedMode = advanced;
+    vi.stubGlobal("window", { ogb: { remoteClient: { active: true } } });
+    const html = render();
+    expect(html).not.toContain('<option value="general">');
+    expect(html).toContain('aria-label="App language"');
+    expect(html).toContain('<option value="en">English</option>');
+  });
+
+  it("does not repeat the app language in Appearance on this computer", () => {
+    expect(render()).not.toContain('aria-label="App language"');
   });
 
 
@@ -187,6 +210,26 @@ describe("Settings → Appearance", () => {
     expect(fixture.dispatch).not.toHaveBeenCalled();
   });
 
+  it("offers the tools layout row right under the density row", () => {
+    const html = render();
+    expect(html).toContain('aria-label="Choose tools layout"');
+    expect(html).toContain("Tools layout");
+    expect(html).toContain("Icons density always shows icons");
+    expect(html).toContain('<option value="rows" selected="">Rows</option>');
+    expect(html).toContain('<option value="toolbar">Toolbar</option>');
+    expect(html.indexOf('aria-label="Choose sidebar density"')).toBeLessThan(
+      html.indexOf('aria-label="Choose tools layout"'),
+    );
+    expect(fixture.setSidebarToolsLayout).not.toHaveBeenCalled();
+  });
+
+  it("appearance search finds the tools layout row via toolbar", () => {
+    const appearance = SECTIONS.find((entry) => entry.id === "appearance")!;
+    for (const query of ["toolbar", "tools layout", "footer", "routines", "triggers", "team map"]) {
+      expect(sectionMatches(appearance, query)).toBe(true);
+    }
+  });
+
   it.each([
     ["enter", "Enter"],
     ["shift-enter", "Shift+Enter"],
@@ -200,7 +243,6 @@ describe("Settings → Appearance", () => {
     expect(html).toContain("as Japanese input does. Ctrl+Enter sends whichever you choose.");
     expect(html).toContain(`<option value="${sendKey}" selected="">${label}</option>`);
     const options = [...html.matchAll(/<option value="(enter|shift-enter|mod-enter)"[^>]*>([^<]*)</g)].map((match) => [match[1], match[2]]);
-    // only the key, so the closed menu fits its 240px column in every language
     expect(options).toEqual([["enter", "Enter"], ["shift-enter", "Shift+Enter"], ["mod-enter", "Ctrl+Enter"]]);
     expect(fixture.setSendKey).not.toHaveBeenCalled();
     expect(fixture.api).not.toHaveBeenCalled();
@@ -225,6 +267,16 @@ describe("Settings → Appearance", () => {
     }
   });
 
+  it("offers the notification feed in Appearance, off until chosen", () => {
+    const html = render();
+    expect(html).toContain("Notification feed");
+    const toggle = fixture.switches.find((props) => props["aria-label"] === "Show the notification feed")!;
+    expect(toggle.checked).toBe(false);
+    toggle.onClick!({} as never);
+    expect(fixture.setNotificationFeed).toHaveBeenCalledWith(true);
+    expect(fixture.api).not.toHaveBeenCalled();
+  });
+
   it("offers the bot-colored message toggle in Appearance, off until chosen", () => {
     const html = render();
     expect(html).toContain("Color my messages");
@@ -235,6 +287,28 @@ describe("Settings → Appearance", () => {
     toggle.onClick!({} as never);
     expect(fixture.setColorUserBubbles).toHaveBeenCalledWith(true);
     expect(fixture.api).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["standard", "Standard"],
+    ["wide", "Wide"],
+    ["full", "Full width"],
+  ])("shows the saved chat width (%s) alongside message colors", (width, label) => {
+    vi.stubGlobal("localStorage", { getItem: (key: string) => key === "omb-chat-width" ? width : null });
+    const html = render();
+    expect(html).toContain('aria-label="Chat width"');
+    expect(html).toContain(`<option value="${width}" selected="">${label}</option>`);
+    for (const option of ["Standard", "Wide", "Full width"]) expect(html).toContain(`>${option}</option>`);
+    expect(html).toContain("Color my messages");
+    expect(fixture.api).not.toHaveBeenCalled();
+    expect(fixture.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("finds chat width and message colors in Appearance", () => {
+    const appearance = SECTIONS.find((section) => section.id === "appearance")!;
+    for (const query of ["width", "wide", "full width", "bubble", "color"]) {
+      expect(sectionMatches(appearance, query), query).toBe(true);
+    }
   });
 
   it("offers the run card visibility toggle in Appearance", () => {

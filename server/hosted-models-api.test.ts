@@ -1,4 +1,3 @@
-// Real HTTP runtime, owned temporary home, fake native engines, no provider calls.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,8 +69,7 @@ async function restart(grants: Grants) {
       OMB_ENTERPRISE_DIR: layer, OMB_LICENSE_KEY: "fixture-only",
       OMB_ADMIN_URL: "https://admin.example.test", OMB_ADMIN_WORKSPACE: "fixture",
       OMB_PUBLIC_URL: "https://fixture.example.test", OMB_ADMIN_MEMBERSHIP: "portal",
-      // This fixture drives the model policy over loopback; the hosted
-      // loopback default (service trust) is covered in hosted-access.test.ts.
+      // This fixture drives the model policy over loopback; the hosted default (service trust) has its own test.
       OMB_LOOPBACK_TRUST: "owner",
       OMB_HOSTED_MODELS: JSON.stringify(grants), OMB_HOSTED_MODEL_TOKEN: TOKEN,
       OMB_HOSTED_CLAUDE_CLI: join(ROOT, "server/testing/fake-claude-cli.ts"),
@@ -150,8 +148,7 @@ beforeAll(async () => {
   await waitForExit(child, { signal: "SIGTERM" });
   const botsPath = join(fixture.info.dataDir, "bots.json");
   const saved = JSON.parse(readFileSync(botsPath, "utf8")) as SavedBot[];
-  // A prior release copied the bot's model onto every thread and had not run
-  // the one-time cleanup of those copies yet.
+  // A prior release copied the bot's model onto every thread and had not run the one-time cleanup yet.
   rmSync(join(fixture.info.dataDir, "thread-model-copies-cleared"), { force: true });
   for (const bot of saved) for (const task of bot.tasks) {
     task.modelSelection ??= structuredClone(bot.modelSelection);
@@ -328,7 +325,6 @@ describe("hosted model policy in the full runtime", () => {
       expect(result.status, JSON.stringify(result.body)).toBe(200);
       const after = JSON.parse(readFileSync(botPath, "utf8")) as SavedBot[];
       const task = after.find(row => row.id === bot.id)!.tasks[0];
-      // The thread follows the bot onto its new model: it keeps none of its own.
       expect(task.modelSelection).toBeUndefined();
       expect(after.find(row => row.id === bot.id)!.modelSelection).toEqual(modelSelection);
       expect(task.resumeCursors).toEqual({});

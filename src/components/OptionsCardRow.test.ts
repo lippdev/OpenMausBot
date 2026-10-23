@@ -1,5 +1,3 @@
-// The `options` row moved out of ChatView as it was: the same three cards,
-// and no row at all for a first-run quiz the person has talked past.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";

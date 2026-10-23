@@ -2,9 +2,7 @@ import { describe, expect, it } from "vitest";
 import { autoVerdict } from "./auto-approve.ts";
 import { createRoomTurnLevels } from "./room-turn-level.ts";
 
-// An ACP engine (Antigravity, Gemini) leaves every permission request to the
-// app, with `execute` mapped to the "shell" tool. The verdict must follow the
-// level the room turn was sent with, not the bot's own.
+// An ACP engine (Antigravity, Gemini) leaves every permission request to the app, with `execute` mapped to "shell".
 const own = () => "ask" as const;
 
 describe("room turn level", () => {

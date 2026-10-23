@@ -1,5 +1,3 @@
-// Double-click a title to rename it in place. Settings still exists for
-// the rest of the profile — this is just the fast path for the name.
 import { useEffect, useState } from "react";
 import { t } from "@/lib/i18n";
 import { Pencil } from "lucide-react";
@@ -21,12 +19,9 @@ export function RenameTitle({
   value: string;
   onCommit: (next: string) => void;
   onEditingChange?: (editing: boolean) => void;
-  /** Optional single-click action for locations where the title opens a profile. */
   onActivate?: () => void;
-  /** Preserve deliberate inline rename beside an onActivate title. */
   showEditButton?: boolean;
   className?: string;
-  /** Resizes the pencil where 40px is too big (inside a pill). */
   editButtonClassName?: string;
   inputClassName?: string;
 }) {

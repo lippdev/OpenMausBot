@@ -10,7 +10,6 @@ describe("RoomMemberLock", () => {
     expect(lock.holder("scout")).toBe("thread-a");
     expect(lock.heldElsewhere("scout", "thread-b")).toBe(true);
     expect(lock.heldElsewhere("scout", "thread-a")).toBe(false);
-    // other bots are independent
     expect(lock.claim("pixel", "thread-b")).toBe(true);
   });
 

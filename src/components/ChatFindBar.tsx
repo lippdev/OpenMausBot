@@ -64,10 +64,8 @@ export function ChatFindBar({ threadId, onClose }: { threadId: string; onClose: 
     land((index + delta + hits.length) % hits.length);
   };
 
-  // Jump to the first match as soon as a new result set arrives.
   useEffect(() => {
     if (hits[0]) land(0);
-    // `land` intentionally reads the state that produced this result set.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hits]);
 

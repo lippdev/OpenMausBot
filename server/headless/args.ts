@@ -1,7 +1,3 @@
-// The headless verbs' command line: which verbs exist, the flags each takes,
-// durations and sizes, exit codes, and the one error type every verb throws.
-// Parsing only: nothing here touches the network or the filesystem, so the
-// whole grammar is unit-tested (args.test.ts).
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 /** What the process exits with. Scripts and CI branch on these. */
@@ -16,7 +12,6 @@ export const EXIT = {
   interrupted: 130,
 } as const;
 
-/** A verb's refusal or failure: what went wrong, what to do, and the exit code. */
 export class HeadlessError extends Error {
   readonly exitCode: number;
   readonly hint?: string;
@@ -58,7 +53,6 @@ const WAITING = {
   strict: { type: "boolean" },
 } satisfies ParseArgsOptionsConfig;
 
-/** Every verb, its flags, and the most positionals it takes. */
 const VERBS: Record<string, { options: ParseArgsOptionsConfig; positionals: number }> = {
   doctor: { options: { wait: { type: "string" } }, positionals: 0 },
   bots: { options: {}, positionals: 0 },
@@ -113,7 +107,6 @@ const VERBS: Record<string, { options: ParseArgsOptionsConfig; positionals: numb
   mcp: { options: {}, positionals: 0 },
 };
 
-/** The verbs of the published `openmausbot` command that drive a running workspace. */
 export const HEADLESS_VERBS: ReadonlySet<string> = new Set(Object.keys(VERBS).map((verb) => verb.split(" ")[0]!));
 
 /** Verbs that change something; control-omb refuses them on a discovered server. */
@@ -124,13 +117,12 @@ export const MUTATING_VERBS: ReadonlySet<string> = new Set([
 export type Flags = Record<string, string | boolean | string[] | undefined>;
 
 export interface ParsedCommand {
-  /** The verb, with its action for team and engine ("team apply"). */
   verb: string;
   flags: Flags;
   positionals: string[];
 }
 
-/** One verb's command line, strictly: an unknown flag or a missing value is a usage error (exit 2). */
+/** Strict: an unknown flag or a missing value is a usage error (exit 2). */
 export function parseCommand(argv: readonly string[]): ParsedCommand {
   const [head, ...rest] = argv;
   if (!head) throw usageError("name a verb", "run openmausbot help");
@@ -166,7 +158,6 @@ export const flag = (flags: Flags, name: string): string | undefined => {
   return typeof value === "string" ? value : undefined;
 };
 
-/** A required flag, trimmed. */
 export function requiredFlag(flags: Flags, name: string): string {
   const value = flag(flags, name)?.trim();
   if (!value) throw usageError(`--${name} is required`);
@@ -202,7 +193,6 @@ export function parseSize(raw: string, name: string): number {
   return bytes;
 }
 
-/** A whole number within bounds, or the fallback when absent. */
 export function parseCount(raw: string | undefined, name: string, fallback: number, max: number, min = 1): number {
   if (raw === undefined) return fallback;
   const value = Number(raw);
@@ -210,7 +200,6 @@ export function parseCount(raw: string | undefined, name: string, fallback: numb
   return value;
 }
 
-/** One of a closed set of words, or the fallback when absent. */
 export function oneOf<T extends string>(raw: string | undefined, name: string, allowed: readonly T[], fallback: T): T {
   if (raw === undefined) return fallback;
   if (!(allowed as readonly string[]).includes(raw)) throw usageError(`${name} must be one of: ${allowed.join(", ")}`);

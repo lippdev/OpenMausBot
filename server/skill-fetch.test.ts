@@ -201,3 +201,46 @@ describe("skill sources", () => {
     expect(result).toMatchObject({ skills: [{ source: "github.com/vercel-labs/skills/skills/find-skills" }] });
   });
 });
+
+describe("skill folder sibling reporting", () => {
+  it("returns non-markdown files and subfolders as path-only entries instead of dropping them", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/contents/skills/prove")) {
+        return Response.json([
+          file("SKILL.md"),
+          file("notes.md"),
+          file("run.sh"),
+          { type: "file", name: "big.bin", path: "skills/prove/big.bin" },
+          dir("skills/prove/scripts"),
+        ]);
+      }
+      if (url.includes("api.github.com")) return Response.json([dir("skills")]);
+      return new Response("# A skill");
+    }) as typeof fetch;
+    const result = await fetchSkillFromSource("https://github.com/a/b/tree/main/skills/prove", fetcher);
+    if ("error" in result) throw new Error(result.error);
+    const files = result.skills![0]!.files;
+    expect(files.find((entry) => entry.path === "SKILL.md")?.content).toBe("# A skill");
+    expect(files.find((entry) => entry.path === "notes.md")?.content).toBe("# A skill");
+    expect(files.filter((entry) => entry.content === "").map((entry) => entry.path)).toEqual(["run.sh", "big.bin", "scripts/"]);
+  });
+
+  it("still imports SKILL.md when earlier-sorting markdown fills the download cap", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/contents/skills/wall")) {
+        const filler = Array.from({ length: 40 }, (_, i) => file(`a-${i}.md`));
+        return Response.json([...filler, file("SKILL.md")]);
+      }
+      if (url.includes("api.github.com")) return Response.json([dir("skills")]);
+      return new Response("# A skill");
+    }) as typeof fetch;
+    const result = await fetchSkillFromSource("https://github.com/a/b/tree/main/skills/wall", fetcher);
+    if ("error" in result) throw new Error(result.error);
+    const files = result.skills![0]!.files;
+    expect(files.find((entry) => entry.path === "SKILL.md")?.content).toBe("# A skill");
+    expect(files.filter((entry) => entry.path.endsWith(".md") && entry.content !== "").length).toBe(30);
+    expect(files.filter((entry) => entry.content === "").length).toBe(11);
+  });
+});

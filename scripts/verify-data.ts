@@ -131,6 +131,8 @@ try {
   const ui = (verb: string, ...args: string[]) => runControlOmb(["ui", verb, "--ui", handlePath, ...args]) as Promise<Record<string, any>>;
   const evaluate = async (js: string) => (await ui("eval", "--js", js)).result;
   const click = (name: string) => ui("click", "--name", name);
+  // The selected panel shares its tab's name; click the tab itself.
+  const clickTab = (tour: string) => evaluate(`(() => { const tab = document.querySelector('[data-tour=${tour}]'); if (!tab) throw new Error('Missing tab ${tour}'); tab.click(); return true; })()`);
   const browser = (...args: string[]) => agentBrowser(binary, sessionEnv(handle!), args);
   const drag = async (element: string, dx: number, dy: number) => {
     const { x, y } = await evaluate(`(() => { const { left, top, width, height } = (${element}).getBoundingClientRect(); return { x: Math.round(left + width / 2), y: Math.round(top + height / 2) }; })()`);
@@ -212,7 +214,7 @@ try {
   const recordedSql = sheet.cards.find((card) => card.id === daily.id)?.sql;
   const openReceipt = () => evaluate(`[...document.querySelectorAll('${receipt} button')].find(element => element.textContent.includes('Open in Data')).click(); true`);
   const toggleReceiptSql = () => evaluate(`document.querySelector('${receipt} button[aria-expanded]').click(); true`);
-  const receiptSelected = `document.querySelector('[data-tour=computer-data]')?.getAttribute('aria-pressed') === 'true' && ${active}.length === 1 && ${active}[0].getAttribute('data-card-id') === ${JSON.stringify(daily.id)}`;
+  const receiptSelected = `document.querySelector('[data-tour=computer-data]')?.getAttribute('aria-selected') === 'true' && ${active}.length === 1 && ${active}[0].getAttribute('data-card-id') === ${JSON.stringify(daily.id)}`;
   await until(async () => await evaluate("!!document.querySelector('textarea[aria-label=\"Message Data review\"]')"), "Seeded conversation did not mount");
   console.log(JSON.stringify({ ok: true, ui: handlePath, ...fixture.info, pid: server?.pid, previewUrl: preview.previewUrl, botId: bot.id, rows: 100_000, cards: 20, serverChecks: "load, describe, SQL, charts, paging, filter, sort, export, restart" }, null, 2));
   if (check) {
@@ -228,12 +230,12 @@ try {
     await until(async () => await evaluate(receiptSelected), "First receipt did not mount its Data result");
     await ui("wait-settle", "--timeout", "30");
     assert.equal(await evaluate(receiptSelected), true, "First receipt lost its Data selection after configuration settled");
-    await click("Browser");
+    await clickTab("computer-browser");
     await click("Close computer panel");
     await until(async () => await evaluate("!document.querySelector('[data-tour=computer-data]')"), "Computer panel did not close after Browser selection");
     await click("Bot's computer");
     await ui("wait-settle", "--timeout", "30");
-    assert.equal(await evaluate("document.querySelector('[data-tour=computer-browser]')?.getAttribute('aria-pressed') === 'true' && !document.querySelector('[data-testid=data-panel]')"), true, "Consumed receipt replaced Browser when reopening the panel");
+    assert.equal(await evaluate("document.querySelector('[data-tour=computer-browser]')?.getAttribute('aria-selected') === 'true' && !document.querySelector('[data-testid=data-panel]')"), true, "Consumed receipt replaced Browser when reopening the panel");
     await openReceipt();
     await until(async () => await evaluate(receiptSelected), "Clicking the receipt again did not mount its Data result");
     await ui("wait-settle", "--timeout", "30");
@@ -241,7 +243,7 @@ try {
     await chooseHistory("Latest result");
   } else {
     if (!await evaluate("!!document.querySelector('[data-tour=computer-data]')")) await click("Bot's computer");
-    await click("Data");
+    await clickTab("computer-data");
   }
 
   if (!check) {
@@ -704,7 +706,7 @@ try {
       await runControlOmb(["set-model", "--bot", bot.id, "--instance", "openaiCompat", "--model", "data-chat-fixture", "--url", url]);
       await api("PATCH", `/api/bots/${bot.id}`, { toolScope: { allow: ["mcp:data:data_describe", "mcp:data:data_show"] } });
       await browser("set", "viewport", "1600", "1000");
-      await click("Data");
+      await clickTab("computer-data");
       await until(async () => await evaluate("!!document.querySelector('[data-testid=data-panel] [data-testid=data-history]')"), "Data view did not reopen after configuring the fixture provider");
       await chooseHistory("All 100,000 orders");
       await typeSql(manualSql);

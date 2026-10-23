@@ -1,7 +1,6 @@
 // Puts the known-flaky tests that needed a retry in this job's summary
-// ($GITHUB_STEP_SUMMARY) and raises a warning annotation for each, so a flake
-// that passed on a retry is still seen. Reads the lines ci-retry-runner.ts
-// wrote to OMB_VITEST_RETRY_LOG; no log means no retries. docs/ci.md, "Flaky tests".
+// ($GITHUB_STEP_SUMMARY) with a warning annotation each, from the lines in
+// OMB_VITEST_RETRY_LOG; no log means no retries.
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";

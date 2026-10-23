@@ -12,22 +12,13 @@ import {
 import type { Message } from "@/state/store";
 
 export interface ExportTranscriptMenuProps {
-  /** Title of the conversation (bot name or channel name). */
   title: string;
-  /** Messages to export. */
   messages: readonly Message[];
-  /** Optional fallback bot name for 1:1 chats. */
   botName?: string;
-  /** Whether this is a group room / channel. */
   isGroup?: boolean;
-  /** Optional custom CSS classes for the trigger button. */
   className?: string;
 }
 
-/**
- * A dropdown menu button in the chat header allowing users to export the current
- * conversation transcript either by copying to clipboard or downloading as Markdown.
- */
 export function ExportTranscriptMenu({
   title,
   messages,
@@ -71,7 +62,6 @@ export function ExportTranscriptMenu({
 
   const hasMessages = messages && messages.length > 0;
 
-  /** Copy formatted Markdown transcript to clipboard with visual feedback. */
   const handleCopy = async () => {
     if (!hasMessages) return;
     const markdown = formatTranscriptMarkdown({
@@ -89,7 +79,6 @@ export function ExportTranscriptMenu({
     }
   };
 
-  /** Trigger browser download for the formatted Markdown transcript file. */
   const handleDownload = () => {
     if (!hasMessages) return;
     const markdown = formatTranscriptMarkdown({

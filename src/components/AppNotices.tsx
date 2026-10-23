@@ -1,39 +1,29 @@
-// The one place the desktop app's notices appear (src/lib/notices.ts): at the
-// bottom left, one at a time, in order:
-// 1. the card after the update, offering OpenMausBot Cloud's free trial to
-//    someone with no plan (CloudTrialIntro);
-// 2. the free trial's own notice, for someone in one (CloudTrialNotice);
-// 3. This computer's My Cloud card, for someone with a plan (CloudNotice);
-// 4. "Star us on GitHub".
-// Before all four, while it lasts: MausBot's Product Hunt launch, once, for
-// everyone on either page (ProductHuntCard).
-// Never over setup, a dialog, busy work or an update, and only in the desktop
-// app: This computer's page has all four; the person's own Cloud page has
-// only the trial's notice (it has no Cloud account bridge); a browser, another
-// server's page, companion mode and a dev build have none. The card after the
-// update is never shown on a branded build or a desktop signed in with an
-// organization: that desktop is not ours to advertise on.
 import { useEffect, useState } from "react";
 import { Rocket, Star } from "lucide-react";
 import type { CloudAccountState } from "../../electron/cloud-account.mjs";
 import type { CloudOffer } from "../../electron/cloud-home.mjs";
-import { api, CLOUD_LINK_SETTINGS, useStore } from "@/state/store";
+import { api, useStore } from "@/state/store";
 import { APP_REPOSITORY } from "@/lib/app-links";
 import { track } from "@/lib/analytics";
 import { brandStatus } from "@/lib/brand";
-import { buyOfferAllowed, cloudNoticeKind, cloudPlanView, cloudTrialNotice, cloudTrialView, offerTrialDays, personalAmount } from "@/lib/cloud-plan";
-import { cloudSetupStage } from "@/lib/cloud-setup";
+import { buyOfferAllowed, cloudNoticeKind, cloudPlanView, cloudTrialNotice, cloudTrialView, offerTrialDays } from "@/lib/cloud-plan";
+import { jobRoutine, useCloudIntent } from "@/lib/cloud-intent";
+import { CLOUD_INTENT_GIVEN, cloudSetupStage } from "@/lib/cloud-setup";
 import { cornerPopupWaits } from "@/lib/corner-popup";
-import { CLOUD_INTRO, CLOUD_NOTICE, CLOUD_TRIAL_NOTICE, dismissNotice, introShown, introStage, nextNotice, noticeSeen, PRODUCT_HUNT_NOTICE, PRODUCT_HUNT_UNTIL, PRODUCT_HUNT_URL, STAR_NOTICE, usedBefore } from "@/lib/notices";
-import { cloudSignInDue, type WelcomeViewer } from "@/lib/onboarding";
+import { CLOUD_INTRO, CLOUD_NOTICE, CLOUD_PRO_UPDATE_NOTICE, CLOUD_TRIAL_NOTICE, dismissNotice, introShown, introStage, nextNotice, noticeSeen, PRODUCT_HUNT_NOTICE, PRODUCT_HUNT_UNTIL, PRODUCT_HUNT_URL, STAR_NOTICE, UPDATES_CONSENT_NOTICE, usedBefore } from "@/lib/notices";
+import { cloudSignInDue, onboardingCloudOffered, type WelcomeViewer } from "@/lib/onboarding";
 import { useUpdaterState } from "@/lib/updater";
 import { t } from "@/lib/i18n";
 import { engineReady } from "./EngineLibrary";
 import { CLOUD_NOTICE_CARD, cloudNoticeStep, CloudNoticeCard } from "./CloudNotice";
+import { CLOUD_PRO_POPUP_SOURCE, CloudProPopup, cloudProCloudPageView, cloudProPopupView, reportCloudProPopup, useDesktopNotices, useOtherDialogOpen,
+  type CloudProPopupAction } from "./CloudProPopup";
 import { CloudTrialIntroCard } from "./CloudTrialIntro";
+import { useMoveQuiet } from "./CloudSendStrip";
 import { CloudTrialNoticeCard, useCloudPlanSnapshot } from "./CloudTrialNotice";
 import { LinkButton, NoticeCard, NoticeToast, NotNowButton } from "./NoticeCard";
 import { localDesktopPage } from "./onboarding/WelcomeGate";
+import { UpdatesConsentDialog, updatesConsentBridge, useUpdatesConsent } from "./UpdatesConsent";
 
 function StarCard({ onDismiss }: { onDismiss: () => void }) {
   return <NoticeCard titleId="github-star-title" notice="github-star" icon={Star} title={t("star.title")} onDismiss={onDismiss}>
@@ -55,35 +45,40 @@ function ProductHuntCard({ onDone }: { onDone: (action: "upvote" | "not_now" | "
   </NoticeCard>;
 }
 
-/** A trial notice's identity: its trial's state and end. A new state is a new notice. */
 const trialKey = (trial: { state: string; endsAt: number }) => `${trial.state}:${trial.endsAt}`;
+const CLOUD_SETTINGS = { type: "toggleAppSettings", open: true, section: "cloudAccount" } as const;
 
 export function AppNotices({ quiet = false, viewer = null, now = Date.now }: { quiet?: boolean; viewer?: WelcomeViewer | null; now?: () => number }) {
   const { state, dispatch } = useStore();
   const remote = window.ogb?.remoteClient?.active === true;
-  // This computer's own page has the Cloud account; the person's own Cloud page has only its plan.
-  const bridge = !remote && localDesktopPage() ? window.ogb?.cloudAccount : undefined;
-  const planBridge = !remote && (bridge || viewer?.cloudHome) ? window.ogb?.cloudPlan : undefined;
+  const local = localDesktopPage();
+  const bridge = !remote && local ? window.ogb?.cloudAccount : undefined;
+  const desktop = remote ? undefined : window.ogb?.desktopNotices;
+  const desktopState = useDesktopNotices(desktop);
+  // Asked once main has restored the Cloud sign-in, which it waits for before answering desktopState.
+  const planBridge = !remote && (bridge || (viewer?.cloudHome && (desktopState || !desktop))) ? window.ogb?.cloudPlan : undefined;
   const [account, setAccount] = useState<CloudAccountState | null>(null);
   const plan = useCloudPlanSnapshot(planBridge);
-  // What this person may buy (undefined: not asked yet), whether this desktop
-  // is signed in with an organization (null: not known yet).
   const [offer, setOffer] = useState<CloudOffer | null | undefined>(undefined);
+  const [offerFor, setOfferFor] = useState<string | null>(null);
   const [organization, setOrganization] = useState<boolean | null>(window.ogb?.organization ? null : false);
-  // One notice closed here leaves the rest for another launch; the trial
-  // notice on screen stays until it is closed or its trial moves on.
   const [closed, setClosed] = useState(false);
   const [introOpen, setIntroOpen] = useState(false);
   const [trialOpen, setTrialOpen] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [popupShown, setPopupShown] = useState(false);
+  const consentHere = (local || viewer?.cloudHome === true) && brandStatus().source !== "file";
+  const consent = useUpdatesConsent(consentHere ? updatesConsentBridge() : undefined);
+  const [consentDone, setConsentDone] = useState(false);
   const updater = useUpdaterState();
+  const intent = useCloudIntent();
+  const moving = useMoveQuiet(now);
   useEffect(() => {
     if (!bridge) return;
     let active = true, updated = false;
     const unsubscribe = bridge.onState(next => { updated = true; if (active) setAccount(next); });
-    // Reads the native snapshot only; never signs in or refreshes by itself.
     void bridge.state().then(next => { if (active && !updated) setAccount(next); }).catch(() => {});
     return () => { active = false; unsubscribe(); };
   }, [bridge]);
@@ -98,33 +93,44 @@ export function AppNotices({ quiet = false, viewer = null, now = Date.now }: { q
   }, []);
   const view = bridge ? cloudPlanView(account) : null;
   const record = state.config?.onboarding;
-  const introAllowed = Boolean(bridge) && brandStatus().source !== "file" && organization !== true;
+  const introAllowed = Boolean(bridge) && brandStatus().source !== "file" && organization !== true && !onboardingCloudOffered(record);
   const stage = introStage(record, now());
-  // Asked only while the card after the update could be due (and, for
-  // someone in a trial on this computer's page, for Personal's price in its
-  // last days); main keeps the answer for a while.
   const trialDue = cloudTrialNotice(plan);
-  const wantOffer = Boolean(bridge?.offer) && ((introAllowed && view !== null && buyOfferAllowed(view) && stage !== "done") || trialDue?.state === "active");
+  const popupHere = Boolean(desktop) && (local ? Boolean(bridge) : viewer?.cloudHome === true) && brandStatus().source !== "file";
+  const seenHere = local && (noticeSeen(record, CLOUD_PRO_UPDATE_NOTICE) || onboardingCloudOffered(record));
+  const popupPending = popupHere && !seenHere && (!desktopState
+    || (desktopState.cloud && !desktopState.seen.includes(CLOUD_PRO_UPDATE_NOTICE)));
+  const wantOffer = Boolean(bridge?.offer) && ((introAllowed && view !== null && buyOfferAllowed(view) && stage !== "done")
+    || (popupPending && view !== null && buyOfferAllowed(view)));
   const offerKey = wantOffer ? `${view?.kind}:${JSON.stringify(account?.offer ?? null)}` : null;
   useEffect(() => {
     if (!offerKey || !bridge?.offer) return;
     let active = true;
-    void bridge.offer().then(next => { if (active) setOffer(next); }, () => { if (active) setOffer(null); });
+    const answer = (next: CloudOffer | null) => { if (active) { setOffer(next); setOfferFor(offerKey); } };
+    void bridge.offer().then(answer, () => answer(null));
     return () => { active = false; };
   }, [offerKey, bridge]);
+  useEffect(() => {
+    if (seenHere && desktopState && !desktopState.seen.includes(CLOUD_PRO_UPDATE_NOTICE)) void desktop?.seen(CLOUD_PRO_UPDATE_NOTICE).catch(() => {});
+  }, [seenHere, desktopState]);
+  const page = local ? "local" : "my_cloud";
+  const popupState = !popupPending ? null : !desktopState || !viewer ? "loading"
+    : bridge ? cloudProPopupView(account, !bridge.offer ? null : offerFor === offerKey ? offer : undefined)
+    : planBridge ? cloudProCloudPageView(plan) : "loading";
+  const popupView = typeof popupState === "object" ? popupState : null;
+  const popupBlocked = useOtherDialogOpen(popupPending) || Boolean(state.liveCall && state.liveCall.status !== "ended");
+  const consentDue = consent.state?.available === true && consent.state.due && !consentDone;
+  const consentBlocked = useOtherDialogOpen(consentDue) || Boolean(state.liveCall && state.liveCall.status !== "ended");
+  const consentFact = !consentHere || consentDone ? false : consent.state === undefined ? null : consentDue ? (consentBlocked ? null : true) : false;
 
   const trial = plan?.trial;
   const key = trial ? trialKey(trial) : null;
-  // Onboarding first, here and on My Cloud: its engine sign-in and its setup checklist (which sits in this corner).
+  const setupRecord = record && (intent.pending || intent.sent) ? { ...record, hintsSeen: [...record.hintsSeen, CLOUD_INTENT_GIVEN] } : record;
   const setupHere = cloudSignInDue(viewer, state, engineReady)
     || ["waiting", "shown"].includes(cloudSetupStage({ viewer, connected: state.connected, enginesKnown: state.instances.length > 0,
-      engineReady: state.instances.some(engineReady), onboarding: record }));
+      engineReady: state.instances.some(engineReady), onboarding: setupRecord, planned: Boolean(jobRoutine(state.routines, intent.sent)) }));
   const waits = cornerPopupWaits(state, updater, { quiet, idle: true, viewer }) || Boolean(state.cloudAdd) || state.cloudHowTo || setupHere;
   const kind = view ? cloudNoticeKind(view, account) : null;
-  // The card after the update: someone who may buy, has used the app before
-  // this launch, and only while a trial is offered (it waits for one). Shown
-  // today already, it waits for tomorrow and holds the cards after it; on
-  // screen, it stays until it is closed.
   const introDue = (): boolean | null => {
     if (!introAllowed || !view) return false;
     if (view.kind === "unknown" || view.kind === "connecting" || organization === null) return null;
@@ -133,25 +139,21 @@ export function AppNotices({ quiet = false, viewer = null, now = Date.now }: { q
     if (offerTrialDays(offer) === null) return false;
     return introOpen || stage === "due" ? true : null;
   };
-  const notice = !closed && !waits && (bridge || planBridge) ? nextNotice({
-    // The launch: everyone, on this computer's page or their Cloud's, until
-    // it is no longer news; never on a branded build or an organization's
-    // desktop (not ours to advertise on), which waits until that is known.
-    [PRODUCT_HUNT_NOTICE]: brandStatus().source === "file" || now() >= PRODUCT_HUNT_UNTIL ? false
-      : organization === null ? null : !organization,
-    [CLOUD_INTRO]: introDue(),
-    // The trial's notice: the state main says is due; on screen, it stays
-    // until it is closed or its trial moves on (main then says it was seen).
+  const cards = Boolean(bridge || planBridge);
+  // After a closed popup only the product-updates question may follow in this launch; nothing else does.
+  const notice = waits ? null : closed ? (consentFact === true ? UPDATES_CONSENT_NOTICE : null) : cards || popupHere || consentHere ? nextNotice({
+    [CLOUD_PRO_UPDATE_NOTICE]: !popupPending || moving ? false : popupState === "loading" || moving === null || (popupView !== null && popupBlocked) ? null : popupView !== null,
+    [UPDATES_CONSENT_NOTICE]: consentFact,
+    [PRODUCT_HUNT_NOTICE]: !cards || moving || brandStatus().source === "file" || now() >= PRODUCT_HUNT_UNTIL ? false
+      : organization === null || moving === null ? null : !organization,
+    [CLOUD_INTRO]: moving ? false : moving === null ? null : introDue(),
     [CLOUD_TRIAL_NOTICE]: planBridge && plan === null ? null : Boolean(key && (trialDue || trialOpen === key)),
-    // This computer's My Cloud card: unknown holds the star; Not now is per card.
     [CLOUD_NOTICE]: !view ? false : view.kind === "unknown" ? null
       : Boolean(kind && !noticeSeen(record, CLOUD_NOTICE_CARD[kind].dismissed)),
-    [STAR_NOTICE]: Boolean(bridge) && brandStatus().source !== "file" && usedBefore(state.bots),
+    [STAR_NOTICE]: !bridge || moving || brandStatus().source === "file" || !usedBefore(state.bots) ? false : moving === null ? null : true,
   }, id => id === CLOUD_INTRO ? stage === "done" && !introOpen
     : id === STAR_NOTICE || id === PRODUCT_HUNT_NOTICE ? noticeSeen(record, id) : false) : null;
 
-  // Shown: the card after the update counts today; the trial's notice tells
-  // main, which shows it no more today on either page.
   const shownKey = notice === CLOUD_TRIAL_NOTICE ? key : notice;
   useEffect(() => {
     if (!shownKey) return;
@@ -163,6 +165,9 @@ export function AppNotices({ quiet = false, viewer = null, now = Date.now }: { q
     } else if (notice === CLOUD_TRIAL_NOTICE && trialOpen !== shownKey) {
       setTrialOpen(shownKey);
       void planBridge?.noticeSeen?.().catch(() => {});
+    } else if (shownKey === CLOUD_PRO_UPDATE_NOTICE && !popupShown && popupView) {
+      setPopupShown(true);
+      void desktop?.shown(CLOUD_PRO_UPDATE_NOTICE).then(first => { if (first) reportCloudProPopup("shown", popupView, page); }, () => {});
     }
   }, [shownKey]);
 
@@ -175,19 +180,35 @@ export function AppNotices({ quiet = false, viewer = null, now = Date.now }: { q
   if (toast) return <NoticeToast text={toast} onDone={() => setToast(null)} />;
   if (!notice) return null;
 
+  if (notice === CLOUD_PRO_UPDATE_NOTICE && popupView && desktop) {
+    const report = (action: CloudProPopupAction) => reportCloudProPopup(action, popupView, page);
+    const end = () => { void desktop.seen(CLOUD_PRO_UPDATE_NOTICE).catch(() => {}); close(); };
+    const plans = (action: CloudProPopupAction) => { report(action); end(); dispatch({ type: "openCloudAdd", source: CLOUD_PRO_POPUP_SOURCE }); };
+    const primary = popupView.primary.via === "add-cloud" ? () => plans("upgrade") : () => { report("manage"); end(); dispatch(CLOUD_SETTINGS); };
+    return <CloudProPopup view={popupView}
+      onPrimary={primary}
+      onSeePlans={() => plans("see_plans")}
+      onNotNow={() => { report("not_now"); end(); }}
+      onClose={() => { report("close"); end(); }} />;
+  }
+
+  if (notice === UPDATES_CONSENT_NOTICE && consent.state) {
+    const done = () => { setConsentDone(true); close(); };
+    return <UpdatesConsentDialog signedIn={consent.state.signedIn}
+      onYes={async email => { await consent.choose("opted_in", email); done(); }}
+      onNo={() => { done(); void consent.choose("declined").catch(() => {}); }} />;
+  }
   if (notice === CLOUD_INTRO && offer) {
-    // Any button, the X and Escape end it for good. Sign in only hides it for now.
     const done = (action: string) => { track("cloud_card_action", { action }); close(); save(CLOUD_INTRO); };
     return <CloudTrialIntroCard offer={offer}
       onStart={() => { done("start"); dispatch({ type: "openCloudAdd", source: "app_card" }); }}
       onHowTo={() => { done("howto"); dispatch({ type: "cloudHowTo", open: true }); }}
-      onSignIn={view?.kind === "signed-out" ? () => { track("cloud_card_action", { action: "signin" }); close(); dispatch(CLOUD_LINK_SETTINGS); } : undefined}
+      onSignIn={view?.kind === "signed-out" ? () => { track("cloud_card_action", { action: "signin" }); close(); dispatch({ type: "openCloudAdd", source: "app_card", signIn: true }); } : undefined}
       onNotNow={() => { done("not_now"); setToast(t("cloudIntro.later")); }}
       onDismiss={() => { done("close"); setToast(t("cloudIntro.later")); }} />;
   }
   if (notice === CLOUD_TRIAL_NOTICE && trial) {
-    const shown = cloudTrialView(trial, plan?.credit, { personal: personalAmount(offer) });
-    // Opens the Plan page in the browser: subscribing, the billing portal, payment status.
+    const shown = cloudTrialView(trial, plan?.credit);
     const act = () => { setFailed(false); void planBridge?.manage().then(close, () => setFailed(true)); };
     return <CloudTrialNoticeCard view={shown} failed={failed} onAction={act} onClose={close} />;
   }

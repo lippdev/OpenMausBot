@@ -1,6 +1,4 @@
-// Coordinated turns as tests read them: the Assignment rows in a data
-// directory's runtime.db, projected onto the HandoffView shape the server
-// itself works with. Read-only, so a test can look while the server runs.
+// Coordinated turns as tests read them: runtime.db Assignment rows as HandoffView, read-only while the server runs.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";

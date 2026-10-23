@@ -1,11 +1,4 @@
-// The escape hatch of PLAN D5: a bot may hand over raw Vega-Lite instead of
-// the small chart spec. Three gates stand before it reaches a card. The JSON
-// schema (ajv) catches the wrong shape; the data walk refuses inline rows
-// and URLs, because rows always come from the card's SQL and bind as the
-// dataset "table"; then one headless compile and parse catches what a
-// schema cannot — a broken expression in a transform or an axis label —
-// so it fails here with a message the bot can act on, not in the person's
-// panel. VegaChat's validate-then-render loop, done once per spec.
+// Inline rows and URLs are refused: rows always come from the card's SQL and bind as the dataset "table".
 import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
 import { None, logger, parse, View } from "vega";
 import { compile, type TopLevelSpec } from "vega-lite";
@@ -23,19 +16,13 @@ function fail(message: string, hint?: string): never {
 
 let validator: ValidateFunction | undefined;
 
-/** The 1.8 MB schema compiles in about half a second, once per process.
- * Formats are skipped: "color-hex" and "uri-reference" guard looks, not
- * safety, and Vega accepts any CSS colour anyway. */
+/** Formats are skipped: "color-hex" and "uri-reference" guard looks, not safety, and Vega accepts any CSS colour anyway. */
 function schemaValidator(): ValidateFunction {
   validator ??= new Ajv({ allowUnionTypes: true, strict: false, allErrors: true, validateFormats: false, logger: false }).compile(vegaLiteSchema);
   return validator;
 }
 
-/** The schema's top level is an anyOf over unit, layer, facet, repeat and
- * concat specs, so a wrong value produces one complaint per branch, most of
- * them about the branch and not the mistake. The mistake is the deepest
- * path the validator reached; at equal depth an enum beats a type check
- * beats a constant, because the enum lists what would have been right. */
+/** The top-level anyOf yields one complaint per branch: report the deepest path, preferring enum over type over const. */
 function firstProblem(errors: readonly ErrorObject[] | null | undefined): string {
   const rank: Record<string, number> = { enum: 0, type: 1, const: 2, required: 3, additionalProperties: 3 };
   const specific = (errors ?? []).filter((e) => e.keyword !== "anyOf" && e.keyword !== "oneOf" && e.keyword !== "if");
@@ -45,8 +32,7 @@ function firstProblem(errors: readonly ErrorObject[] | null | undefined): string
 
 const INLINE_DATA_KEYS = ["values", "url", "sequence", "graticule", "sphere"];
 
-/** Every `data` in the tree must be `{name: "table"}`: layers, concat
- * children and `lookup` transforms included. `datasets` is inline by nature. */
+/** Every `data` must be `{name: "table"}`, layers, concat children and `lookup` transforms included. */
 function refuseInlineData(node: unknown, path: string): void {
   if (Array.isArray(node)) {
     node.forEach((item, i) => refuseInlineData(item, `${path}[${i}]`));
@@ -66,8 +52,6 @@ function refuseInlineData(node: unknown, path: string): void {
   }
 }
 
-/** Vega-Lite and Vega both log through this during the check; a warning
- * about a default is not a failure, and the test output stays clean. */
 const silent = logger(None);
 
 export const validateVegaLite: VegaLiteValidator = async (input) => {
@@ -75,7 +59,6 @@ export const validateVegaLite: VegaLiteValidator = async (input) => {
   const spec: Json = structuredClone(input);
   spec.data ??= { name: "table" };
   spec.$schema ??= "https://vega.github.io/schema/vega-lite/v6.json";
-  // A unit or layer spec fills the card; concat and facet size their children.
   if (("mark" in spec || "layer" in spec) && spec.width === undefined) spec.width = "container";
 
   refuseInlineData(spec, "");
@@ -84,8 +67,6 @@ export const validateVegaLite: VegaLiteValidator = async (input) => {
   if (!validate(spec)) fail(firstProblem(validate.errors));
 
   try {
-    // The runtime check renders nothing: an empty "table" is enough to run
-    // every transform, scale and expression once.
     const { spec: runtime } = compile(spec as unknown as TopLevelSpec, { logger: silent });
     const view = new View(parse(runtime), { renderer: "none" }).logger(silent);
     try {

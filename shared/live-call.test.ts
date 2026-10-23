@@ -45,7 +45,6 @@ describe("LiveTranscript", () => {
     expect(transcript.pending({ skipEcho: true })).toBe("no");
     expect(transcript.pending()).toBe("Okay, I need your permission no");
     expect(transcript.takeRequestParts(3_200)).toEqual({ text: "Okay, I need your permission no", withoutEcho: "no" });
-    // both are consumed either way
     expect(transcript.pending()).toBe("");
   });
 

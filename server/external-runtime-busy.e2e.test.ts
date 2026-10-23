@@ -8,12 +8,7 @@ import { readHandoffs } from "./testing/handoff-rows.ts";
 
 const TOKEN = "external-runtime-busy-fixture-0123456789abcdef";
 
-// An idle external caller consults a peer that is busy (docs/runtime-contract.md
-// §2 admission, §9). A consultation is coordinate_bots(consult: true) on
-// the runtime: the person's approval is asked once, before anything is
-// queued; the row then waits for the peer's slot, runs when it frees, and
-// the gateway reads the answer through assignment_status. Its own engine
-// never runs. Both orders of "busy" and "approval" end the same way.
+// An idle external caller consults a busy peer: the person's approval is asked once, before anything is queued, in both orders.
 it.each(["already busy", "became busy during approval"])(
   "queues an idle external caller's ask behind a peer that is %s, without losing or repeating approval",
   async scenario => {
@@ -42,7 +37,6 @@ it.each(["already busy", "became busy during approval"])(
       const peerThread = peer.activeTaskId;
       const messages = async (threadId: string): Promise<any[]> => (await api("GET", `/api/threads/${threadId}/messages?limit=100`)).messages;
       const sourceCards = async () => (await messages(sourceThread)).filter(message => ["ask_bot", "delegate_bot"].includes(message.card?.tool));
-      /** The runtime's request line in the peer's work thread, attributed to the gateway. */
       const peerRequests = async (threadId: string) => (await messages(threadId))
         .filter(message => message.roomRequest?.phase === "request" && message.from?.botId === source.id);
       const sourceState = async () => (await api("GET", "/api/bots?messages=0")).bots.find((bot: any) => bot.id === source.id);
@@ -67,10 +61,8 @@ it.each(["already busy", "became busy during approval"])(
         await expect.poll(() => existsSync(prompts) && readFileSync(prompts, "utf8").includes("Keep this unrelated turn running"), { timeout: 15_000 }).toBe(true);
       };
       const approve = async (card: any) => api("POST", `/api/threads/${sourceThread}/respond`, { requestId: card.card.requestId, behavior: "allow" });
-      // The route asks the person before it queues anything, so the call
-      // stays open until the card is answered. Attach a rejection handler
-      // immediately: fixture teardown must not turn a failed assertion into
-      // an unhandled in-flight HTTP rejection.
+      // The route asks the person before it queues anything, so the call stays open; a rejection handler is attached at once so
+      // teardown never turns a failed assertion into an unhandled HTTP rejection.
       if (scenario === "already busy") await occupy();
       const pendingAsk = api("POST", "/api/internal/coordinate-bots", { botIds: [peer.id], message: requestText, consult: true }, true)
         .then(value => ({ value }), error => ({ error }));
@@ -78,22 +70,17 @@ it.each(["already busy", "became busy during approval"])(
       const [card] = await sourceCards();
       expect(card.card.tool).toBe("ask_bot");
       expect(card.card.answered).toBeFalsy();
-      // Nothing handed out yet: the only row, when the peer is busy, is the
-      // root of its own running turn (every turn is one, contract §10 PR 4).
       expect(readHandoffs(session.info.dataDir).filter(node => node.parentId || node.botId !== peer.id || node.threadId !== peerThread)).toEqual([]);
       if (scenario !== "already busy") await occupy();
       await approve(card);
       const outcome = await pendingAsk;
       if ("error" in outcome) throw outcome.error;
       const queued = outcome.value;
-      // No inline wait: the answer is the runtime's receipt.
       expect(queued).toMatchObject({ rootId: expect.any(String), receipts: [{ botId: peer.id, outcome: "queued", requestId: expect.any(String) }] });
       expect(queued.deprecation).toBeUndefined();
       expect(queued.text).toBeUndefined();
       const id: string = queued.receipts[0].requestId;
       evidence.push({ scenario, queued, sourceThread, peerThread });
-      // The row waits for the peer's slot: queued, in the gateway's work
-      // thread on the peer, with nothing delivered there yet.
       await expect.poll(() => row(id)?.status, { timeout: 5_000 }).toBe("queued");
       expect(row(id)).toMatchObject({ botId: peer.id, mode: "consult", reply: "poll", approvalGranted: true });
       const workThread = row(id)!.threadId;
@@ -107,11 +94,9 @@ it.each(["already busy", "became busy during approval"])(
       evidence.push({ scenario, queued, early, beforeRelease: await sourceCards() });
 
       writeFileSync(gate, "release only the isolated provider");
-      // Nothing asks the person twice: the approved row runs once the slot frees.
       await expect.poll(async () => (await receipt(id)).assignment.status, { timeout: 20_000 }).toBe("completed");
       expect((await receipt(id)).assignment.result).toContain(requestText);
       expect((await control("wait", "--bot", peer.id, "--task", workThread)).status).toBe("settled");
-      // The gateway polls this receipt; the source bot's own engine never runs.
       expect((await control("wait", "--bot", source.id, "--task", sourceThread)).status).toBe("settled");
       expect((await messages(sourceThread)).filter(message => message.role === "bot" && message.turnId && !message.from)).toEqual([]);
       const requests = await peerRequests(workThread);
@@ -119,8 +104,6 @@ it.each(["already busy", "became busy during approval"])(
       expect(requests[0].text).toContain(requestText);
       expect((await sourceCards()).map(card => ({ tool: card.card.tool, answered: card.card.answered })))
         .toEqual([{ tool: "ask_bot", answered: "allow" }]);
-      // The root completed without a turn, and its result is withheld once
-      // team access changes under it.
       await expect.poll(() => row(queued.rootId)?.status, { timeout: 10_000 }).toBe("completed");
       expect(row(queued.rootId)).toMatchObject({ reply: "poll", threadId: sourceThread });
       await withholdAfterRevocation(id);

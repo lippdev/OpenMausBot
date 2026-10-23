@@ -1,14 +1,10 @@
-// Landing on a message: after a search hit, scroll the row into view and
-// flash it. Rows are wrapped in `display: contents` (no box of their own),
-// so the wrapper carries data-mid and its last child — the bubble/chip,
-// after any day separator — is what gets scrolled and highlighted.
+// Rows are `display: contents` wrappers with no box, so their last child is what gets scrolled and highlighted.
 import { useEffect } from "react";
 import { api, useStore, type Action, type AppState } from "@/state/store";
 import type { SearchHit } from "@/lib/search-hit";
 
 const FLASH_CLASSES = ["ring-2", "ring-accent/70", "rounded-2xl", "transition-shadow"];
 
-/** Select and prepare the exact conversation represented by a search hit. */
 export async function landOnSearchHit(
   hit: SearchHit,
   state: Pick<AppState, "bots" | "groups">,
@@ -20,10 +16,6 @@ export async function landOnSearchHit(
   const group = hit.groupId ? state.groups.find((candidate) => candidate.id === hit.groupId) : undefined;
   if (!ownerId || (!bot && !group)) throw new Error("That conversation is no longer available.");
 
-  // With threads hidden, another of a bot's threads opens as every way into
-  // one does (openBotThread): by the switch alone, so the thread the bot was
-  // on keeps its unread mark. Last, so it loads the hit's version of the
-  // thread, and whole: the hit can be older than a page.
   const switchAlone = bot && bot.threadId !== hit.threadId && !threadsShown ? bot : undefined;
   if (!switchAlone) dispatch({ type: "select", id: ownerId });
   if (bot && bot.threadId !== hit.threadId && !switchAlone) {
@@ -85,7 +77,6 @@ export function useFocusMessage(threadId: string, ready: boolean) {
   const focus = state.focusMessage;
   useEffect(() => {
     if (!focus || focus.consumed || focus.threadId !== threadId || !ready) return;
-    // messages may land a tick after the task switch; try briefly
     let tries = 0;
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -119,9 +110,7 @@ export function useFocusMessage(threadId: string, ready: boolean) {
           scroller.scrollTop += match.top + match.height / 2 - viewport.top - viewport.height / 2;
         });
       }
-      // Consume only after the target is mounted and the flash has begun.
-      // `consumed` is intentionally not an effect dependency, so this active
-      // flash survives the bookkeeping update while future remounts ignore it.
+      // `consumed` is deliberately not a dependency, so this flash survives the bookkeeping update.
       dispatch({ type: "focusMessageConsumed", nonce: focus.nonce });
       flashTimer = setTimeout(() => target?.classList.remove(...FLASH_CLASSES), 1800);
     };

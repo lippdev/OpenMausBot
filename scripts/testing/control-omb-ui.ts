@@ -1,13 +1,7 @@
-// `control-omb ui`: drive the real React renderer headlessly against the
-// isolated fake-engine fixture, through the agent-browser binary the harness
-// already pins (server/browser-engine-release.ts). One launch owns a fixture
-// server, a Vite preview of the full <App/>, and one headless browser session
-// whose HOME is the fixture's disposable data directory; every other verb
-// attaches to that session through the handle file the launch printed.
-//
-// Imported by scripts/control-omb.ts, which owns HELP and the MUTATING set;
-// this file touches that module's bindings only inside functions so the
-// import cycle is harmless whichever file is loaded first.
+// `control-omb ui`: drives the real renderer headlessly against the fake-engine
+// fixture through the agent-browser binary the harness pins. It touches
+// control-omb.ts's bindings only inside functions, so the import cycle is
+// harmless whichever loads first.
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
@@ -28,6 +22,7 @@ import {
   resolveAgentBrowserBinary,
 } from "../../server/browser-engine.ts";
 import { fixtureApi, mountPreview, type MountedPreview } from "./preview-fixture.ts";
+import { credentialStoreFlags } from "../../server/browser/egress/gate.ts";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 /** Gitignored, persistent: the binary and its Chrome download once per checkout. */
@@ -37,9 +32,10 @@ export const UI_MUTATING = new Set(["click", "type", "press", "flag", "eval"]);
 
 const ENTRIES = {
   threads: { entry: "/scripts/testing/threads-preview.tsx", route: "/__threads.html", title: "Isolated OpenMaus Chat" },
+  dictation: { entry: "/scripts/testing/dictation-preview.tsx", route: "/__dictation.html", title: "Isolated dictation verification" },
   settings: { entry: "/src/testing/bot-settings.tsx", route: "/__bot-settings.html", title: "Isolated Bot Settings" },
 } as const satisfies Record<string, Parameters<typeof mountPreview>[1]>;
-const FAKE_MODES = ["happy", "exit-early", "hang", "malformed", "stream", "not-logged-in", "slow", "background-result"];
+const FAKE_MODES = ["happy", "exit-early", "hang", "malformed", "stream", "not-logged-in", "slow", "slow-write", "background-result"];
 const SEEDED_BOT = "Pepper";
 const PLATFORM_ENV = ["SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"];
 // Where `agent-browser install` unpacks Chrome for Testing below `$HOME/.agent-browser/browsers/chrome-<version>/`.
@@ -83,6 +79,7 @@ export function sessionEnv(handle: SessionEnv, parentEnv: NodeJS.ProcessEnv = pr
     AGENT_BROWSER_SESSION: handle.session,
     AGENT_BROWSER_HEADLESS: "1",
     AGENT_BROWSER_NO_WEBMCP: "1",
+    AGENT_BROWSER_ARGS: credentialStoreFlags().join("\n"),
   };
   for (const [key, value] of Object.entries(parentEnv)) {
     if (value && PLATFORM_ENV.includes(key.toUpperCase())) env[key.toUpperCase()] = value;
@@ -223,7 +220,6 @@ async function snapshot(handle: UiHandle, interactive: boolean): Promise<Record<
   return agentBrowser(handle.binary, sessionEnv(handle), ["snapshot", ...(interactive ? ["-i"] : [])]);
 }
 
-/** How long `--name` waits for its element to be rendered before giving up. */
 const TARGET_WAIT_MS = 5_000;
 
 /** `--ref @eN` verbatim, or the one element whose accessible name is `--name`. */
@@ -235,14 +231,8 @@ async function resolveTarget(handle: UiHandle, values: Record<string, unknown>, 
     if (!/^@?e\d+$/.test(ref)) throw new ControlOmbError(`--ref must look like @e12, got ${JSON.stringify(ref)}`, "refs come from `ui snapshot`");
     return { target: ref.startsWith("@") ? ref : `@${ref}` };
   }
-  // An element appears when React renders it, not when the previous command
-  // returned, so a single snapshot races the UI: the model row this drives is
-  // painted from an API read, and a name looked up one tick early is simply
-  // absent. Wait for it, the way every UI driver has an implicit wait — this
-  // is what made the smoke fail on ~1 run in 8, always as "no element is
-  // named", on four unrelated branches. Ambiguity is not a race, so two
-  // matches are still reported the moment they are seen, and a name that
-  // never arrives fails with the same error as before, just later.
+  // React paints after the previous command returns, so one snapshot races the
+  // UI: wait for the name. Two matches are still reported the moment seen.
   const deadline = Date.now() + TARGET_WAIT_MS;
   let matches: Array<[string, { name?: unknown; role?: unknown }]> = [];
   for (;;) {
@@ -473,6 +463,8 @@ export async function launchUi(
     checkpoint();
     const api = fixtureApi(fixture.info.url);
     await api("PATCH", "/api/config", { language: "en" });
+    const { bots } = await api("GET", "/api/bots") as { bots: Array<{ id: string; defaultBot?: object }> };
+    for (const bot of bots.filter((bot) => bot.defaultBot)) await api("PATCH", `/api/bots/${bot.id}`, { welcomed: true });
     const created = await runControlOmb(["new-bot", "--name", SEEDED_BOT, "--url", fixture.info.url]) as { bot: { id: string } };
     checkpoint();
     // stdout carries the handle and nothing else; Vite's port and dependency

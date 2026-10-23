@@ -7,8 +7,8 @@ export interface CloudAccountState {
   expiresAt?: number;
   /** Only a current server-verified session can include an entitlement
    * (verified within the last few minutes; a failed re-check keeps it).
-   * `plan` "pro" means any paid plan; `tier` names it ("personal", "pro",
-   * "max", or one newer than this app) when the Admin sends one. */
+   * `plan` "pro" means any paid plan; `tier` names it ("starter", "personal",
+   * "pro", "max", or one newer than this app) when the Admin sends one. */
   entitlement?: { plan: "free" | "pro"; tier?: string; status: "active" | "inactive"; expiresAt: number | null; version: number };
   verifiedAt?: number;
   verifiedUntil?: number;
@@ -19,6 +19,8 @@ export interface CloudAccountState {
   lastPlan?: { tier?: string; active: boolean };
   /** The person's Cloud home machine, when their plan has one. */
   machine?: import("./cloud-home.mjs").CloudMachine;
+  /** Connected: the teams this account is in, each with its Cloud; absent while it is in none. */
+  teams?: import("./cloud-home.mjs").CloudTeam[];
   /** A payment OMB Cloud received and is still linking to this account. */
   purchase?: import("./cloud-home.mjs").CloudPurchase;
   /** Connected: the free trial on this account's Cloud, when the Admin says (display only). */
@@ -28,9 +30,29 @@ export interface CloudAccountState {
   /** Connected: what this account may buy now (the session's `offer`), for wording only. */
   offer?: import("./cloud-home.mjs").CloudOffer;
   /** A checkout this app opened (or a sign-in it started on the way to
-   * one: `signIn`) in the last 24 hours: the plan, and when. */
-  checkout?: { plan: string; startedAt: number; signIn?: true };
+   * one: `signIn`) in the last 24 hours: the plan, and when (Reopen checkout
+   * starts the 30-minute watch again). `link`: main keeps its page, so Reopen
+   * and Copy link use that same page. */
+  checkout?: { plan: string; startedAt: number; signIn?: true; link?: true; done?: true };
+  /** This app talks to the staging Admin (OMB_CLOUD_STAGING=1): test payments, test Clouds. */
+  staging?: true;
+  /** Connected: opening My Cloud waits for it to wake. */
+  waking?: true;
 }
+/** The email-code sign-in (cloud-signin.mjs). `sent`: the code is on its
+ * way (`resendAt`: when another may be asked for). `browser`: this Cloud signs
+ * in only in the browser (single sign-on there, or an older Admin). */
+export type CloudSignInStart =
+  | { outcome: "sent"; email: string; expiresAt: number; resendAt: number; /** False: new accounts are closed, so only an existing one gets a code. */ signupOpen: boolean }
+  | { outcome: import("./cloud-signin.mjs").CloudSignInStartFailure };
+/** `signed-in`: stored and read like the browser sign-in; `wrong-code` says
+ * the tries left; `expired` needs a new code. */
+export type CloudSignInVerify =
+  | { outcome: "signed-in"; state: CloudAccountState }
+  | { outcome: "wrong-code"; triesLeft: number }
+  | { outcome: Exclude<import("./cloud-signin.mjs").CloudSignInVerifyFailure, "wrong-code"> };
+/** How the Cloud is shown in this app's switcher and Settings → Servers. */
+export interface CloudHomeLook { name: string; color: import("./cloud-buy.mjs").CloudColor }
 /** What opening a checkout did: `opened` in the browser; `signing-in` (signed
  * out, the browser signs in first); `conflict` (the account changed, now read
  * again); `rate-limited`; or `failed` (nothing was opened). */
@@ -50,16 +72,36 @@ export interface CloudAccountBridge {
   offer?(): Promise<import("./cloud-home.mjs").CloudOffer | null>;
   /** Opens a checkout for a plan of the offer in the browser; `source` is one of CHECKOUT_SOURCES. */
   checkout?(plan: string, source: string): Promise<CloudCheckoutResult>;
+  /** The email-code sign-in; the attempt and the token never reach the page. Absent on an older app. */
+  signInStart?(email: string): Promise<CloudSignInStart>;
+  signInVerify?(code: string): Promise<CloudSignInVerify>;
+  signInCancel?(): Promise<void>;
+  /** The checkout this app opened, again (never a new one while main keeps it); the plan and source only when none is kept. */
+  reopenCheckout?(plan: string, source: string): Promise<CloudCheckoutResult>;
+  /** Copies that checkout's page to the clipboard in main; false when none is kept. */
+  copyCheckoutLink?(): Promise<boolean>;
+  /** "Email me when I can add another". */
+  interest?(): Promise<void>;
+  /** The Cloud's name and colour (chosen while it is set up), and saving them. */
+  look?(): Promise<CloudHomeLook>;
+  setLook?(name: string, color: string): Promise<CloudHomeLook>;
+  /** The buying sheet is open on this page (main then opens the ready Cloud there rather than notifying). */
+  sheet?(open: boolean): Promise<void>;
+  /** The sheet showed the ready Cloud: the purchase is over. */
+  readySeen?(): Promise<void>;
   /** Lists the Cloud machine under Servers and opens it in this window. */
   connectHome(): Promise<CloudAccountState>;
   /** The same, opening the Cloud's Settings on its phone pairing. */
   connectHomeForPhone(): Promise<CloudAccountState>;
+  /** Opens a team's Cloud in this window, as the switcher does: one the verified session lists, by its id. Absent on an older app. */
+  openTeam?(teamId: string): Promise<void>;
   onState(callback: (state: CloudAccountState) => void): () => void;
-  /** "Let my Cloud use this Mac" (docs/cloud-pro.md). */
+  /** "Let my bots use this Mac" (docs/cloud-pro.md). */
   lending?: import("./computer-sharing.mjs").CloudLendingBridge;
+  files?: import("./cloud-sync.mjs").CloudFilesBridge;
 }
 /** On the person's own Cloud, open in this app's window: the plan, read
- * only, and two ways out. No account, credential or address. */
+ * only, Manage in the browser, and Sign in again. No account, credential or address. */
 /** `signin`: this computer's sign-in ended; `tier` names the plan last verified, if any. */
 export interface CloudPlanSnapshot {
   status: "paid" | "attention" | "checking" | "signin" | "none";
@@ -69,18 +111,29 @@ export interface CloudPlanSnapshot {
   credit?: import("./cloud-home.mjs").CloudCredit;
   /** The trial's popup due now, not yet shown today on either page. */
   notice?: import("./cloud-home.mjs").CloudTrialState;
+  /** Verified: the plan sleeps when idle. */
+  sleeps?: true;
+  /** This window's home is this Cloud: the person's bots moved here (home-window.mjs). */
+  home?: true;
 }
 export interface CloudPlanBridge {
   state(): Promise<CloudPlanSnapshot>;
   manage(): Promise<void>;
-  useThisComputer(): Promise<void>;
+  /** This device's MausBot Cloud sign-in, again, once it has ended: only from the person's click. */
+  signIn?(): Promise<void>;
   /** The trial's popup due now was shown: main shows it no more today. Absent on an older app. */
   noticeSeen?(): Promise<void>;
 }
 
 export declare const CLOUD_ORIGIN: string;
+export declare const STAGING_CLOUD_ORIGIN: string;
+export declare function cloudTarget(env?: Record<string, string | undefined>): {
+  origin: string; staging: boolean;
+  /** Under userData: the sign-in, saved servers, Files' folder, the Cloud's chosen name. */
+  file: string; environments: string; sync: string; look: string;
+};
 export declare const CHECKOUT_SOURCES: readonly string[];
-export declare function checkoutDestination(value: unknown, options?: { fixture?: boolean }): string | null;
+export declare function checkoutDestination(value: unknown, options?: { fixture?: boolean; staging?: boolean }): string | null;
 export declare function cloudOrigin(value?: string, fixture?: boolean): string;
 export interface CloudAccountStore {
   read(): Promise<unknown>;
@@ -108,12 +161,43 @@ export interface CloudAccountClient {
   openDashboard(): Promise<CloudAccountState>;
   offer(): Promise<import("./cloud-home.mjs").CloudOffer | null>;
   checkout(plan: string, source: string): Promise<CloudCheckoutResult>;
+  emailStart(email: string): Promise<CloudSignInStart>;
+  emailVerify(code: string): Promise<CloudSignInVerify>;
+  emailCancel(): void;
+  reopenCheckout(plan?: string, source?: string): Promise<CloudCheckoutResult>;
+  /** Main only (the clipboard): the kept checkout page, or null. */
+  checkoutLink(): string | null;
+  /** The Cloud this checkout bought was opened, announced or shown ready. */
+  checkoutDone(): void;
   /** Waiting on a checkout this app opened (the first 30 minutes). */
   checkoutPending(): boolean;
   interest(kind: "another_cloud"): Promise<void>;
   homeTarget(): { origin: string } | null;
+  /** The Admin's last word on a Cloud whose plan sleeps; null for any other. */
+  power(): import("./cloud-power.mjs").CloudPower | null;
+  /** Asks the Admin to start a sleeping Cloud (POST /api/cloud/desktop/wake), then reads the session again. */
+  wakeHome(): Promise<"awake" | "waking" | null>;
+  setWaking(on: boolean): void;
   pairHome(): Promise<import("./cloud-home.mjs").CloudHomeGrant>;
+  /** A one-time code for a team's Cloud, signed by the Admin with this person's membership (POST
+   * /api/cloud/desktop/teams/<id>/pairing). Rejects with `gone: true` once they are no longer in the team. */
+  pairTeam(teamId: string): Promise<import("./cloud-home.mjs").CloudHomeGrant>;
+  /** A Cloud that ended and that the Admin still holds, started for its owner's export only. */
+  exportHome(options?: { installation?: string }): Promise<{ starting: true } | { notHeld: true } | { deleted: true } | { grant: import("./cloud-home.mjs").CloudHomeGrant }>;
+  /** Tells the Admin that this computer's move to My Cloud is done (POST /api/cloud/desktop/moved); false when it can't take it yet. */
+  reportMove(options: { installation: string }): Promise<boolean>;
+  /** This computer keeps its bots on itself again: it no longer counts as moved. False when the Admin can't take it yet. */
+  reportKept(options: { installation: string }): Promise<boolean>;
   growDisk(sizeGb: number): Promise<{ supported: false } | { supported: true; refused: true } | { supported: true; disk: { gb: number; maxGb: number } }>;
+  /** This sign-in's own X research relay access while its plan is paid; null without one. */
+  xResearchAccess(): Promise<{ url: string; token: string } | null>;
+  pagesAccess(): Promise<{ url: string; token: string } | null>;
+  /** GET /api/cloud/desktop/updates-consent, as the Admin answers it (updates-consent.mjs parseAccountConsent reads it). */
+  updatesConsent(): Promise<unknown>;
+  recordUpdatesConsent(status: import("./updates-consent.mjs").UpdatesConsentStatus, textVersion: string): Promise<void>;
+  /** No sign-in needed: returns the Admin's receipt for this email-only answer. */
+  updatesConsentByEmail(input: { email: string; installId: string; textVersion: string }): Promise<string>;
+  withdrawUpdatesConsent(input: { status: "declined" | "withdrawn"; receipt: string }): Promise<void>;
   close(): void;
 }
 export declare function createCloudAccountClient(options: {
@@ -130,6 +214,8 @@ export declare function createCloudAccountClient(options: {
   onState?: (state: CloudAccountState) => void;
   /** Told once per plan name this app predates. Defaults to console.warn. */
   warn?: (message: string) => void;
+  /** Files or lending waits for a sleeping Cloud to wake: the session is read every 15 s. */
+  awaitingWake?: () => boolean;
 }): CloudAccountClient;
 export declare function cloudPlanSnapshot(state: CloudAccountState | null | undefined, extra?: { notice?: import("./cloud-home.mjs").CloudTrialState | null }): CloudPlanSnapshot;
 /** My Cloud's line under its name in the server menus, or null for none. */

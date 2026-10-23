@@ -2,18 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Cloud, Laptop, Loader2, Trash2 } from "lucide-react";
 import { Card } from "./SettingsPrimitives";
 import { ComputerSharingSettings } from "./ComputerSharingSettings";
-import { CloudMoveSettings } from "./CloudMove";
+import { lendingTitle } from "./CloudLending";
+import { CloudTile } from "./cloud-buy/parts";
+import { cloudColor } from "@/lib/cloud-look";
 import { useStore } from "@/state/store";
 import { sharedComputersEnabled } from "@/lib/feature-flags";
-import { t } from "@/lib/i18n";
 
 type SavedWorkspaces = Awaited<ReturnType<NonNullable<NonNullable<Window["ogb"]>["environments"]>["state"]>>;
 
-/** These are this desktop's connections, not a fleet administration API. */
 export function ConnectedWorkspacesSettings() {
   const bridge = window.ogb?.environments;
-  // Computer sharing is off unless this workspace's server turned it on. The
-  // desktop bridge alone is not enough: never offer access the server refuses.
+  // Security: the desktop bridge alone is not enough; never offer access the server refuses.
   const { state } = useStore();
   const sharingOffered = sharedComputersEnabled(state.config) && Boolean(window.ogb?.computerSharing);
   const [saved, setSaved] = useState<SavedWorkspaces | null>(null);
@@ -22,12 +21,6 @@ export function ConnectedWorkspacesSettings() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [computerId, setComputerId] = useState<string | null>(() => new URLSearchParams(window.location?.search ?? "").get("share-computer"));
-  // Copy this computer here (docs/copy-workspace.md): this app's own window only.
-  const copyOffered = Boolean(window.ogb?.cloudMove) && !window.ogb?.remoteClient?.active;
-  // A server's own Copy opens this page on its panel (`copy-to`): the person starts the copy here.
-  const [copyId, setCopyId] = useState<string | null>(() => new URLSearchParams(window.location?.search ?? "").get("copy-to"));
-  // Local environments (named data dirs, packaged builds only): the create
-  // form's fields, the pending Forget, and its keep-or-delete-files choice.
   const [envName, setEnvName] = useState("");
   const [envDir, setEnvDir] = useState("");
   const [envForget, setEnvForget] = useState<string | null>(null);
@@ -42,11 +35,10 @@ export function ConnectedWorkspacesSettings() {
     return () => { generation.current++; };
   }, [bridge]);
   useEffect(() => {
-    const consume = (id?: string | null, panel?: "copy") => {
-      if (id) (panel === "copy" ? setCopyId : setComputerId)(id);
+    const consume = (id?: string | null) => {
+      if (id) setComputerId(id);
       const url = new URL(window.location.href);
       url.searchParams.delete("share-computer");
-      url.searchParams.delete("copy-to");
       window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
     };
     consume();
@@ -57,8 +49,8 @@ export function ConnectedWorkspacesSettings() {
     pending.current = true; setBusy(true); setError(""); setEnvError("");
     const current = generation.current;
     try {
-      // A successful switch/connect unloads this local renderer. Do not ask
-      // for its privileged saved list again after the active origin changes.
+      // Security: a successful switch unloads this renderer; never ask for its privileged saved list again after the
+      // origin changes.
       if (await action() === true) return;
       const state = await bridge.state();
       if (generation.current === current) setSaved(state);
@@ -73,7 +65,7 @@ export function ConnectedWorkspacesSettings() {
   if (!bridge) return <p className="text-[13px] text-ink-secondary">Manage server connections in the desktop app.</p>;
   const confirmAction = (message: string) => window.ogb?.confirm ? window.ogb.confirm(message) : window.confirm(message);
   const connected = saved?.environments.find(entry => entry.id === computerId);
-  const computerWorkspace = connected?.origin ? { id: connected.id, name: connected.name, origin: connected.origin } : undefined;
+  const computerWorkspace = connected?.origin && !connected.home ? { id: connected.id, name: connected.name, origin: connected.origin } : undefined;
   const locals = saved?.environments.filter(entry => entry.kind === "local") ?? [];
   const forgetEntry = locals.find(entry => entry.id === envForget);
   return <>
@@ -92,8 +84,6 @@ export function ConnectedWorkspacesSettings() {
               <button type="button" disabled={busy} aria-label={`Switch to ${entry.name}`}
                 onClick={() => void perform(async () => {
                   if (!await confirmAction(`Switch to ${entry.name}? The app restarts on that environment. Running turns stop.`)) return;
-                  // Main's error strings are an open set ("dev", "busy", …):
-                  // one generic sentence for all of them.
                   const result = await bridge.switch(entry.id);
                   if (result && result.ok === false) throw new Error("Couldn't switch.");
                   return true;
@@ -112,8 +102,6 @@ export function ConnectedWorkspacesSettings() {
         </label>
         <div className="mt-2 flex gap-2">
           <button type="button" disabled={busy} onClick={() => void perform(async () => {
-            // Main answers {ok:false} when it refuses or the folder delete fails;
-            // the entry stays, so say so generically and leave the panel open.
             const result = envPurge ? await bridge.forget(forgetEntry.id, true) : await bridge.forget(forgetEntry.id);
             if (result && result.ok === false) throw new Error("Couldn't forget the environment.");
             setEnvForget(null);
@@ -126,8 +114,6 @@ export function ConnectedWorkspacesSettings() {
         event.preventDefault();
         if (!envName.trim()) return;
         void perform(async () => {
-          // A failure carries main's reason; none of them is a sentence the
-          // person can act on, so the form says one generic thing.
           const created = await bridge.create(envName.trim(), envDir.trim() || undefined);
           if (!created?.ok) throw new Error("Couldn't create the environment.");
           setEnvName(""); setEnvDir("");
@@ -155,25 +141,25 @@ export function ConnectedWorkspacesSettings() {
     <Card title="Your servers" subtitle="Saved on this computer. Your hosted bots keep running when you switch away.">
       {!saved ? <p role="status" className="text-[13px] text-ink-secondary">{error ? "Saved servers could not be loaded." : "Loading servers…"}</p> :
         <ul className="divide-y divide-hairline/40">
-          {[{ id: "local", name: "This computer", origin: "" }, ...saved.environments.filter((entry) => entry.kind !== "local")].map((entry) => {
+          {[{ id: "local", name: "This computer", origin: "", color: undefined }, ...saved.environments.filter((entry) => entry.kind !== "local")].map((entry) => {
             const active = entry.id === saved.activeId;
             const Icon = entry.id === "local" ? Laptop : Cloud;
             return <li key={entry.id} className="flex items-center gap-3 py-3">
-              <Icon size={18} className="shrink-0 text-ink-secondary" />
+              {cloudColor(entry.color) ? <CloudTile color={entry.color} size={20} /> : <Icon size={18} className="shrink-0 text-ink-secondary" />}
               <div className="min-w-0 flex-1"><div className="truncate text-[13px] font-medium text-ink">{entry.name}</div>
                 <div className="break-all text-[12px] text-ink-secondary">{entry.origin || "Local bots and conversations"}</div></div>
               {active ? <span className="flex shrink-0 items-center gap-1 text-[12px] text-ink-secondary"><Check size={13} />Current</span> :
                 <button type="button" disabled={busy} aria-label={`Switch to ${entry.name}`} onClick={() => void perform(async () => { await bridge.switch(entry.id); return true; })}
                   className="rounded-md px-2 py-1.5 text-[12px] text-ink hover:bg-control disabled:opacity-50">Switch</button>}
-              {entry.id !== "local" && copyOffered && <button type="button" disabled={busy} aria-label={`${t("cloudMove.here")}: ${entry.name}`} onClick={() => setCopyId(entry.id)} className="rounded-md px-2 py-1.5 text-[12px] text-ink hover:bg-control">{t("cloudMove.here")}</button>}
-              {entry.id !== "local" && sharingOffered && <button type="button" disabled={busy} aria-label={`Computer access for ${entry.name}`} onClick={() => setComputerId(entry.id)} className="rounded-md px-2 py-1.5 text-[12px] text-ink hover:bg-control">Computer access</button>}
+              {/* My Cloud has one control for what it may use: Let my bots use this Mac, in Settings → MausBot Cloud. */}
+              {entry.id !== "local" && "home" in entry && entry.home && window.ogb?.cloudLending && <button type="button" disabled={busy} data-cloud-lending-link onClick={() => void window.ogb?.cloudLending?.open().catch(() => {})} className="rounded-md px-2 py-1.5 text-[12px] text-ink hover:bg-control">{lendingTitle()}</button>}
+              {entry.id !== "local" && !("home" in entry && entry.home) && sharingOffered && <button type="button" disabled={busy} aria-label={`Computer access for ${entry.name}`} onClick={() => setComputerId(entry.id)} className="rounded-md px-2 py-1.5 text-[12px] text-ink hover:bg-control">Computer access</button>}
               {entry.id !== "local" && <button type="button" disabled={busy} aria-label={`Forget ${entry.name}`} title={`Forget ${entry.name}`}
                 onClick={() => void perform(() => bridge.forget(entry.id))} className="rounded-md p-1.5 text-ink-secondary hover:bg-control hover:text-danger disabled:opacity-50"><Trash2 size={14} /></button>}
             </li>;
           })}
         </ul>}
     </Card>
-    {copyOffered && copyId && saved?.environments.some(entry => entry.id === copyId) && <CloudMoveSettings key={copyId} destination={copyId} onClose={() => setCopyId(null)} />}
     {sharingOffered && computerWorkspace && <ComputerSharingSettings key={computerWorkspace.id} workspace={computerWorkspace} onClose={() => setComputerId(null)} />}
     <Card title="Connect to a server" subtitle="Already running OpenMausBot on a VPS, server, or another computer? Connect it here.">
       <form className="flex flex-col gap-3" onSubmit={(event) => {

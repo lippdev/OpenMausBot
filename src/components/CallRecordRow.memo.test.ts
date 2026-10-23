@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// A call's lines come from a walk of the whole transcript, and a chat holds a
-// record row per call. Each row works its lines out once per transcript and
-// call, not on every render of the row.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -25,7 +22,6 @@ const record = msg("row", {
   call: { callId: "c1", botId: "bot", client: "ios", startedAt: at - 102_000, endedAt: at, seconds: 102, endReason: "hung-up" },
 });
 const withCall = (fields: Partial<NonNullable<Message["call"]>>): Message => ({ ...record, call: { ...record.call!, ...fields } });
-/** A tool the provider ran (it carries an item id), asked for by the call's request. */
 const step = (id: string, tool: NonNullable<Message["tool"]>) =>
   msg(id, { kind: "activity", requestMessageId: "m1", tool: { ...tool, itemId: `item-${id}` } });
 const transcript: Message[] = [
@@ -49,20 +45,17 @@ describe("CallRecordRow's lines", () => {
     expect(callRecordLines).toHaveBeenCalledTimes(1);
     expect(host.textContent).toContain("Searching the web");
 
-    // the same transcript drawn again: the row's title arrives, the bot is renamed
     draw(withCall({ title: "Pune weather check" }), transcript);
     expect(host.textContent).toContain("Pune weather check");
     draw(record, transcript, "Ada");
     expect(host.textContent).toContain("Call with Ada");
     expect(callRecordLines).toHaveBeenCalledTimes(1);
 
-    // a step lands: the transcript is a new array, and the lines follow it
     const later = [...transcript, step("a2", { name: "Read", spoken: "reading a file", ok: true })];
     draw(record, later);
     expect(callRecordLines).toHaveBeenCalledTimes(2);
     expect(host.textContent).toContain("Reading a file");
 
-    // another call's row, in the same transcript, has lines of its own
     draw(withCall({ callId: "c2" }), later);
     expect(callRecordLines).toHaveBeenCalledTimes(3);
     expect(host.textContent).not.toContain("Searching the web");

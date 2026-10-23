@@ -43,6 +43,22 @@ describe("ConnectorCard ask card", () => {
     expect(html).toContain(t("connectors.card.continueTask"));
   });
 
+  it("asks for a label instead of retrying the same request when the app needs one", () => {
+    const html = view({ status: "failed", error: "Add an account alias so the existing connection is not replaced" });
+    expect(html).toContain(`aria-label="${t("connectors.aliasAriaAnother", { service: "GitHub" })}"`);
+    expect(html).toContain(t("connectors.aliasNeeded"));
+    expect(html).not.toContain("Add an account alias");
+    expect(html.match(/<button[^>]*>(?:(?!<\/button>)[^])*Try again/)?.[0]).toContain('disabled=""');
+
+    const taken = view({ status: "failed", alias: "work", error: 'Account alias "work" is already in use for github' });
+    expect(taken).toContain(t("connectors.aliasTaken"));
+    expect(taken).toContain("<input");
+
+    const other = view({ status: "failed", error: "Connection FAILED" });
+    expect(other).toContain("Connection FAILED");
+    expect(other).not.toContain("<input");
+  });
+
   it("draws nothing once dismissed", () => {
     expect(view({ dismissed: true })).toBe("");
   });

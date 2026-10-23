@@ -4,10 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSettingsSection } from "@/state/store";
 import { SettingsModal } from "./SettingsModal";
 
-// Every main window of the packaged app has the read-only plan bridge
-// (cloudPlan), on any server it opens. Settings → OMB Cloud shows it only on
-// an OMB Cloud home: on a VPS, a hosted workspace or someone else's server
-// there is no plan of this person's to show, and main would refuse it.
 const fixture = vi.hoisted(() => ({ section: "cloudAccount" as AppSettingsSection, config: undefined as { cloudHome?: boolean } | undefined, advanced: false }));
 vi.mock("@/lib/interface-mode", () => ({ useAdvancedMode: () => fixture.advanced, setAdvancedMode: vi.fn() }));
 vi.mock("./DesktopCapabilities", () => ({ useDesktopCapabilities: () => ({ capabilities: {} }) }));
@@ -18,7 +14,7 @@ vi.mock("@/state/store", async (importOriginal) => ({
 }));
 vi.mock("./CloudAccountSettings", () => ({ CloudAccountSettings: ({ cloudHome }: { cloudHome?: boolean }) => `CLOUD_PLAN_MARKER${cloudHome ? " home" : ""}` }));
 
-const plan = { state: vi.fn(), manage: vi.fn(), useThisComputer: vi.fn() };
+const plan = { state: vi.fn(), manage: vi.fn() };
 beforeEach(() => {
   fixture.section = "cloudAccount"; fixture.config = undefined;
   vi.stubGlobal("document", { documentElement: { dataset: {} } });
@@ -39,7 +35,7 @@ describe.each(["Simple", "Advanced"] as const)("%s Settings → OMB Cloud on a s
     fixture.config = { cloudHome: true };
     const html = render();
     expect(html).toContain("CLOUD_PLAN_MARKER home"); expect(html).toContain(reachable());
-    expect(html).toContain(fixture.advanced ? 'value="cloudAccount"' : 'data-settings-page="account"');
+    expect(html).toContain(fixture.advanced ? 'value="cloudAccount"' : 'data-settings-page="cloud"');
   });
   it("is the full account section in the app on this computer", () => {
     vi.stubGlobal("window", { ogb: { cloudAccount: {}, cloudPlan: plan } });

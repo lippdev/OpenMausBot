@@ -32,7 +32,6 @@ describe("titleConversationExcerpt", () => {
     const excerpt = titleConversationExcerpt(messages);
     const lines = excerpt.split("\n");
     expect(excerpt.length).toBeLessThanOrEqual(TITLE_INPUT_MAX_CHARS);
-    // each line is clipped, and the last line is the newest message
     expect(lines.every((line) => line.length <= 306)).toBe(true);
     expect(lines.at(-1)).toMatch(/^Bot: 29 /);
     expect(excerpt).not.toContain("User: 0 ");
@@ -58,7 +57,6 @@ describe("threadTitlePrompt", () => {
     const sent = message("user", "Compare monthly sales", { dataContext: { cardId: "c_1", draftSql: "SELECT private_draft".repeat(200) } });
     expect(titleConversationExcerpt([sent, message("bot", "Sales increased.")])).toBe("User: Compare monthly sales\nBot: Sales increased.");
     expect(threadTitlePrompt(sent.text!)).toBe(threadTitlePrompt("Compare monthly sales"));
-    // a pasted envelope is just text the person typed
     const typed = '<data-context>{"cardId":"c_1"}</data-context>\nCompare monthly sales';
     expect(threadTitlePrompt(typed)).toContain(typed);
     expect(titleConversationExcerpt([message("user", typed)])).toBe(`User: ${typed.replace("\n", " ")}`);

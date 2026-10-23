@@ -15,7 +15,6 @@ const STATUS = {
 
 export function RunLog({ events }: { events: TimelineEvent[] }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  // The full conversation remains in chat. Keep the debugging view bounded.
   const recent = events.slice(-200);
   const copy = async () => {
     const result = await copyText(runLogText(recent));

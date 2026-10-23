@@ -36,8 +36,6 @@ describe("workspace credential migration", () => {
       opencodeGoApiKey: "ocg-secret",
       openaiImageApiKey: "image-secret",
     });
-    // secrets are DELETED (not blanked) so "" stays meaningful as "cleared";
-    // non-secret siblings (endpoint url, chosen voice) stay in the file
     expect(result.config).toEqual({
       xai: { url: "https://api.example.test/v1" },
       box: {},
@@ -46,7 +44,6 @@ describe("workspace credential migration", () => {
       opencodeGo: {},
       profile: { name: "Ada" },
     });
-    // inputs are never mutated — main.mjs decides which files to rewrite
     expect(config.xai.key).toBe("xai-secret");
   });
 
@@ -77,8 +74,6 @@ describe("workspace credential migration", () => {
   });
 
   it("treats a saved non-empty value as newest intent and overwrites the store", () => {
-    // mid-session key change: the server persisted the new key to config.json;
-    // the stale stored secret must not win at the next boot
     const result = migrateWorkspaceCredentials(
       { box: { token: "box-NEW" } },
       { boxToken: "box-OLD", xaiApiKey: "xai-keep" },
@@ -88,27 +83,21 @@ describe("workspace credential migration", () => {
   });
 
   it("treats an empty saved value as no information and keeps the stored secret", () => {
-    // The packaged app tombstones every external-mode save as "" in
-    // config.json while the real key goes to credentials.bin — a boot that
-    // read "" as "cleared" would delete freshly saved keys on every restart.
+    // The packaged app tombstones every external-mode save as "" in config.json while the key goes to credentials.bin.
     const result = migrateWorkspaceCredentials(
       { xai: { key: "" }, tts: { key: "   " } },
       { xaiApiKey: "xai-OLD", ttsKey: "tts-OLD", boxToken: "box-keep" },
     );
     expect(result.credentialsChanged).toBe(false);
     expect(result.credentials).toEqual({ xaiApiKey: "xai-OLD", ttsKey: "tts-OLD", boxToken: "box-keep" });
-    // the swept field itself is still removed from the file
     expect(result.config).toEqual({ xai: {}, tts: {} });
     expect(result.configChanged).toBe(true);
   });
 
   it("keeps the packaged save → restart cycle lossless end to end", () => {
-    // first boot migrates the plaintext key in and sweeps the field
     const boot = migrateWorkspaceCredentials({ opencodeGo: { apiKey: "ocg-secret" } }, {});
     expect(boot.credentials).toEqual({ opencodeGoApiKey: "ocg-secret" });
 
-    // an external-mode save commits the key to the store and leaves a ""
-    // tombstone in config.json; the next boot must not read it as a clear
     const afterTombstone = migrateWorkspaceCredentials(
       { opencodeGo: { apiKey: "" }, profile: { name: "Ada" } },
       { opencodeGoApiKey: "ocg-secret" },

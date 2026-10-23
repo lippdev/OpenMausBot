@@ -1,7 +1,4 @@
-// The Data surface's strings have been rewritten twice (#2544, #2596) and
-// each pass left keys behind. Every data.* key must still be read somewhere:
-// as a literal t("data.…") or map value, or through a template on its parent
-// (t(`data.view.${mode}`)).
+// A data.* key is read as a literal t("data.…") or map value, or through a template on its parent (t(`data.view.${mode}`)).
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";

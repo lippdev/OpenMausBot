@@ -63,7 +63,6 @@ describe("room speaker names", () => {
     expect(html).toContain("var(--identity-blue)");
     expect(html).toContain("var(--identity-orange)");
     expect(html).not.toContain('data-bot-color="blue">still me');
-    // the person's side stays the skin bubble, with no name label
     expect(html).toContain("bg-bubble-user");
     expect(html).not.toContain("user-bubble-colored");
     const userBubble = html.indexOf("please take a look");

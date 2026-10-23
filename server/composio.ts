@@ -1,10 +1,27 @@
-// A project API key (ak_…) creates/reuses one Composio Session. That
-// Session owns connection state, auth links and the MCP endpoint.
+// A Composio project key (ak_…) creates or reuses one Session, which owns connection state, auth links and the MCP endpoint.
 import { saveConfig, type AppConfig } from "./config.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
-import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
+import { managedConnectorUnavailableReason, managedCustomAuthReason } from "../shared/connector-availability.ts";
+import {
+  DEFAULT_BACKEND_ORIGIN,
+  apiBase,
+  canonicalToolkitSlug,
+  inputError,
+  keepAuthConfigPick,
+  noAuthConfigReason,
+  offForToolRouterReason,
+  projectAuthConfigs,
+  projectHeaders,
+  refusedAuthConfigReason,
+  responseError,
+  forgetProjectAuthConfigs,
+  type AuthConfigMap,
+} from "./composio-project.ts";
+import { noManagedAuthToolkit, withAuthConfigHint } from "./connector-auth-config-hint.ts";
+import { planAccountLink } from "../shared/connector-account-link.ts";
+import type { CuratedConnectorSlug } from "../shared/connector-curated.ts";
 import { CONNECTOR_TOOL_NAME_PATTERN, type ConnectorToolGrant } from "../shared/wire.ts";
 import {
   CONNECTOR_ALLOWED_TOOLS_ENV,
@@ -15,12 +32,9 @@ import {
   serializeConnectorServiceSlugs,
 } from "./connector-advertisement.ts";
 import { serviceSlugFor, serviceSlugForCandidates } from "./connector-verdict.ts";
-
-const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
-
-function apiBase() {
-  return (process.env.OMB_COMPOSIO_API ?? `${DEFAULT_BACKEND_ORIGIN}/api/v3.1`).replace(/\/$/, "");
-}
+import { parseMcpResponse, withToolsListFallback } from "./connector-tools-list.ts";
+import { brokerAccess, type BrokerAccess } from "./composio-broker-access.ts";
+export { applyManagedBrokerMessage, brokerAccess, setManagedBrokerAccess, type BrokerAccess } from "./composio-broker-access.ts";
 
 function toolkitBase() {
   return (process.env.OMB_COMPOSIO_TOOLKITS_API ?? `${DEFAULT_BACKEND_ORIGIN}/api/v3`).replace(/\/$/, "");
@@ -36,30 +50,10 @@ const sessionResponseSchema = z.object({
       max_accounts_per_toolkit: z.number().optional(),
       require_explicit_selection: z.boolean().optional(),
     }).optional(),
-    /** toolkit slug → the project's own auth config the Session uses for it */
     auth_configs: z.record(z.string(), z.string()).optional(),
   }).optional(),
 });
 type SessionResponse = z.infer<typeof sessionResponseSchema>;
-
-// A project's own auth configs (bring-your-own OAuth app, API-key toolkits
-// such as twitter that Composio does not manage). A Session only uses one
-// when it was created with the config's id under `auth_configs`.
-const authConfigItemSchema = z.object({
-  id: z.string().optional(),
-  status: z.string().nullable().optional(),
-  is_composio_managed: z.boolean().optional(),
-  is_enabled_for_tool_router: z.boolean().nullable().optional(),
-  last_updated_at: z.string().nullable().optional(),
-  toolkit: z.object({ slug: z.string().optional() }).optional(),
-});
-const authConfigsPageSchema = z.object({
-  items: z.array(authConfigItemSchema).optional(),
-  next_cursor: z.string().nullable().optional(),
-});
-/** toolkit slug (lowercase) → auth config id */
-type AuthConfigMap = Record<string, string>;
-const MAX_AUTH_CONFIG_PAGES = 20;
 
 export interface ConnectedAccountSummary {
   id: string;
@@ -125,9 +119,7 @@ interface SessionCreateRequest {
   user_id: string;
   manage_connections: { enable: boolean; enable_wait_for_connections: boolean; enable_connection_removal: boolean };
   multi_account: typeof MULTI_ACCOUNT_CONFIG;
-  /** toolkit slug → the project's own auth config id; named only when the
-   * project has its own configs, since a Session cannot be edited afterwards
-   * and an empty map would pin "no custom auth" for the Session's lifetime */
+  /** Sent only when the project has configs: a Session can't be edited later, and an empty map pins "no custom auth" for its life. */
   auth_configs?: AuthConfigMap;
 }
 const MAX_CONNECTED_ACCOUNT_PAGES = 100;
@@ -153,77 +145,17 @@ interface IntegrationContext {
   commsToken: string;
   botId: string;
   threadId: string;
-  /** The bot's connector tool grants (issue #1737): undefined is the
-   * legacy all-tools bot and gets no advertisement filtering; a record —
-   * including the empty one — filters the bridge's tools/list. */
   connectorTools?: Record<string, ConnectorToolGrant>;
+  /** A Team Cloud member's own installation, instead of this server's. */
+  as?: BrokerAccess;
 }
 
-let managedBrokerAccess: { url: string; token: string } | null | undefined;
-
-const managedBrokerMessageSchema = z.record(z.string(), z.unknown());
-const managedBrokerToken = /^[0-9a-f]{64}$/;
-
-function normalizeManagedBrokerUrl(value: string): string {
-  const url = new URL(value);
-  if (url.username || url.password || url.search || url.hash) {
-    throw new Error("The connected-apps service URL must not include credentials, a query, or a fragment");
-  }
-  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new Error("The connected-apps service must use HTTPS");
-  }
-  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
-}
-
-export function applyManagedBrokerMessage(message: unknown): boolean {
-  const parsed = managedBrokerMessageSchema.safeParse(message);
-  if (
-    !parsed.success ||
-    parsed.data.type !== "openmausbot:managed-composio" ||
-    !Object.hasOwn(parsed.data, "access")
-  ) {
-    return false;
-  }
-  setManagedBrokerAccess(parsed.data.access);
-  return true;
-}
-
-export function setManagedBrokerAccess(access: unknown): void {
-  if (access === null) {
-    managedBrokerAccess = null;
-    return;
-  }
-  const parsed = z.object({ url: z.string().url(), token: z.string().regex(managedBrokerToken) }).strict().parse(access);
-  managedBrokerAccess = { url: normalizeManagedBrokerUrl(parsed.url), token: parsed.token };
-}
-
-function brokerAccess(): { url: string; token: string } | null {
-  if (managedBrokerAccess !== undefined) return managedBrokerAccess;
-  const url = process.env.OMB_COMPOSIO_BROKER_URL?.trim();
-  const token = process.env.OMB_COMPOSIO_BROKER_TOKEN?.trim();
-  if (!url || !token) return null;
-  if (!managedBrokerToken.test(token)) throw new Error("The connected-apps service token is invalid");
-  return { url: normalizeManagedBrokerUrl(url), token };
-}
-
-/** A user-owned project is an explicit choice and must win over the packaged
- * app's managed broker. An empty key means that choice was cleared, so the
- * managed service may take over again without a restart. */
+/** A user's own project key wins over the managed broker; "" means cleared, so the broker takes over again. */
 function projectApiKey(cfg: AppConfig): string | null {
-  const apiKey = cfg.composio?.apiKey?.trim();
-  return apiKey || null;
+  return cfg.composio?.apiKey?.trim() || null;
 }
 
-/** Composio's toolkit slug is `twitter`. Keep accepting the old `x` alias at
- * every local boundary so saved connector cards and model calls keep working. */
-function canonicalToolkitSlug(slug: string): string {
-  const normalized = slug.trim().toLowerCase();
-  return normalized === "x" ? "twitter" : normalized;
-}
-
-/** Keep credential-backed caches and transport sessions separated without
- * retaining another plaintext copy of the credential as their identity. */
+/** Separates caches and transports per credential without keeping another plaintext copy of it. */
 function backendFingerprint(kind: string, endpoint: string, credential: string): string {
   return createHash("sha256")
     .update(kind)
@@ -253,8 +185,6 @@ function canonicalServiceRecord<T>(services: Record<string, T>): Record<string, 
   );
 }
 
-/** Preserve the caller's key (`x` included) while speaking canonical toolkit
- * slugs upstream. Old connector cards index status with their saved slug. */
 function requestedServiceRecord<T>(services: Record<string, T>, requested: string[]): Record<string, T> {
   const canonical = canonicalServiceRecord(services);
   return Object.fromEntries(
@@ -275,10 +205,7 @@ export function configured(cfg: AppConfig): boolean {
   return connectionMode(cfg) !== "unavailable";
 }
 
-/** Three answers, not two. The desktop shell sets OMB_CREDENTIAL_STORE to
- * "unavailable" when it could not read credentials.bin this launch; without
- * that signal an unreadable store is indistinguishable from a user who never
- * connected anything, and the UI wipes a list it should have kept. */
+/** "unreadable": the desktop shell set OMB_CREDENTIAL_STORE=unavailable, so the UI keeps its list instead of wiping it. */
 export type ConnectorAvailability = "configured" | "unconfigured" | "unreadable";
 
 export function connectorAvailability(
@@ -289,25 +216,18 @@ export function connectorAvailability(
   return storeState === "unavailable" ? "unreadable" : "unconfigured";
 }
 
-/** Why connected apps are off, when they are. `mode: "unavailable"` alone
- * cannot tell a server that was never given a connection service (a source
- * build, a fixture, a fresh self-hosted server: the user has to add a key)
- * from the installed desktop app whose managed service has not answered
- * (something really is wrong). Only the packaged desktop app, the one child
- * started with OMB_DESKTOP_PARENT=1, registers with the managed service, so
- * only there is a missing service an outage. */
+/** Only a host the managed service comes with (the desktop app, OMB_DESKTOP_PARENT=1, or a Cloud home) calls a missing one an outage. */
 export type ConnectorSetup = "ready" | "needs-setup" | "service-unavailable";
 
 export function connectorSetup(
   cfg: AppConfig,
-  desktopManaged: boolean = process.env.OMB_DESKTOP_PARENT === "1",
+  managedHost: boolean = process.env.OMB_DESKTOP_PARENT === "1",
 ): ConnectorSetup {
   if (configured(cfg)) return "ready";
-  return desktopManaged ? "service-unavailable" : "needs-setup";
+  return managedHost ? "service-unavailable" : "needs-setup";
 }
 
-async function brokerRequest(path: string, init?: RequestInit): Promise<Response> {
-  const broker = brokerAccess();
+async function brokerRequest(path: string, init?: RequestInit, broker = brokerAccess()): Promise<Response> {
   if (!broker) throw new Error("The connected-apps service is unavailable");
   const headers = new Headers(init?.headers);
   headers.set("authorization", `Bearer ${broker.token}`);
@@ -317,22 +237,6 @@ async function brokerRequest(path: string, init?: RequestInit): Promise<Response
     headers,
     signal: init?.signal ?? AbortSignal.timeout(30_000),
   });
-}
-
-function projectHeaders(apiKey: string, json = false) {
-  const headers = new Headers({ "x-api-key": apiKey });
-  if (json) headers.set("content-type", "application/json");
-  return headers;
-}
-
-async function responseError(res: Response, fallback: string) {
-  const raw = await res.text().catch(() => "");
-  try {
-    const body = JSON.parse(raw);
-    return String(body?.message ?? body?.error?.message ?? body?.error ?? fallback);
-  } catch {
-    return raw.trim().slice(0, 300) || fallback;
-  }
 }
 
 async function throwBrokerError(res: Response, fallback: string): Promise<never> {
@@ -349,10 +253,7 @@ function trustedAuthUrl(value: string | undefined, slug: string): string {
   return url.toString();
 }
 
-/** Composio's own hosts are always trusted. A backend the operator pointed
- * the app at explicitly (OMB_COMPOSIO_API — a dev or test stub) may hand back
- * a Session on its own origin, since the API itself was already trusted that
- * far; any other host is refused. */
+/** Composio's own hosts, or the origin of an explicit OMB_COMPOSIO_API backend; any other host is refused. */
 export function trustedSessionMcpUrl(value: string): boolean {
   let mcp: URL;
   try {
@@ -380,27 +281,15 @@ function parseSessionResponse(session: SessionResponse): SessionResponse {
 }
 
 function supportsMultiAccount(session: SessionResponse): boolean {
-  // Only `enable` gates reuse. The cap and selection flags are what we ASK
-  // for at creation; if Composio clamps or omits them in the echo, recreating
-  // the Session would post the same config and get the same echo back — a
-  // strict equality check here can only manufacture a recreate-per-request
-  // loop, never fix anything.
+  // Only `enable` gates reuse: Composio may clamp or omit the cap and selection flags in its echo, so comparing them
+  // would recreate the Session on every request.
   return session.config?.multi_account?.enable === true;
 }
 
-/** Session ids this boot already tried to upgrade once. If the fresh Session
- *  STILL doesn't echo multi-account, Composio isn't granting it — run with
- *  what we have (single-account behavior) instead of recreating a Session and
- *  rewriting config.json on every request. */
+/** Sessions this boot already upgraded once: if Composio still doesn't echo multi-account, it isn't granting it. */
 const multiAccountUpgradeAttempted = new Set<string>();
-/** Session id + auth-config map pairs this boot already created a Session
- *  for. Same idea: if Composio does not echo `auth_configs`, recreating the
- *  Session on every check would loop without changing anything. */
+/** Likewise for an `auth_configs` echo Composio leaves out. */
 const authConfigUpgradeAttempted = new Set<string>();
-
-function inputError(message: string, status = 400) {
-  return Object.assign(new Error(message), { status });
-}
 
 export function normalizeAccountAlias(value: string | null | undefined): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
@@ -427,42 +316,6 @@ async function getProjectSession(apiKey: string, sessionId: string): Promise<Ses
   return parseSessionResponse(sessionResponseSchema.parse(await res.json()));
 }
 
-/** The project's own (non-Composio-managed) auth configs, one per toolkit.
- *  Disabled configs and ones switched off for Sessions are skipped; when a
- *  toolkit has several, the most recently updated wins. Ordinary Session
- *  preparation treats a denied list as "none"; an explicit auth retry surfaces
- *  the denial so it cannot replace a usable Session with an incomplete one. */
-export async function listCustomAuthConfigs(apiKey: string): Promise<AuthConfigMap> {
-  const chosen = new Map<string, { id: string; updated: string }>();
-  let cursor: string | undefined;
-  for (let page = 0; page < MAX_AUTH_CONFIG_PAGES; page++) {
-    const params = new URLSearchParams({ is_composio_managed: "false", limit: "100" });
-    if (cursor) params.set("cursor", cursor);
-    const res = await fetch(`${apiBase()}/auth_configs?${params}`, {
-      headers: projectHeaders(apiKey),
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) throw new Error(await responseError(res, `Composio auth configs: HTTP ${res.status}`));
-    const body = authConfigsPageSchema.parse(await res.json());
-    for (const item of body.items ?? []) {
-      const slug = item.toolkit?.slug ? canonicalToolkitSlug(item.toolkit.slug) : "";
-      if (!slug || !item.id || item.is_composio_managed === true) continue;
-      if (item.is_enabled_for_tool_router === false) continue;
-      if (item.status && /^(disabled|inactive|expired|deleted)$/i.test(item.status)) continue;
-      const updated = item.last_updated_at ?? "";
-      const current = chosen.get(slug);
-      if (!current || updated > current.updated) chosen.set(slug, { id: item.id, updated });
-    }
-    const next = body.next_cursor ?? undefined;
-    if (!next || next === cursor) break;
-    cursor = next;
-  }
-  return Object.fromEntries([...chosen].sort(([a], [b]) => a.localeCompare(b)).map(([slug, { id }]) => [slug, id]));
-}
-
-/** True when the Session already routes every wanted toolkit through the
- *  project's own auth config. Extra configs on the Session are fine; a
- *  missing or different one means the Session predates the config. */
 function sessionCoversAuthConfigs(session: SessionResponse, wanted: AuthConfigMap): boolean {
   const have = session.config?.auth_configs ?? {};
   const haveLower = Object.fromEntries(Object.entries(have).map(([slug, id]) => [canonicalToolkitSlug(slug), id]));
@@ -473,7 +326,50 @@ function authConfigsKey(sessionId: string, wanted: AuthConfigMap): string {
   return `${sessionId}:${JSON.stringify(wanted)}`;
 }
 
-/** Validate a project key and return one reusable Session for this install. */
+function authConfigsReady(session: SessionResponse, wanted: AuthConfigMap): boolean {
+  return sessionCoversAuthConfigs(session, wanted) || authConfigUpgradeAttempted.has(authConfigsKey(session.session_id, wanted));
+}
+
+const REFUSED_SESSION_STATUSES = new Set([400, 404, 409, 422]);
+
+/** An auth config Composio refuses is left out of the new Session (all of them, if its answer names none): no config
+ * may block the rest. `named` is what the Session was created with. */
+async function createProjectSession(
+  apiKey: string,
+  userId: string,
+  authConfigs: AuthConfigMap,
+): Promise<{ sessionId: string; named: AuthConfigMap; refused?: string }> {
+  const post = (configs: AuthConfigMap) => {
+    const sessionRequest: SessionCreateRequest = {
+      user_id: userId,
+      manage_connections: { enable: true, enable_wait_for_connections: true, enable_connection_removal: true },
+      multi_account: MULTI_ACCOUNT_CONFIG,
+    };
+    if (Object.keys(configs).length) sessionRequest.auth_configs = configs;
+    return fetch(`${apiBase()}/tool_router/session`, {
+      method: "POST",
+      headers: projectHeaders(apiKey, true),
+      body: JSON.stringify(sessionRequest),
+      signal: AbortSignal.timeout(30_000),
+    });
+  };
+  let named = authConfigs;
+  let res = await post(named);
+  let refused: string | undefined;
+  while (!res.ok && Object.keys(named).length && REFUSED_SESSION_STATUSES.has(res.status)) {
+    const said = await responseError(res, `HTTP ${res.status}`);
+    const kept = Object.fromEntries(Object.entries(named).filter(([, id]) => !said.includes(id)));
+    named = Object.keys(kept).length < Object.keys(named).length ? kept : {};
+    refused = said;
+    console.warn(`[composio] Composio refused a Session naming the project's auth configs (${said}); creating it without them`);
+    res = await post(named);
+  }
+  if (!res.ok) throw new Error(await responseError(res, `Composio rejected this key (HTTP ${res.status})`));
+  const session = parseSessionResponse(sessionResponseSchema.parse(await res.json()));
+  authConfigUpgradeAttempted.add(authConfigsKey(session.session_id, authConfigs));
+  return { sessionId: session.session_id, named, ...(refused ? { refused } : {}) };
+}
+
 export async function prepareProjectSession(
   apiKey: string,
   current?: { apiKey?: string; userId?: string; sessionId?: string },
@@ -483,107 +379,69 @@ export async function prepareProjectSession(
   if (!trimmed) throw new Error("Enter a Composio project API key");
   if (!trimmed.startsWith("ak_")) throw new Error("Composio project API keys start with ak_");
 
-  // The project's own auth configs must be named at creation — a Session
-  // cannot be edited later — so they are read before deciding whether the
-  // current Session is still the right one (issue #509: a twitter auth
-  // config created after the Session existed was never used).
-  const authConfigs = knownAuthConfigs
-    ?? await listCustomAuthConfigs(trimmed).catch((): AuthConfigMap => ({}));
+  // A Session names its auth configs at creation, so the project's are read before deciding to reuse it.
+  const authConfigs = knownAuthConfigs ?? (await projectAuthConfigs(trimmed)).configs;
   let priorUserId = current?.userId;
   if (trimmed === current?.apiKey && current.sessionId) {
     const existing = await getProjectSession(trimmed, current.sessionId);
-    if (
-      existing
-      && supportsMultiAccount(existing)
-      && (sessionCoversAuthConfigs(existing, authConfigs)
-        || authConfigUpgradeAttempted.has(authConfigsKey(existing.session_id, authConfigs)))
-    ) {
+    if (existing && supportsMultiAccount(existing) && authConfigsReady(existing, authConfigs)) {
       return {
         apiKey: trimmed,
         userId: existing.config?.user_id ?? current.userId ?? `openmausbot_${randomUUID()}`,
         sessionId: existing.session_id,
       };
     }
-    // Connections belong to the Composio user, not the Session. Recreate old
-    // single-account Sessions with the same user ID so every existing grant is
-    // retained while the new Session opts into explicit multi-account routing.
+    // Connections belong to the Composio user, not the Session: recreating with the same user id keeps every grant.
     priorUserId = existing?.config?.user_id ?? priorUserId;
   }
 
   const userId = priorUserId ?? `openmausbot_${randomUUID()}`;
-  const sessionRequest: SessionCreateRequest = {
-    user_id: userId,
-    manage_connections: {
-      enable: true,
-      enable_wait_for_connections: true,
-      enable_connection_removal: true,
-    },
-    multi_account: MULTI_ACCOUNT_CONFIG,
-  };
-  if (Object.keys(authConfigs).length) sessionRequest.auth_configs = authConfigs;
-  const res = await fetch(`${apiBase()}/tool_router/session`, {
-    method: "POST",
-    headers: projectHeaders(trimmed, true),
-    body: JSON.stringify(sessionRequest),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) throw new Error(await responseError(res, `Composio rejected this key (HTTP ${res.status})`));
-  const session = parseSessionResponse(sessionResponseSchema.parse(await res.json()));
-  // If Composio does not echo the configs back, a later check would ask for
-  // the same creation again — remember this attempt so it happens once.
-  authConfigUpgradeAttempted.add(authConfigsKey(session.session_id, authConfigs));
-  return { apiKey: trimmed, userId, sessionId: session.session_id };
+  const { sessionId } = await createProjectSession(trimmed, userId, authConfigs);
+  return { apiKey: trimmed, userId, sessionId };
+}
+
+async function adoptProjectSession(
+  composio: NonNullable<AppConfig["composio"]>,
+  apiKey: string,
+  userId: string,
+  sessionId: string,
+): Promise<SessionResponse> {
+  multiAccountUpgradeAttempted.add(sessionId);
+  composio.userId = userId;
+  composio.sessionId = sessionId;
+  saveConfig({ composio: { userId, sessionId } });
+  const created = await getProjectSession(apiKey, sessionId);
+  if (!created) throw new Error("Composio Session disappeared after creation");
+  return created;
 }
 
 async function ensureProjectSession(cfg: AppConfig): Promise<SessionResponse> {
   const composio = cfg.composio;
   const apiKey = projectApiKey(cfg);
   if (!composio || !apiKey) throw new Error("No Composio project key configured");
+  const { configs } = await projectAuthConfigs(apiKey);
   if (composio.sessionId) {
     const existing = await getProjectSession(apiKey, composio.sessionId);
-    if (existing && (supportsMultiAccount(existing) || multiAccountUpgradeAttempted.has(existing.session_id))) {
+    if (
+      existing
+      && (supportsMultiAccount(existing) || multiAccountUpgradeAttempted.has(existing.session_id))
+      && authConfigsReady(existing, configs)
+    ) {
       return existing;
     }
   }
-  // A missing/deleted session is recreated and its non-secret identifiers are
-  // persisted so an edited config/env setup does not recreate it every launch.
-  const prepared = await prepareProjectSession(apiKey, composio);
-  multiAccountUpgradeAttempted.add(prepared.sessionId);
-  composio.userId = prepared.userId;
-  composio.sessionId = prepared.sessionId;
-  saveConfig({ composio: { userId: prepared.userId, sessionId: prepared.sessionId } });
-  const created = await getProjectSession(apiKey, prepared.sessionId);
-  if (!created) throw new Error("Composio Session disappeared after creation");
-  return created;
+  const prepared = await prepareProjectSession(apiKey, composio, configs);
+  return adoptProjectSession(composio, apiKey, prepared.userId, prepared.sessionId);
 }
 
-/** Replace the current Session with a freshly created one — the only way to
- *  pick up an auth config the user added after the Session was made. The
- *  Composio user id is kept, so every existing connection survives. */
-async function recreateProjectSession(
-  cfg: AppConfig,
-  userId: string,
-  authConfigs: AuthConfigMap,
-): Promise<SessionResponse> {
-  const composio = cfg.composio;
+async function recreateProjectSession(cfg: AppConfig, userId: string, authConfigs: AuthConfigMap) {
   const apiKey = projectApiKey(cfg);
-  if (!composio || !apiKey) throw new Error("No Composio project key configured");
-  const prepared = await prepareProjectSession(
-    apiKey,
-    { apiKey, userId },
-    authConfigs,
-  );
-  multiAccountUpgradeAttempted.add(prepared.sessionId);
-  composio.userId = prepared.userId;
-  composio.sessionId = prepared.sessionId;
-  saveConfig({ composio: { userId: prepared.userId, sessionId: prepared.sessionId } });
-  const created = await getProjectSession(apiKey, prepared.sessionId);
-  if (!created) throw new Error("Composio Session disappeared after creation");
-  return created;
+  if (!cfg.composio || !apiKey) throw new Error("No Composio project key configured");
+  const created = await createProjectSession(apiKey, userId, authConfigs);
+  return { ...created, session: await adoptProjectSession(cfg.composio, apiKey, userId, created.sessionId) };
 }
 
-/** Composio's wording when a toolkit has no managed auth and the Session was
- *  not told which of the project's own auth configs to use. */
+/** Composio's wording when a toolkit needs one of the project's own auth configs. */
 const NEEDS_AUTH_CONFIG = /does not manage auth|auth[_ ]?config/i;
 
 export async function mcpIntegration(
@@ -591,11 +449,6 @@ export async function mcpIntegration(
   context: IntegrationContext,
 ): Promise<ComposioMcpIntegration | null> {
   if (!configured(cfg)) return null;
-  // Connector grants 3/5: a grants record rides to the bridge as a capped
-  // JSON env var so tools/list is filtered down to what the bot may call.
-  // No record (legacy all-tools bots) or one past the cap mounts without
-  // the var — the bridge then relays the unfiltered list and every call is
-  // still judged by the slice-2 verdict on the relay endpoint.
   const allowlist = context.connectorTools === undefined
     ? undefined
     : serializeConnectorAllowedTools(context.connectorTools);
@@ -605,14 +458,9 @@ export async function mcpIntegration(
       + " tools/list stays unfiltered and grants are enforced per call",
     );
   }
-  // The connected-service slugs ride alongside the allowlist so the
-  // bridge resolves underscored services (bland_ai) instead of letting a
-  // plain-prefix grant (bland) widen them. An unreachable catalog omits
-  // the var and the filter keeps its plain-split fallback; legacy
-  // all-tools bots mount without it because their list is unfiltered.
   const serviceSlugs = context.connectorTools === undefined
     ? undefined
-    : serializeConnectorServiceSlugs(await connectedServiceSlugs(cfg));
+    : serializeConnectorServiceSlugs(await connectedServiceSlugs(cfg, context.as));
   if (serviceSlugs?.oversized) {
     console.warn(
       `[composio] connector service slugs for bot ${context.botId} exceed ${CONNECTOR_SERVICE_SLUGS_MAX_BYTES} bytes;`
@@ -624,15 +472,11 @@ export async function mcpIntegration(
     args: [SPAWNED_PROXIES.connectors],
     env: {
       ELECTRON_RUN_AS_NODE: "1",
-      // The provider-facing bridge receives only this boot's loopback token.
-      // Project/broker credentials stay in the harness process, so a coding
-      // agent that prints its environment cannot export a durable secret.
+      // The bridge gets only this boot's loopback token; project and broker credentials never leave the harness.
       OMB_CONNECTOR_UPSTREAM_URL: `${context.harnessUrl}/api/internal/connectors/mcp`,
       OMB_CONNECTOR_UPSTREAM_HEADERS: JSON.stringify({ authorization: `Bearer ${context.commsToken}` }),
       OMB_HARNESS_URL: context.harnessUrl,
-      // Distinct from the agents proxy token: Codex flattens mounted MCP env
-      // variables into one process environment, so a shared name would let
-      // the later agents mount overwrite this connector-scoped capability.
+      // A name apart from the agents proxy token: Codex flattens all mounted MCP env into one environment.
       OMB_CONNECTOR_TOKEN: context.commsToken,
       OMB_BOT_ID: context.botId,
       OMB_THREAD_ID: context.threadId,
@@ -646,9 +490,9 @@ export async function relayMcp(
   cfg: AppConfig,
   payload: JsonValue,
   transportSessionId?: string,
-  beforeSend?: () => void,
+  beforeSend?: () => void, signal?: AbortSignal, as?: BrokerAccess,
 ): Promise<{ status: number; bytes: Uint8Array; contentType: string; transportSessionId?: string }> {
-  const apiKey = projectApiKey(cfg);
+  const apiKey = as ? null : projectApiKey(cfg);
   let url: string;
   let identity: string;
   const headers = new Headers({
@@ -661,7 +505,7 @@ export async function relayMcp(
     headers.set("x-api-key", apiKey);
     identity = backendFingerprint("project-mcp", url, apiKey);
   } else {
-    const broker = brokerAccess();
+    const broker = as ?? brokerAccess();
     if (!broker) throw new Error("Connected apps are unavailable");
     url = `${broker.url}/v1/mcp`;
     headers.set("authorization", `Bearer ${broker.token}`);
@@ -677,28 +521,28 @@ export async function relayMcp(
   if (forwardedTransportSessionId) {
     headers.set("mcp-session-id", forwardedTransportSessionId);
   }
-  // Session discovery can await network I/O. Turn authority and mutable
-  // permissions must be checked after it, immediately before dispatch.
+  // Discovery may await I/O: check turn authority and permissions after it, right before dispatch.
   beforeSend?.();
-  const response = await fetch(url, {
+  const response = await withToolsListFallback(identity, payload, () => fetch(url, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(10 * 60_000),
-  });
+    signal: signal ?? AbortSignal.timeout(10 * 60_000),
+  }));
   const declared = Number(response.headers.get("content-length") ?? "0");
   if (declared > 20 * 1024 * 1024) throw new Error("Connected-app response exceeded 20 MB");
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > 20 * 1024 * 1024) throw new Error("Connected-app response exceeded 20 MB");
+  const raw = new Uint8Array(await response.arrayBuffer());
+  if (raw.byteLength > 20 * 1024 * 1024) throw new Error("Connected-app response exceeded 20 MB");
   if (forwardedTransportSessionId) rememberTransportSession(forwardedTransportSessionId, identity);
   const nextTransportSessionId = response.headers.get("mcp-session-id") ?? undefined;
   if (nextTransportSessionId) rememberTransportSession(nextTransportSessionId, identity);
-  return {
-    status: response.status,
-    bytes,
-    contentType: response.headers.get("content-type") ?? "application/json",
-    transportSessionId: nextTransportSessionId,
-  };
+  const contentType = response.headers.get("content-type") ?? "application/json";
+  const toolCall = typeof payload === "object" && payload !== null && !Array.isArray(payload) && payload.method === "tools/call";
+  const { bytes, toolkit } = toolCall
+    ? withAuthConfigHint(raw, contentType, apiKey ? "self-hosted" : "managed")
+    : { bytes: raw, toolkit: null };
+  if (toolkit && apiKey) forgetProjectAuthConfigs(apiKey);
+  return { status: response.status, bytes, contentType, transportSessionId: nextTransportSessionId };
 }
 
 async function listConnectedAccounts(
@@ -710,8 +554,6 @@ async function listConnectedAccounts(
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
 
-  // Five accounts per toolkit can exceed one provider page when a user has
-  // many apps. Follow Composio's cursor instead of silently dropping entries.
   for (let page = 0; page < MAX_CONNECTED_ACCOUNT_PAGES; page += 1) {
     const params = new URLSearchParams({
       limit: "50",
@@ -744,9 +586,7 @@ async function listSessionToolkits(
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; page < MAX_CONNECTED_ACCOUNT_PAGES; page += 1) {
-    // The unfiltered endpoint contains the entire Composio marketplace and is
-    // cursor-paginated in 50-item pages. The Connected tab only needs the
-    // user's connected toolkits, so avoid scanning hundreds of unrelated apps.
+    // Unfiltered, this endpoint pages through the whole marketplace 50 at a time.
     const params = new URLSearchParams({ limit: "50", is_connected: "true" });
     if (cursor) params.set("cursor", cursor);
     const response = await fetch(
@@ -834,51 +674,51 @@ function allServiceStates(
   return Object.fromEntries(services);
 }
 
-/**
- * Enumerate the user's complete connected-account inventory without depending
- * on marketplace ordering or catalog pagination.
- */
-export async function connectedServices(cfg: AppConfig): Promise<Record<string, ConnectorServiceState>> {
-  const apiKey = projectApiKey(cfg);
+export interface ConnectedServicesInventory {
+  services: Record<string, ConnectorServiceState>;
+  complete: boolean;
+}
+
+export async function connectedServicesInventory(cfg: AppConfig, as?: BrokerAccess): Promise<ConnectedServicesInventory> {
+  const apiKey = as ? null : projectApiKey(cfg);
   if (!apiKey) {
-    const response = await brokerRequest("/v1/connectors/connected");
+    const response = await brokerRequest("/v1/connectors/connected", undefined, as);
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     const body = connectorServicesResponseSchema.parse(await response.json());
     const services = canonicalServiceRecord(body.services ?? {});
-    return Object.fromEntries(
-      Object.entries(services).map(([slug, state]) => [slug, {
-        connected: state.connected,
-        pending: state.pending ?? false,
-        status: state.status ?? (state.connected ? "ACTIVE" : "not_connected"),
-        accounts: state.accounts ?? [],
-      }]),
-    );
+    return {
+      services: Object.fromEntries(
+        Object.entries(services).map(([slug, state]) => [slug, {
+          connected: state.connected,
+          pending: state.pending ?? false,
+          status: state.status ?? (state.connected ? "ACTIVE" : "not_connected"),
+          accounts: state.accounts ?? [],
+        }]),
+      ),
+      complete: true,
+    };
   }
   const session = await ensureProjectSession(cfg);
   const userId = session.config?.user_id ?? cfg.composio?.userId;
   if (!userId) throw new Error("Composio Session returned no user ID");
-  const [toolkits, accounts] = await Promise.all([
+  const [toolkits, accountResult] = await Promise.all([
     listSessionToolkits(apiKey, session.session_id),
-    // Scoped project keys can grant Session reads without granting the raw
-    // connected-account list. The Session still proves which selected/no-auth
-    // toolkits belong to this installation, so retain that safe fallback.
-    listConnectedAccounts(apiKey, userId, []).catch(() => []),
+    // Scoped project keys can grant Session reads without the raw connected-account list.
+    listConnectedAccounts(apiKey, userId, []).then((accounts) => ({ accounts, complete: true as const }))
+      .catch(() => ({ accounts: [] as ConnectedAccountResponse[], complete: false as const })),
   ]);
-  return allServiceStates(summarizeAccounts(accounts, []), toolkits);
+  return {
+    services: allServiceStates(summarizeAccounts(accountResult.accounts, []), toolkits),
+    complete: accountResult.complete,
+  };
 }
 
-/** Semantic validation for a connectorTools patch (issue #1737): slugs
- * must name a connected service, and every listed tool name must carry its
- * own service prefix (GMAIL_SEND_EMAIL under "gmail") — a mismatched name
- * would be granted yet permanently refused at call time. The prefix check
- * resolves against the connected-service slugs, so an underscored service
- * (bland_ai) keeps its BLAND_AI_* names and a plain-prefix grant cannot
- * capture them; it always runs, degrading to the plain split when the
- * connection inventory is unreachable. Only the connection-dependent and
- * catalog checks fail open — an unreachable connection inventory, the
- * curated fallback, or a catalog walk that did not reach its end never
- * block the patch, because call-time enforcement (slice 2) stays the
- * authority either way. Returns the rejection message or null. */
+export async function connectedServices(cfg: AppConfig, as?: BrokerAccess): Promise<Record<string, ConnectorServiceState>> {
+  return (await connectedServicesInventory(cfg, as)).services;
+}
+
+/** Rejects a connectorTools patch naming an unconnected service or a tool without its service prefix. Checks that need the
+ * network fail open, since call-time enforcement decides. Returns the message or null. */
 export async function validateConnectorGrants(
   cfg: AppConfig,
   grants: Record<string, ConnectorToolGrant>,
@@ -887,10 +727,6 @@ export async function validateConnectorGrants(
   const candidates = connected ? Object.keys(connected) : [];
   for (const [slug, grant] of Object.entries(grants)) {
     if (grant.tools === "*") continue;
-    // The prefix check runs against the connected-service slugs, so an
-    // underscored service (bland_ai) accepts its own BLAND_AI_* names —
-    // and a plain-prefix grant cannot capture them while the real service
-    // is connected.
     const misplaced = grant.tools.filter(
       (tool) => (serviceSlugForCandidates(tool, candidates) ?? serviceSlugFor(tool)) !== slug,
     );
@@ -904,10 +740,6 @@ export async function validateConnectorGrants(
     return `connectorTools names services that are not connected: ${unconnected.join(", ")}`;
   }
   const catalog = await listToolkits(cfg);
-  // source "curated" means the marketplace was unreachable, and a walk that
-  // never reached its natural end served only part of it — either way there
-  // is nothing trustworthy to cross-check against, and a grant for a service
-  // on a page the walk never saw must not be rejected.
   if (catalog.source !== "api" || !catalog.pagination?.complete) return null;
   const known = new Set(catalog.cards.map((card) => card.slug.toLowerCase()));
   const unknown = Object.keys(grants).filter((slug) => !known.has(slug));
@@ -917,19 +749,12 @@ export async function validateConnectorGrants(
   return null;
 }
 
-/** One grantable tool as the web editor lists it. Descriptions are search
- * aids trimmed to a card-sized line, never a contract. */
 export interface ConnectorToolListing {
   name: string;
   description?: string;
 }
 
-/** The grant editor's tool inventory, grouped by service slug. Sourced from
- * the same MCP endpoint the bots' bridge relays to (initialize + tools/list
- * through relayMcp), so what the picker offers is exactly what a granted bot
- * would see — in self-hosted and managed modes alike. Platform meta-tools
- * and per-service connection flows are not per-tool grants (they ride along
- * whenever a service is granted), so they never appear in the picker. */
+/** The picker offers exactly what a granted bot's bridge would see. */
 export async function listConnectorTools(
   cfg: AppConfig,
   options: { force?: boolean } = {},
@@ -939,9 +764,6 @@ export async function listConnectorTools(
     && Date.now() - connectorToolsCache.at < CONNECTOR_TOOLS_CACHE_MS) {
     return connectorToolsCache.services;
   }
-  // Concurrent misses share one MCP walk — two editors opening together
-  // must not run the initialize + tools/list sequences twice. force
-  // bypasses the settled cache but still joins a walk already running.
   if (connectorToolsRequest?.identity === identity) return connectorToolsRequest.services;
   const walk = collectConnectorTools(cfg).then((services) => {
     connectorToolsCache = { at: Date.now(), identity, services };
@@ -957,35 +779,25 @@ export async function listConnectorTools(
 
 const CONNECTOR_TOOLS_CACHE_MS = 60_000;
 let connectorToolsCache: { at: number; identity: string; services: Record<string, ConnectorToolListing[]> } | null = null;
-/** Which backend an inventory walk belongs to, mirroring the relay's own
- * credential fingerprint: a project key or the managed broker. Cached
- * inventories are keyed by it, so a config switch can never serve the
- * previous backend's tools for another cache window. */
-function connectorToolsIdentity(cfg: AppConfig): string {
-  const apiKey = projectApiKey(cfg);
+/** Cache key per backend, so a config switch never serves the previous backend's tools. */
+function connectorToolsIdentity(cfg: AppConfig, as?: BrokerAccess): string {
+  const apiKey = as ? null : projectApiKey(cfg);
   if (apiKey) return backendFingerprint("project-tools", apiBase(), apiKey);
-  const broker = brokerAccess();
+  const broker = as ?? brokerAccess();
   return broker ? backendFingerprint("managed-tools", broker.url, broker.token) : "none";
 }
 
 let connectorToolsRequest: { identity: string; services: Promise<Record<string, ConnectorToolListing[]>> } | null = null;
 
-/** The service slugs grant enforcement resolves tool-name prefixes
- * against: every key of the connection inventory, connected or not,
- * because the real backend slugs are what separates an underscored
- * service (bland_ai) from a plain-prefix grant (bland). Cached like the
- * tool inventory — 60s, keyed by backend identity, one shared in-flight
- * walk — and an unreachable inventory reads as an empty list without
- * caching the failure, so callers fall back to the plain split and the
- * next call retries. */
-export async function connectedServiceSlugs(cfg: AppConfig): Promise<readonly string[]> {
-  const identity = connectorToolsIdentity(cfg);
+/** Real backend slugs, so an underscored service (bland_ai) is never captured by a plain-prefix grant (bland). */
+export async function connectedServiceSlugs(cfg: AppConfig, as?: BrokerAccess): Promise<readonly string[]> {
+  const identity = connectorToolsIdentity(cfg, as);
   if (connectorServiceSlugsCache?.identity === identity
     && Date.now() - connectorServiceSlugsCache.at < CONNECTOR_SERVICE_SLUGS_CACHE_MS) {
     return connectorServiceSlugsCache.slugs;
   }
   if (connectorServiceSlugsRequest?.identity === identity) return connectorServiceSlugsRequest.slugs;
-  const walk = connectedServices(cfg).then(
+  const walk = connectedServices(cfg, as).then(
     (services) => {
       const slugs = Object.keys(services);
       connectorServiceSlugsCache = { at: Date.now(), identity, slugs };
@@ -1005,7 +817,6 @@ const CONNECTOR_SERVICE_SLUGS_CACHE_MS = 60_000;
 let connectorServiceSlugsCache: { at: number; identity: string; slugs: readonly string[] } | null = null;
 let connectorServiceSlugsRequest: { identity: string; slugs: Promise<readonly string[]> } | null = null;
 
-/** Tool names longer than any Composio description worth searching. */
 const TOOL_DESCRIPTION_MAX = 240;
 const TOOLS_LIST_PAGES_MAX = 10;
 
@@ -1022,38 +833,7 @@ function connectorToolListing(tool: unknown): ConnectorToolListing | null {
   return trimmed ? { name, description: trimmed } : { name };
 }
 
-/** One JSON-RPC response frame from a JSON or SSE body, mirroring the
- * bridge's parseUpstream: SSE data lines are tried in order and the frame
- * carrying the request id wins. */
-function parseMcpResponse(text: string, id: string | number): Record<string, unknown> | null {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  const candidate = (value: unknown): value is Record<string, unknown> =>
-    Boolean(value) && typeof value === "object" && !Array.isArray(value);
-  if (trimmed.startsWith("{")) {
-    const parsed: unknown = JSON.parse(trimmed);
-    return candidate(parsed) ? parsed : null;
-  }
-  const frames = trimmed
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim())
-    .filter((line) => line && line !== "[DONE]")
-    .flatMap((line) => {
-      try {
-        return [JSON.parse(line) as unknown];
-      } catch {
-        return [];
-      }
-    })
-    .filter(candidate);
-  return frames.findLast((frame) => frame.id === id) ?? frames.at(-1) ?? null;
-}
-
 async function collectConnectorTools(cfg: AppConfig): Promise<Record<string, ConnectorToolListing[]>> {
-  // Connected services are the real slugs, so they resolve underscored
-  // services (bland_ai) the plain split would file under "bland"; an
-  // unreachable inventory degrades to that split.
   const connected = await connectedServices(cfg).catch(() => null);
   const candidates = connected ? Object.keys(connected) : [];
   const initialize = await relayMcp(cfg, {
@@ -1070,8 +850,7 @@ async function collectConnectorTools(cfg: AppConfig): Promise<Record<string, Con
     throw new Error(await responseErrorFromBytes(initialize.status, initialize.bytes));
   }
   const transportSessionId = initialize.transportSessionId;
-  // Streamable-HTTP servers expect the handshake notification before the
-  // first request; it carries no response, so failures are not fatal.
+  // Streamable-HTTP MCP servers expect the initialized notification before the first request.
   await relayMcp(cfg, {
     jsonrpc: "2.0",
     method: "notifications/initialized",
@@ -1127,7 +906,6 @@ async function responseErrorFromBytes(status: number, bytes: Uint8Array): Promis
     }
     if (typeof message === "string" && message) return message;
   } catch {
-    // fall through to the generic status line
   }
   return `Composio tools/list: HTTP ${status}`;
 }
@@ -1150,11 +928,7 @@ export async function connectionStatus(cfg: AppConfig, slugs: string[]) {
       headers: projectHeaders(apiKey),
       signal: AbortSignal.timeout(15_000),
     }),
-    // Session toolkits only include an account once it is usable. Read the
-    // account lifecycle too so the UI can distinguish an OAuth flow that is
-    // still waiting in the browser from one that expired or failed. Scoped
-    // keys may omit connected-account read permission, so this is additive:
-    // the normal session result remains the fallback.
+    // Session toolkits list an account only once it is usable, so read the account lifecycle too (scoped keys may be denied it).
     userId
       ? listConnectedAccounts(apiKey, userId, canonicalSlugs).catch(() => [])
       : Promise.resolve([]),
@@ -1170,10 +944,6 @@ export async function connectionStatus(cfg: AppConfig, slugs: string[]) {
       const canonicalSlug = canonicalToolkitSlug(slug);
       const item = bySlug.get(canonicalSlug);
       const serviceAccounts = accountsBySlug.get(canonicalSlug) ?? [];
-      // Mirror allServiceStates: a scoped key can be denied the raw account
-      // list while the Session still names its selected account. Synthesize
-      // that account here too, so a status poll never wipes the row the
-      // inventory paths render (merge replaces a slug's state wholesale).
       const selected = item?.connected_account;
       const selectedId = validAccountId(selected?.id) ? selected.id : undefined;
       const withSelected = selectedId && !serviceAccounts.some((account) => account.id === selectedId)
@@ -1192,12 +962,11 @@ export async function connectionStatus(cfg: AppConfig, slugs: string[]) {
   );
 }
 
-/** Backward-compatible service disconnect: removes the Session-selected account. */
-export async function removeService(cfg: AppConfig, slug: string) {
+export async function removeService(cfg: AppConfig, slug: string, as?: BrokerAccess) {
   const toolkit = canonicalToolkitSlug(slug);
-  const apiKey = projectApiKey(cfg);
+  const apiKey = as ? null : projectApiKey(cfg);
   if (!apiKey) {
-    const response = await brokerRequest(`/v1/connectors/${encodeURIComponent(toolkit)}`, { method: "DELETE" });
+    const response = await brokerRequest(`/v1/connectors/${encodeURIComponent(toolkit)}`, { method: "DELETE" }, as);
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     return removalResponseSchema.parse(await response.json());
   }
@@ -1211,12 +980,16 @@ export async function removeService(cfg: AppConfig, slug: string) {
   const body = toolkitPageSchema.parse(await list.json());
   const id = body.items?.find((item) => item.slug && canonicalToolkitSlug(item.slug) === toolkit)?.connected_account?.id;
   if (!id) return { removed: 0 };
+  await deleteConnectedAccount(apiKey, id);
+  return { removed: 1 };
+}
+
+async function deleteConnectedAccount(apiKey: string, id: string) {
   const removed = await fetch(
     `${apiBase()}/connected_accounts/${encodeURIComponent(id)}?revoke_on_delete=true`,
     { method: "DELETE", headers: projectHeaders(apiKey), signal: AbortSignal.timeout(30_000) },
   );
   if (!removed.ok) throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
-  return { removed: 1 };
 }
 
 /** Disconnect exactly one account after proving it belongs to this user/toolkit. */
@@ -1242,26 +1015,34 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
       && canonicalToolkitSlug(account.toolkit.slug) === toolkit
   );
   if (!owned) return { removed: 0 };
-  const removed = await fetch(
-    `${apiBase()}/connected_accounts/${encodeURIComponent(accountId)}?revoke_on_delete=true`,
-    { method: "DELETE", headers: projectHeaders(apiKey), signal: AbortSignal.timeout(30_000) },
-  );
-  if (!removed.ok) throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
+  await deleteConnectedAccount(apiKey, accountId);
   return { removed: 1 };
 }
 
-/** Mint a browser auth link for one service. Returns { url } or throws. */
-export async function authorizeService(cfg: AppConfig, slug: string, requestedAlias?: string | null) {
-  let alias = normalizeAccountAlias(requestedAlias);
-  const toolkit = canonicalToolkitSlug(slug);
-  const mode = connectionMode(cfg);
-  const unavailable = managedConnectorUnavailableReason(mode, toolkit);
-  if (unavailable) throw inputError(unavailable, 409);
+/** A bot's explicit auth config for a toolkit, checked in the person's own project and kept before any card shows. */
+export async function useRequestedAuthConfigs(cfg: AppConfig, items: ReadonlyArray<{ slug: string; authConfigId?: string }>) {
   const apiKey = projectApiKey(cfg);
+  for (const { slug, authConfigId } of items) {
+    if (!authConfigId) continue;
+    const toolkit = canonicalToolkitSlug(slug);
+    if (!apiKey) throw inputError(managedCustomAuthReason(toolkit), 409);
+    await keepAuthConfigPick(apiKey, toolkit, authConfigId);
+  }
+}
+
+export async function authorizeService(cfg: AppConfig, slug: string, requestedAlias?: string | null, as?: BrokerAccess) {
+  const alias = normalizeAccountAlias(requestedAlias);
+  const toolkit = canonicalToolkitSlug(slug);
+  const unavailable = managedConnectorUnavailableReason(as ? "managed" : connectionMode(cfg), toolkit);
+  if (unavailable) throw inputError(unavailable, 409);
+  const apiKey = as ? null : projectApiKey(cfg);
   if (!apiKey) {
     const request: RequestInit = { method: "POST" };
     if (alias) request.body = JSON.stringify({ alias });
-    const response = await brokerRequest(`/v1/connectors/${encodeURIComponent(toolkit)}/authorize`, request);
+    const response = await brokerRequest(`/v1/connectors/${encodeURIComponent(toolkit)}/authorize`, request, as);
+    if (!response.ok && noManagedAuthToolkit(await response.clone().text().catch(() => ""))) {
+      throw inputError(managedCustomAuthReason(toolkit), 409);
+    }
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     const body = authUrlResponseSchema.parse(await response.json());
     return { url: trustedAuthUrl(body.url, toolkit) };
@@ -1269,31 +1050,15 @@ export async function authorizeService(cfg: AppConfig, slug: string, requestedAl
   const session = await ensureProjectSession(cfg);
   const userId = session.config?.user_id ?? cfg.composio?.userId;
   if (!userId) throw new Error("Composio Session has no user ID");
-  // A scoped key may be denied account listing — authorization must still
-  // work (it always did pre-multi-account), so the alias guardrails degrade
-  // to first-account behavior, the same fallback every inventory path takes.
   const accounts = await listConnectedAccounts(apiKey, userId, [toolkit]).catch(() => []);
   const serviceAccounts = accounts.filter((account) =>
     account.toolkit?.slug !== undefined && canonicalToolkitSlug(account.toolkit.slug) === toolkit
   );
-  const usableAccounts = serviceAccounts.filter((account) => /^(active|initiated|initializing|pending)$/i.test(account.status ?? ""));
-  if (usableAccounts.length >= MULTI_ACCOUNT_CONFIG.max_accounts_per_toolkit) {
-    throw inputError(`${toolkit} already has the maximum of ${MULTI_ACCOUNT_CONFIG.max_accounts_per_toolkit} accounts`, 409);
-  }
-  if (serviceAccounts.length > 0 && !alias) {
-    if (serviceAccounts.every((account) => /^(initializing|initiated|expired)$/i.test(account.status ?? ""))) {
-      // Retry without replacing a named account or revoking a former grant:
-      // EXPIRED can describe either an abandoned flow or an expired credential.
-      alias = `omb-retry-${randomUUID()}`;
-    } else {
-      throw inputError("Add an account alias so the existing connection is not replaced");
-    }
-  }
-  if (alias && serviceAccounts.some((account) => account.alias?.trim().toLowerCase() === alias.toLowerCase())) {
-    throw inputError(`Account alias "${alias}" is already in use for ${toolkit}`, 409);
-  }
+  const plan = planAccountLink(toolkit, serviceAccounts, alias, MULTI_ACCOUNT_CONFIG.max_accounts_per_toolkit, () => `omb-retry-${randomUUID()}`);
+  if (!plan.ok) throw inputError(plan.error, plan.status);
+  for (const id of plan.replace) await deleteConnectedAccount(apiKey, id);
   const linkRequest: AccountLinkRequest = { toolkit };
-  if (alias) linkRequest.alias = alias;
+  if (plan.alias) linkRequest.alias = plan.alias;
   const link = (sessionId: string) =>
     fetch(`${apiBase()}/tool_router/session/${encodeURIComponent(sessionId)}/link`, {
       method: "POST",
@@ -1305,28 +1070,23 @@ export async function authorizeService(cfg: AppConfig, slug: string, requestedAl
   if (!res.ok) {
     const message = await responseError(res, `Composio authorization: HTTP ${res.status}`);
     if (!NEEDS_AUTH_CONFIG.test(message)) throw new Error(message);
-    // The toolkit needs one of the project's own auth configs. The Session
-    // names those only at creation, so an auth config the user created after
-    // the Session existed is invisible to it: rebuild the Session once and
-    // retry. If the project has no config for this toolkit, say what to do
-    // instead of echoing Composio's "auth_config_override" hint.
-    const authConfigs = await listCustomAuthConfigs(apiKey);
-    const covered = Object.keys(authConfigs).some((key) => canonicalToolkitSlug(key) === toolkit);
-    if (!covered) {
-      throw inputError(
-        `${toolkit} has no Composio-managed sign-in. In your Composio project, create an auth config for "${toolkit}" `
-          + "(Auth Configs → Create) with your own app credentials, then click Connect again.",
-      );
+    const project = await projectAuthConfigs(apiKey, { fresh: true });
+    if (!project.configs[toolkit]) {
+      if (project.readError) throw new Error(`Composio auth configs: ${project.readError}`);
+      throw inputError(project.offForToolRouter.includes(toolkit) ? offForToolRouterReason(toolkit) : noAuthConfigReason(toolkit));
     }
-    const fresh = await recreateProjectSession(cfg, userId, authConfigs);
-    res = await link(fresh.session_id);
-    if (!res.ok) throw new Error(await responseError(res, `Composio authorization: HTTP ${res.status}`));
+    const fresh = await recreateProjectSession(cfg, userId, project.configs);
+    if (fresh.refused && !fresh.named[toolkit]) throw inputError(refusedAuthConfigReason(toolkit, fresh.refused));
+    res = await link(fresh.session.session_id);
+    if (!res.ok) {
+      const again = await responseError(res, `Composio authorization: HTTP ${res.status}`);
+      throw NEEDS_AUTH_CONFIG.test(again) ? inputError(refusedAuthConfigReason(toolkit, again)) : new Error(again);
+    }
   }
   const body = linkResponseSchema.parse(await res.json());
   return { url: trustedAuthUrl(body.redirect_url, toolkit) };
 }
 
-// ── marketplace catalog ────────────────────────────────────────────────
 export interface ToolkitCard {
   slug: string;
   label: string;
@@ -1334,15 +1094,11 @@ export interface ToolkitCard {
   logo: string | null;
   /** Toolkits such as public search need no user authorization. */
   noAuth?: boolean;
-  /** used for the client-side favicon fallback when logo is null/broken */
   domain: string | null;
-  /** the marketplace's own categories for this toolkit (meta.categories),
-   * which the Apps pop-up groups and filters by */
   categories?: string[];
 }
 
-/** Category names from a toolkit's meta.categories, which the toolkits API
- * lists as `{ id, name }` objects (older payloads: plain strings). */
+/** Composio lists meta.categories as `{ id, name }` objects (older payloads: plain strings). */
 export function toolkitCategories(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const names = raw
@@ -1354,10 +1110,7 @@ export function toolkitCategories(raw: unknown): string[] | undefined {
   return unique.length ? unique : undefined;
 }
 
-// Curated fallback — the services agentcal's connectors page ships plus the
-// long marketplace tail. Logos resolve client-side:
-// logo → favicon(domain) → monogram.
-const CURATED: ToolkitCard[] = [
+const CURATED: Array<ToolkitCard & { slug: CuratedConnectorSlug }> = [
   { slug: "slack", label: "Slack", blurb: "Post updates and read channels", domain: "slack.com", logo: null, categories: ["Communication"] },
   { slug: "github", label: "GitHub", blurb: "Issues, pull requests, and code", domain: "github.com", logo: null, categories: ["Developer tools"] },
   { slug: "gmail", label: "Gmail", blurb: "Read and send email", domain: "gmail.com", logo: null, categories: ["Communication"] },
@@ -1386,8 +1139,6 @@ const CURATED: ToolkitCard[] = [
 
 let toolkitCache: { at: number; cards: ToolkitCard[]; identity: string; pagination: CatalogPagination } | null = null;
 
-/** Why a marketplace catalog walk ended. Every early exit names itself so a
- * stalled catalog can be told apart from a complete one (#1614, #1838). */
 export type CatalogStopReason =
   | "end"
   | "total-reached"
@@ -1397,30 +1148,17 @@ export type CatalogStopReason =
   | "bad-page"
   | "limit";
 
-/** What the marketplace endpoint is actually serving. A partial catalog is
- * usable, but only if the UI can say so instead of passing it off as the
- * whole marketplace (#1614). */
 export interface CatalogPagination {
-  /** Unique cards this install can show right now. */
   items: number;
   /** Upstream's own count of the full marketplace, when it reports one. */
   totalItems?: number;
   /** True when paging stopped before the reported total. */
   stalled: boolean;
-  /** Why the walk stopped, whenever it stalled. Lets a client tell a stale
-   * broker replaying pages from an upstream API change (#1838). */
   reason?: CatalogStopReason;
-  /** True only when the walk reached its natural end — the last page
-   * offered no cursor, or the reported page counts said done — without
-   * stalling. stalled needs upstream totals to compare against; complete
-   * also covers a mid-walk failure on an API that reports none. */
+  /** True only when the walk reached its natural end without stalling. */
   complete: boolean;
 }
 
-/**
- * Marketplace catalog. Tries the v3 toolkits API (official names,
- * descriptions, logos — cached 10 min); falls back to the curated list.
- */
 export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard[]; source: "api" | "curated"; pagination?: CatalogPagination }> {
   const backendKey = projectApiKey(cfg);
   const broker = backendKey ? null : brokerAccess();
@@ -1434,19 +1172,12 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
   }
   if (backendKey || broker) {
     try {
-      // The marketplace runs to well over a thousand toolkits and the endpoint
-      // is cursor-paginated, so one page stops partway through the alphabet.
-      // Follow next_cursor, and keep the pages already collected if a later
-      // one fails — a partial catalog still beats the curated two dozen.
       const items: any[] = [];
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
       let lastReportedPage: number | undefined;
       let reportedTotalItems: number | undefined;
       let reportedTotalPages: number | undefined;
-      // Why the walk ended. "limit" means the loop ran out of iterations;
-      // every early exit names itself so a stalled catalog can be logged
-      // instead of silently posing as the complete marketplace.
       let stop: CatalogStopReason = "limit";
       for (let page = 0; page < MAX_CONNECTED_ACCOUNT_PAGES; page += 1) {
         const params = new URLSearchParams({ limit: "500", sort_by: "usage" });
@@ -1472,10 +1203,7 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
         items.push(...pageItems);
         const pageTotalItems = Number(json.total_items);
         if (Number.isFinite(pageTotalItems) && pageTotalItems > 0) reportedTotalItems = pageTotalItems;
-        // Composio reports current_page and total_pages beside next_cursor.
-        // A broker that drops the cursor (or an upstream regression) can replay
-        // a page while minting fresh cursors, so trust page movement: once it
-        // stops advancing, the catalog is stuck and paging stops cleanly.
+        // A broker that drops the cursor can replay a page while minting fresh cursors, so trust Composio's current_page movement.
         const reportedPage = Number(json.current_page);
         if (Number.isFinite(reportedPage)) {
           if (lastReportedPage !== undefined && reportedPage <= lastReportedPage) {
@@ -1521,15 +1249,10 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
           (card, index) => card.slug && cards.findIndex((candidate) => candidate.slug === card.slug) === index,
         );
         const shortOfReportedTotal = reportedTotalItems !== undefined && uniqueCards.length < reportedTotalItems;
-        // Trust reported page counts even when the walk ends "cleanly": an
-        // endpoint that stops at page 1 of 4 without a cursor is still partial.
         const pagingStoppedEarly = lastReportedPage !== undefined
           && reportedTotalPages !== undefined
           && lastReportedPage < reportedTotalPages;
         const stalled = shortOfReportedTotal || pagingStoppedEarly;
-        // "end" and "total-reached" are the walk's natural finishes; every
-        // other stop reason left pages unread even when the API reports no
-        // totals for stalled to compare against.
         const complete = (stop === "end" || stop === "total-reached") && !stalled;
         const pagination: CatalogPagination = { items: uniqueCards.length, stalled, complete };
         if (reportedTotalItems !== undefined) pagination.totalItems = reportedTotalItems;
@@ -1544,9 +1267,7 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
         toolkitCache = { at: Date.now(), cards: uniqueCards, identity: identity!, pagination };
         return { cards: uniqueCards, source: "api", pagination };
       }
-    } catch {
-      /* fall through to curated */
-    }
+    } catch {}
   }
   return { cards: CURATED, source: "curated" };
 }

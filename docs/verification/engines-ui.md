@@ -40,25 +40,24 @@ recreating a removed fixture directory.
    error appears and the button becomes enabled again. Settings must remain
    closable. Real Google browser, callback and account flows are deliberately
    not exercised by this fixture.
-5. Expand Codex/Claude and check that account identity and protected sign-out
-   controls are retained. Expand the advanced CLI disclosure to reach path,
+5. Expand Codex/Claude and check that each account row keeps its identity and
+   that **Sign out** stays in the row's **⋯** menu. Expand the advanced CLI disclosure to reach path,
    reset and update controls. Tab to a card and press Enter/Space; its native
    disclosure must work with a visible focus indicator.
 6. Expand Kimi to find **Install Kimi on this server**, and OpenCode to find
    **Update OpenCode on this server**. Click each and confirm the fixture error
    appears with its button usable again. Terminal commands remain under
    **Prefer a terminal?**. These clicks never perform a real installation.
-7. Expand Claude and use **Add Claude account** inside its card. Enter an
-   account name, collapse/reopen the card, and confirm the draft remains.
-   Cancel, then repeat with **Add ChatGPT account** in the ChatGPT plan card.
+7. Expand Claude and use **Add another Claude account** inside its card. Enter
+   an account name, collapse/reopen the card, and confirm the draft remains.
+   Cancel, then repeat with **Add another ChatGPT account** in the ChatGPT card.
    Submit once to check that the fixture-only error stays inside that card and
    the form remains editable. Neither action should appear below the engine
    grid, in unrelated providers, or in read-only managed cards. Provider-icon
    editing controls should not appear. Repeat at a 390px viewport.
    Repeat with **Add Google account** inside Antigravity. Toggle its sample
    connection and confirm `google@example.test` appears without losing the
-   account-name draft. A failed save must leave the draft editable. The hint
-   should explain selecting accounts in the model picker, not quota rotation.
+   account-name draft. A failed save must leave the draft editable.
 7. Expand Codex, choose **Google Gemini** under **Provider icon**, and reload.
    The selected icon should persist while sibling instances keep their icons.
    Upload a small PNG, JPEG, or WebP and check that it renders in the card and
@@ -91,7 +90,7 @@ pnpm exec vitest run src/state/engine-refresh.test.ts src/components/EngineSetup
 ```sh
 pnpm exec vitest run scripts/verify-engines-ui.test.mjs
 pnpm exec vitest run server/antigravity-account-api.test.ts server/drivers/antigravity-account.test.ts src/components/ChatGptPlanSignIn.interaction.test.ts
-pnpm exec vitest run src/components/EngineLibrary.test.ts src/components/EnginesSettings.test.ts src/components/EngineSetup.test.ts src/components/ClaudeAccountSettings.test.ts src/components/CodexAccountSettings.test.ts src/components/ClaudeSignIn.test.ts src/components/DeviceSignIn.test.ts src/components/GrokSignIn.interaction.test.ts src/components/EngineSetup.grok.test.ts src/components/EngineUpdateNotice.test.ts src/components/SettingsModal.appearance.test.ts src/components/ModelPicker.test.ts
+pnpm exec vitest run src/components/EngineLibrary.test.ts src/components/EnginesSettings.test.ts src/components/EngineSetup.test.ts src/components/ClaudeSignIn.test.ts src/components/ClaudeSignIn.interaction.test.ts src/components/ChatGptPlanSignIn.interaction.test.ts src/components/DeviceSignIn.test.ts src/components/GrokSignIn.interaction.test.ts src/components/EngineSetup.grok.test.ts src/components/EngineUpdateNotice.test.ts src/components/SettingsModal.appearance.test.ts src/components/ModelPicker.test.ts
 pnpm typecheck
 pnpm i18n:check
 pnpm build

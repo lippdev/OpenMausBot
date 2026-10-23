@@ -168,8 +168,6 @@ function tryRemove(path) {
   try {
     rmSync(path, { force: true });
   } catch {
-    // A successful replacement is authoritative; antivirus may briefly hold
-    // the old backup on Windows, which is harmless and recoverable.
   }
 }
 

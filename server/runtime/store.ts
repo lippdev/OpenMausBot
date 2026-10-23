@@ -1,13 +1,4 @@
-// The durable store of the job runtime (docs/runtime-contract.md §1):
-// one row per assignment, an append-only event per transition, and the
-// inbox that is the one wake lane. node:sqlite like messages.db, so nothing
-// new ships with the app; ":memory:" for the suite.
-//
-// The row's columns exist for lookups (tree, status, owners); the record
-// itself travels whole in the json column and is validated on every read,
-// so a row written by a newer or older build is refused, never half-read.
-// Every write the runtime cares about is one transaction: the row and its
-// event land together or not at all (write-before-act).
+// The record travels whole in the json column and is validated on every read: a row from another build is refused, never half-read.
 import { chmodSync, closeSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
@@ -47,9 +38,6 @@ const assignmentSchema = z.object({
   }),
   assignee: z.object({
     botId: z.string().min(1),
-    // An empty thread id is a legacy-ledger import whose item named no
-    // thread (types.ts, Assignee): allowed on a standing_thread destination
-    // only, so the host resolves or refuses it instead of the read failing.
     destination: z.object({
       kind: z.enum(["work_thread", "standing_thread", "room_thread"]),
       threadId: z.string(),
@@ -81,13 +69,11 @@ const assignmentSchema = z.object({
   question: z.string().optional(),
   answer: z.string().optional(),
   budgets: z.object({ since: z.number(), requests: z.number(), executions: z.number(), wakes: z.number() }).optional(),
-  // A root parked on the person's cards, and a node that continues in place:
-  // both must come back whole, or a park would lose its cards on the next
-  // read (the schema strips what it does not name).
+  // The schema strips any field it does not name: every optional Assignment field must be listed here.
   cards: z.array(z.string()).optional(),
   continuation: z.object({ note: z.string(), handoffPath: z.string().optional(), count: z.number().int().nonnegative() }).optional(),
-  // The loop guard's record outlives the continuation the dispatch consumes.
   guard: z.object({ stale: z.number().int().nonnegative(), errors: z.array(z.string()) }).optional(),
+  carrying: z.array(z.string()).optional(),
   approved: z.boolean().optional(),
   batchKey: z.string().optional(),
   version: z.literal(1),
@@ -98,16 +84,11 @@ export interface RuntimeStore {
   get(id: string): Assignment | undefined;
   /** Direct children, createdAt order. */
   children(id: string): Assignment[];
-  /** The root of this id's tree. */
   root(id: string): Assignment | undefined;
-  /** `assignee` reads one bot's rows in one conversation (an indexed lookup);
-   * `roots` only rows with no parent; `openSince` only rows not finished
-   * before that time. */
+  /** `openSince`: only rows not finished before that time. */
   all(filter?: { rootId?: string; nonTerminal?: boolean; ownerThreadId?: string; assignee?: { botId: string; threadId: string };
     roots?: boolean; openSince?: number }): Assignment[];
-  /** Insert a new row and its event in one transaction. */
   insert(a: Assignment, event: { kind: EventKind; detail?: string; at?: number }): void;
-  /** Write the whole row and (optionally) an event in one transaction. */
   update(a: Assignment, event?: { kind: EventKind; detail?: string; at?: number }): void;
   /** Nested calls join the outer transaction (a savepoint inside it). */
   transaction<T>(fn: () => T): T;
@@ -116,16 +97,12 @@ export interface RuntimeStore {
   addInbox(item: InboxItem): void;
   inbox(owner: Owner, undeliveredOnly?: boolean): InboxItem[];
   markDelivered(ids: string[], at: number): void;
-  /** Remove terminal trees whose root finished before `before`; never a tree
-   * with a non-terminal node. Returns assignment rows removed. */
   prune(before: number): number;
   close(): void;
 }
 
 const terminalList = TERMINAL.map(s => `'${s}'`).join(", ");
-/** A row that has not ended: the assignments_live index and all({ nonTerminal })
- * share this one term, since SQLite reads a partial index only for a WHERE
- * that repeats its own. */
+/** SQLite uses a partial index only for a WHERE that repeats its term, so assignments_live and all({ nonTerminal }) share this. */
 const LIVE = `status NOT IN (${terminalList})`;
 
 const SCHEMA = `
@@ -190,8 +167,6 @@ function readAssignment(row: Row): Assignment {
   return result.data;
 }
 
-/** JSON drops undefined fields; the row read back must equal the row
- * written, so optional fields are never written as null. */
 const toJson = (a: Assignment): string => JSON.stringify(a);
 
 function readInbox(row: Row): InboxItem {
@@ -218,8 +193,7 @@ export function openRuntimeStore(path: string): RuntimeStore {
   const memory = path === ":memory:";
   if (!memory) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // Briefs and results are private conversations: owner-only from the
-    // first byte, and repaired on a file that inherited a loose umask.
+    // Briefs and results are private: owner-only from the first byte, repaired on a file that inherited a loose umask.
     closeSync(openSync(path, "a", 0o600));
     try {
       chmodSync(path, 0o600);
@@ -252,9 +226,6 @@ export function openRuntimeStore(path: string): RuntimeStore {
     pruneRows: db.prepare("DELETE FROM assignments WHERE root_id = ?"),
   };
 
-  // Nested writes use savepoints, as message-db.ts does: a caught inner
-  // error never commits half of an inner step, and the outermost call
-  // still owns durability.
   let depth = 0;
   function transaction<T>(fn: () => T): T {
     if (depth > 0) {
@@ -345,8 +316,6 @@ export function openRuntimeStore(path: string): RuntimeStore {
         item.assignmentId, item.kind, item.createdAt, item.deliveredAt ?? null);
     },
     inbox(owner, undeliveredOnly = false) {
-      // Every field the caller names must match: a thread owner with a bot
-      // id reads only that bot's lane; an external runtime reads by run id.
       const where: string[] = [];
       const params: SQLInputValue[] = [];
       if (owner.botId !== undefined) { where.push("owner_bot_id = ?"); params.push(owner.botId); }

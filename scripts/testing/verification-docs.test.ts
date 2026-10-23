@@ -27,13 +27,10 @@ const target = (hit: string) => hit.slice(hit.indexOf(": ") + 2);
 const helpVerbs = new Set([...HELP.matchAll(/^ {2}([a-z][\w-]*)(?= |$)/gm)].map((match) => match[1]!).filter((verb) => verb !== "node"));
 helpVerbs.add("help");
 
-// Routes are registered in server/index.ts and, for anything newer, in the
-// modules under server/routes (server/routes/README.md). Tests there quote
-// paths without registering them, so they do not count.
+// Routes are registered in server/index.ts and in the modules under
+// server/routes; tests there quote paths without registering them.
 const ROUTES_DIR = join(ROOT, "server", "routes");
-// Every route module, including those in folders under server/routes and the
-// three factories that live beside their feature (data, workspace backup,
-// cloud move); a route moved out of index.ts stays a registered route here.
+// Including subfolders and the factories that live beside their feature.
 const routeModules = readdirSync(ROUTES_DIR, { recursive: true, encoding: "utf8" })
   .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts")).sort()
   .map((name) => join(ROUTES_DIR, name));

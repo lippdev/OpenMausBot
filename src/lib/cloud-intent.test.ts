@@ -20,21 +20,22 @@ async function load(stored: string | null = null) {
 beforeEach(() => { vi.unstubAllGlobals(); });
 
 describe("cloudIntentDue", () => {
-  it("asks only on the owner's own Cloud home, once the Cloud has answered", async () => {
+  it("never asks by itself: a new Cloud opens on its welcome, which brings this computer's bots over before any chat exists", async () => {
     const { module } = await load();
-    expect(module.cloudIntentDue(facts())).toBe(true);
-    expect(module.cloudIntentDue(facts({ viewer: { hosted: false, canSave: true } }))).toBe(false);
-    expect(module.cloudIntentDue(facts({ viewer: { ...owner, canSave: false } }))).toBe(false);
-    expect(module.cloudIntentDue(facts({ connected: false }))).toBe(false);
-    expect(module.cloudIntentDue(facts({ enginesKnown: false }))).toBe(false);
-    expect(module.cloudIntentDue(facts({ onboarding: undefined }))).toBe(false);
-  });
-
-  it("asks once: not after it was answered or skipped, nor on a Cloud that has already worked, unless asked for again", async () => {
-    const { module } = await load();
+    expect(module.cloudIntentDue(facts())).toBe(false);
     expect(module.cloudIntentDue(facts({ onboarding: record({ hintsSeen: [CLOUD_INTENT_ASKED] }) }))).toBe(false);
     expect(module.cloudIntentDue(facts({ onboarding: record({ firstTurnAt: "2026-09-30T08:00:00.000Z" }) }))).toBe(false);
-    expect(module.cloudIntentDue(facts({ onboarding: record({ hintsSeen: [CLOUD_INTENT_ASKED] }), reopened: true }))).toBe(true);
+  });
+
+  it("asks when asked for again, only on the owner's own Cloud home, once the Cloud has answered", async () => {
+    const { module } = await load();
+    expect(module.cloudIntentDue(facts({ reopened: true }))).toBe(true);
+    expect(module.cloudIntentDue(facts({ reopened: true, onboarding: record({ hintsSeen: [CLOUD_INTENT_ASKED] }) }))).toBe(true);
+    expect(module.cloudIntentDue(facts({ reopened: true, viewer: { hosted: false, canSave: true } }))).toBe(false);
+    expect(module.cloudIntentDue(facts({ reopened: true, viewer: { ...owner, canSave: false } }))).toBe(false);
+    expect(module.cloudIntentDue(facts({ reopened: true, connected: false }))).toBe(false);
+    expect(module.cloudIntentDue(facts({ reopened: true, enginesKnown: false }))).toBe(false);
+    expect(module.cloudIntentDue(facts({ reopened: true, onboarding: undefined }))).toBe(false);
   });
 });
 
@@ -53,7 +54,6 @@ describe("the waiting job", () => {
     expect(module.cloudIntentShown(true, { ...snapshot(), pending: "watch my page" })).toBe(false);
     module.setPendingIntent(null);
     expect(saved.has("omb.cloudIntent.pending")).toBe(false);
-    // A reload finds a job still waiting.
     const again = await load("watch my page");
     const { createElement } = await import("react");
     const { renderToStaticMarkup } = await import("react-dom/server");
@@ -65,7 +65,6 @@ describe("the waiting job", () => {
     const { module } = await load();
     expect(module.cloudIntentShown(true, { pending: null, reopened: false, dismissed: true, sent: null })).toBe(false);
     expect(module.cloudIntentShown(false, { pending: null, reopened: true, dismissed: false, sent: null })).toBe(true);
-    // Edit from the sign-in: asked again even though a job is waiting.
     expect(module.cloudIntentShown(false, { pending: "x", reopened: true, dismissed: false, sent: null })).toBe(true);
   });
 });
@@ -84,9 +83,7 @@ describe("the job once sent", () => {
     const routine = (id: string, botId: string, createdAt: number) => ({ id, botId, createdAt });
     expect(module.jobRoutine([routine("old", "b2", 1_000), routine("other", "b1", 10_500_000)], sent)).toBeUndefined();
     expect(module.jobRoutine([routine("later", "b2", 10_900_000), routine("first", "b2", 10_400_000)], sent)?.id).toBe("first");
-    // A minute's grace for the two clocks.
     expect(module.jobRoutine([routine("skew", "b2", 9_970_000)], sent)?.id).toBe("skew");
-    // Another device, without this one's record: any routine counts.
     expect(module.jobRoutine([routine("any", "b1", 1)], null)?.id).toBe("any");
   });
 });

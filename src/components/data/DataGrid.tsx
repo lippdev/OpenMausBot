@@ -18,7 +18,6 @@ export interface DataGridProps {
   columns: DataColumn[];
   rowCount: number;
   name: string;
-  /** A result can be replaced without changing its id or row count. */
   revision?: string;
   handle?: RefObject<DataGridHandle | null>;
   footerControls?: ReactNode;
@@ -27,7 +26,6 @@ export interface DataGridProps {
 export interface DataGridRow { index: number; cells: Cell[] }
 export interface DataGridDatasource extends IDatasource { invalidate(): void }
 
-/** Each datasource owns only its in-flight requests; AG Grid owns a bounded block cache. */
 export function createDataGridDatasource({ botId, target, columns, rowCount, filter, filterColumn, isCurrent = () => true, onPage, onError }: {
   botId: string;
   target: DataGridProps["target"];
@@ -117,7 +115,6 @@ export function DataResultFooter({ children, controls }: { children?: ReactNode;
   </footer>;
 }
 
-/** Community's infinite model pages the existing SQL result; no browser-side load-all or sort. */
 export function DataGrid({ botId, target, columns, rowCount, name, revision, handle, footerControls }: DataGridProps) {
   const grid = useRef<GridApi<DataGridRow> | null>(null);
   const [readyGrid, setReadyGrid] = useState<GridApi<DataGridRow> | null>(null);
@@ -138,7 +135,7 @@ export function DataGrid({ botId, target, columns, rowCount, name, revision, han
   const error = status.key === key ? status.error : null;
   const columnDefs = useMemo<ColDef<DataGridRow>[]>(() => columns.map((column, index) => ({
     colId: column.name, headerName: column.name, headerTooltip: column.type, minWidth: defaultColumnWidth(column), initialFlex: 1,
-    // Keep dotted/quoted names and exact BIGINT/DECIMAL strings out of object field coercion.
+    // Keep dotted or quoted names and exact BIGINT/DECIMAL strings out of AG Grid's object field coercion.
     valueGetter: (params) => params.data?.cells[index],
     valueFormatter: ({ value, data }) => !data ? "" : value === null || value === undefined ? t("data.grid.null") : cellText(value),
     tooltipValueGetter: ({ value }) => value === null || value === undefined ? t("data.grid.null") : cellText(value),
@@ -147,7 +144,6 @@ export function DataGrid({ botId, target, columns, rowCount, name, revision, han
   })), [schemaKey]);
   useEffect(() => {
     if (!readyGrid || readyGrid.isDestroyed()) return;
-    // A fresh source belongs to this actual grid lifetime, including StrictMode remounts.
     const datasource = createDataGridDatasource({
       botId, target, columns, rowCount, filter, filterColumn,
       isCurrent: () => currentKey.current === key && grid.current === readyGrid && !readyGrid.isDestroyed(),

@@ -1,9 +1,5 @@
-// Explicit --import in isolated fixtures only: the verification launcher adds
-// it when OMB_TEST_APPROVAL_CLOCK=1 reaches it. The Claude permission
-// broker's fifteen-minute "nobody answered" deadline fires when the fixture
-// writes <data dir>/expire-approvals instead, so a test can follow an
-// unanswered approval through its real course. Every pending ask expires
-// while the file exists. It changes no authorization or dispatch decision.
+// Loaded with --import in isolated fixtures when OMB_TEST_APPROVAL_CLOCK=1: while <data dir>/expire-approvals
+// exists, every pending ask hits the broker's fifteen-minute deadline. No authorization or dispatch decision changes.
 import { registerHooks } from 'node:module';
 import { join } from 'node:path';
 const dataDir = process.env.OMB_DATA_DIR;

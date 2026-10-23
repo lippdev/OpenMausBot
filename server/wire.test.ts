@@ -1,8 +1,3 @@
-// Wire projection contract: the server records extend the shared wire
-// shapes, and toWireTask emits exactly the wire key set — a server-only
-// field (resumeCursors, lastInstanceId) must never reach a client, and a
-// new TaskRecord field must fail typecheck until it is declared on
-// WireTask or listed in TaskWirePrivateKeys.
 import { describe, expect, it } from "vitest";
 
 import {
@@ -60,7 +55,6 @@ describe("shared wire model", () => {
 
   it("tells a client only whether a surface pin is the machine's own record", () => {
     expect(toWireTask({ ...fullTask, surfaceSource: "auto" }, botModel)).toEqual({ ...toWireTask(fullTask, botModel), surfaceAuto: true });
-    // A person's pin, a pin older than provenance, and no pin carry no flag.
     expect(toWireTask({ ...fullTask, surfaceSource: "user" }, botModel)).not.toHaveProperty("surfaceAuto");
     expect(toWireTask(fullTask, botModel)).not.toHaveProperty("surfaceAuto");
     expect(toWireTask({ ...fullTask, surface: undefined, surfaceSource: "auto" }, botModel)).not.toHaveProperty("surfaceAuto");
@@ -76,9 +70,7 @@ describe("shared wire model", () => {
   });
 
   it("bot and group wire projections stay exact (compile-enforced)", () => {
-    // Referencing the guard constants keeps the exactness assertions live:
-    // a new BotRecord field fails typecheck until it is declared on WireBot
-    // or listed in BotWirePrivateKeys; a group field likewise on WireGroup.
+    // Referencing the guard constants keeps the exactness assertions live.
     expect(botWireProjectionIsExact).toBe(true);
     expect(groupWireProjectionIsExact).toBe(true);
   });

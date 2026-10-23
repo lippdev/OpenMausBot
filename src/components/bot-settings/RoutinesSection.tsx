@@ -1,5 +1,3 @@
-// Shared by bot settings and the bot's side panel. Both routes use the same
-// editor and central logs, so a routine never has a competing detail page.
 import { CalendarClock, FileText, Plus } from "lucide-react";
 import { useState } from "react";
 import { useStore, type Bot } from "@/state/store";

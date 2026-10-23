@@ -1,8 +1,5 @@
-// A stand-in for cloudflare/control-plane for tests of `openmausbot login`
-// and `serve --tunnel`: the routes the desktop's control-plane client uses,
-// answering in the shapes its validators accept. Authorization is only "is
-// this a credential this stub issued". Records every call so a test can
-// assert what the client did, not only what it got.
+// A stand-in for cloudflare/control-plane for `openmausbot login` and `serve --tunnel` tests: the routes
+// the desktop's client uses, accepting only credentials it issued, recording every call.
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 
@@ -23,11 +20,9 @@ export interface ControlPlaneStub {
   /** "METHOD /path", in order. */
   calls: string[];
   installations: Map<string, StubInstallation>;
-  /** An installation the control plane already knows, as a fleet would create
-   * one before starting a container: returns its credential. */
+  /** An installation the control plane already knows (as a fleet creates one): returns its credential. */
   seedInstallation(name?: string): string;
-  /** Idle reclaim: the endpoint reads as gone until the next provision,
-   * which hands out (and returns here) a new connector token. */
+  /** Idle reclaim: the endpoint reads as gone until the next provision hands out a new connector token. */
   reclaim(): string;
   close(): Promise<void>;
 }
@@ -135,7 +130,6 @@ export async function startControlPlaneStub(options: { otp?: string; endpointUrl
       if (!inst) return send(401, { error: "unauthorized" });
       if (method === "GET") return send(200, { endpoint: reclaimedUntilProvision ? null : endpoint() });
       if (method === "POST") {
-        // Like the control plane, keep the release an endpoint request reports.
         const body = await readJson(req);
         if (typeof body.appVersion === "string") inst.appVersion = body.appVersion;
         if (reclaimedUntilProvision) issuedConnectorToken = reclaimedUntilProvision;

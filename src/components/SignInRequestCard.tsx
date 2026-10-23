@@ -5,21 +5,15 @@ import type { ComputerHelpRef } from "../../shared/wire";
 import { signInOutcome } from "../../shared/sign-in-request";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { saveLoginFromCard } from "@/lib/logins";
+import { cardSaveTarget, saveLoginFromCard } from "@/lib/logins";
 import { answerSignIn, signInHostIsHere } from "@/lib/sign-in";
 import { useStore, type Message } from "@/state/store";
 import { ASK_CHIP, ASK_CHIP_IDLE, ASK_PRIMARY_BUTTON, ASK_QUIET_BUTTON, AskCard, AskSettledLine, returnFocusToComposer } from "./AskCard";
 import { LoginForm } from "./LoginForm";
 
-// A bot asked the person to sign in to a site themselves (request_sign_in).
-// The site is the headline and the bot's reason is quoted as its own words.
-// Open goes to the exact place the bot works — the login only reaches the
-// bot there — and Done or Cancel resumes it. In the built-in browser the
-// person may instead save a login for the page (a masked form): it is
-// encrypted on the server, the bot fills it with fill_login, and neither
-// the bot nor any screen ever gets it back.
+// Security: a saved login is encrypted on the server and filled by fill_login; neither the bot nor any screen ever gets
+// it back.
 
-/** Where to sign in, by place; "host" is this computer seen from elsewhere. */
 const WHERE = {
   browser: "signIn.where.browser",
   vm: "signIn.where.vm",
@@ -44,13 +38,21 @@ export function SignInRequestCard({
   const [pending, setPending] = useState<"done" | "cancel" | null>(null);
   const [explained, setExplained] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [target, setTarget] = useState<{ site: string; signInHost?: string } | null>(null);
+  const [alsoThere, setAlsoThere] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const error = localError ?? card.error;
   const outcome = signInOutcome(card);
   const ref = { botId, threadId, messageId: message.id, place: card.place };
-  // This computer is the person's own only in the desktop app hosting the
-  // bot; anywhere else it is the computer OpenMausBot runs on.
   const here = signInHostIsHere();
+
+  // A sign-in page on another site is added only when the person ticks it, seeing its host named.
+  const startSaving = () => {
+    setSaving(true);
+    setAlsoThere(false);
+    setTarget(null);
+    cardSaveTarget(ref).then(setTarget, () => setTarget(null));
+  };
 
   const answer = async (choice: "done" | "cancel") => {
     if (pending) return;
@@ -66,8 +68,6 @@ export function SignInRequestCard({
     }
   };
 
-  // Stop ended the turn this card paused: nothing resumes, whatever is
-  // answered afterwards (the answer is kept).
   const stopped = card.stopped === true;
 
   if (card.superseded || (stopped && !outcome)) {
@@ -107,12 +107,10 @@ export function SignInRequestCard({
     if (card.place === "local") setExplained(true);
     else dispatch({ type: "openSignIn", botId, messageId: message.id, url: card.url, site: card.site, place: card.place });
   };
-  // fill_login reaches the built-in browser (and My Chrome) only, so a login
-  // is offered for saving there. A desktop paired to another host relays
-  // no passwords.
+  // fill_login reaches only the built-in browser (and My Chrome); a desktop paired to another host relays no passwords.
   const canSave = card.place === "browser" && window.ogb?.remoteClient?.active !== true;
   let pageHost = card.site;
-  try { pageHost = new URL(card.url).hostname; } catch { /* the site stands in */ }
+  try { pageHost = new URL(card.url).hostname; } catch {}
   return (
     <AskCard
       ariaLabel={t("signIn.cardLabel", { name: botName, site: card.site })}
@@ -128,7 +126,7 @@ export function SignInRequestCard({
           {t("signIn.open")}
         </button>
         {canSave && (
-          <button type="button" onClick={() => setSaving(true)} disabled={pending !== null} className={cn(ASK_CHIP, ASK_CHIP_IDLE)}>
+          <button type="button" onClick={startSaving} disabled={pending !== null} className={cn(ASK_CHIP, ASK_CHIP_IDLE)}>
             <KeyRound size={14} />
             {t("signIn.saveLogin")}
           </button>
@@ -147,13 +145,20 @@ export function SignInRequestCard({
       )}
       {saving ? (
         <div className="mt-2.5" data-testid="sign-in-save">
-          <p className="mb-2 text-[12.5px] leading-snug text-ink-secondary">{t("signIn.save.note", { name: botName, site: pageHost })}</p>
+          <p className="mb-2 text-[12.5px] leading-snug text-ink-secondary">{t("signIn.save.note", { name: botName, site: target?.site ?? pageHost })}</p>
           <LoginForm submitLabel={t("signIn.save.submit")} autoFocus onCancel={() => setSaving(false)}
             onSubmit={async (fields) => {
-              await saveLoginFromCard({ botId, threadId, messageId: message.id }, fields);
+              await saveLoginFromCard({ botId, threadId, messageId: message.id }, fields, alsoThere ? target?.signInHost : undefined);
               setSaving(false);
               returnFocusToComposer();
-            }} />
+            }}>
+            {target?.signInHost && (
+              <label className="flex items-start gap-2 text-[12.5px] leading-snug text-ink" data-testid="sign-in-save-elsewhere">
+                <input type="checkbox" name="signInHost" className="mt-[2px]" checked={alsoThere} onChange={(event) => setAlsoThere(event.target.checked)} />
+                <span dir="auto">{t("signIn.save.elsewhere", { host: target.signInHost })}</span>
+              </label>
+            )}
+          </LoginForm>
         </div>
       ) : <p className="mt-2 text-[12.5px] leading-snug text-ink-secondary">{t(where, { name: botName })}</p>}
       {explained && (
@@ -169,9 +174,6 @@ export function SignInRequestCard({
   );
 }
 
-/** The bot's open sign-in request where the person is signing in: the
- * Computer panel and the remote client's panel. It names the site and offers
- * the card's own Done and Cancel; a computer's banner adds Take control. */
 export function SignInBanner({
   help,
   askerName,

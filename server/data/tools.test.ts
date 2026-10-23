@@ -1,7 +1,3 @@
-// The Data tools against a fake database: the statement gate, bounds by
-// rows and bytes, load planning with quoted literals and stripped
-// credentials, cards that update in place and fail honestly, export paths
-// confined to the allowed folders, and the error shape of every refusal.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -110,7 +106,6 @@ describe("the statement gate", () => {
     ["SHOW TABLES", { kind: "read", materialisable: false }],
     ["EXPLAIN SELECT 1", { kind: "read", materialisable: false }],
     ["EXPLAIN ANALYZE SELECT 1", { kind: "read", materialisable: false }],
-    // column names and aliases are never verbs
     ["SELECT comment, load, \"set\", copy AS attach FROM t", { kind: "read", materialisable: true }],
     ["SELECT ';' AS semi, 'DROP TABLE t' AS s FROM t -- ; DELETE", { kind: "read", materialisable: true }],
     ["SELECT \"a;b\" FROM t /* ; INSERT */", { kind: "read", materialisable: true }],
@@ -203,7 +198,6 @@ describe("sources", () => {
     const glob = planLoad({ source: join(dir, "*.parquet") })[0]!;
     expect(glob).toMatchObject({ kind: "folder" });
     expect(glob.reader).toBe(`read_parquet('${join(dir, "*.parquet")}', union_by_name=true, filename=true)`);
-    // a folder: one table per file family, globs with forward slashes, no braces
     mkdirSync(join(dir, "nested"));
     writeFileSync(join(dir, "nested", "more.parquet"), "");
     writeFileSync(join(dir, "nested", "legacy.txt"), "a,b\n");
@@ -269,7 +263,6 @@ describe("data_load", () => {
     expect(out.tables[0]).toMatchObject({ name: "orders_2024", rowCount: 3, source: join(dir, "Orders 2024.csv") });
     expect(out.tables[0]!.columns[0]!.sample).toEqual(["1", "2", "3"]);
     expect(sheet.sheet().sources[0]).toMatchObject({ name: "orders_2024", kind: "csv", rowCount: 3 });
-    // replace:false keeps the existing table and loads beside it
     const again = await loadData(ctx, { source: join(dir, "Orders 2024.csv"), replace: false });
     expect(again.tables[0]!.name).toBe("orders_2024_2");
     expect(database.calls.at(-2)!.sql).toMatch(/^CREATE TABLE "orders_2024_2"/);
@@ -313,7 +306,6 @@ describe("data_describe saved results", () => {
       cards: [{ id: "c_1" }, { id: "c_2" }], tables: [{ name: "Order Details", sqlName: '"Order Details"', rowCount: 3 }],
       truncated: false, omitted: [],
     });
-    // the catalog is read, no query runs
     expect(database.calls).toEqual([{ method: "listTables" }]);
     const explicit = await runDataTool(ctx, "data_describe", { id: "c_2" });
     expect(explicit.structuredContent).toMatchObject({ card: { id: "c_2", sql: "SELECT 2" } });
@@ -564,7 +556,6 @@ describe("data_show", () => {
     const materialised = database.calls.find((call) => call.method === "materialise")!;
     expect(materialised.sql).toBe("SELECT region, count(*) AS n FROM (SELECT * FROM orders) GROUP BY ALL");
     expect(database.calls.some((call) => call.sql === "SELECT * FROM (SELECT * FROM orders) LIMIT 0")).toBe(true);
-    // The compiler never sees counts: a reduction that kept every row is labelled "none".
     database.onRun = (sql) => (sql.startsWith("SELECT count(*)") ? { columns: [{ name: "n", type: "BIGINT" }], rows: [[3]], rowCount: 1, truncated: false, elapsedMs: 1 } : undefined);
     const whole = await showCard(ctx, { kind: "chart", sql: "SELECT * FROM small", chart: { type: "scatter", x: "a", y: "b" } });
     expect(whole.reduction).toEqual({ method: "none", inputRows: 3, outputRows: 3 });

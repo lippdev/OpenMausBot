@@ -1,6 +1,3 @@
-// ⌘K switcher: bots and rooms from local state, transcript hits from
-// /api/search. Self-contained — owns its open state and its global chord,
-// so App.tsx only mounts it.
 import { useEffect, useRef, useState } from "react";
 import { Bot as BotIcon, MessageSquare, Search, Users } from "lucide-react";
 import { api, openBot, useStore, type Bot, type Group } from "@/state/store";
@@ -17,7 +14,6 @@ type PaletteEntry =
 
 const OPEN_EVENT = "omb:open-command-palette";
 
-/** Open the palette from a button, for places with no room for a search box. */
 export function openCommandPalette() {
   window.dispatchEvent(new Event(OPEN_EVENT));
 }
@@ -31,9 +27,6 @@ export function CommandPalette({ onOpenChange }: { onOpenChange?: (open: boolean
   const [cursor, setCursor] = useState(0);
   const selectedRef = useRef<HTMLButtonElement>(null);
 
-  // The chord fires from anywhere — Shell's app-wide shortcuts (⌘N, ⌘1–9)
-  // set the precedent of not guarding against focused inputs, and a
-  // modifier chord never collides with typing.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !e.shiftKey && !e.altKey) {
@@ -50,7 +43,6 @@ export function CommandPalette({ onOpenChange }: { onOpenChange?: (open: boolean
     };
   }, []);
 
-  // fresh palette every open; stale queries from last time would flash
   useEffect(() => {
     if (!open) return;
     setQuery("");
@@ -64,16 +56,11 @@ export function CommandPalette({ onOpenChange }: { onOpenChange?: (open: boolean
 
   const q = query.trim().toLowerCase();
 
-  // Same debounce pattern as the sidebar search: names answer instantly
-  // from local state, transcript hits arrive a beat later, and a stale
-  // response for an outdated query is dropped.
   useEffect(() => {
     if (!open || !q) {
       setMessageHits([]);
       return;
     }
-    // Results for the previous query must not remain clickable while the
-    // debounce and request for this query are pending.
     setMessageHits([]);
     let alive = true;
     const timer = setTimeout(() => {
@@ -100,10 +87,8 @@ export function CommandPalette({ onOpenChange }: { onOpenChange?: (open: boolean
   const entries: PaletteEntry[] = [
     ...bots.map((bot): PaletteEntry => ({ kind: "bot", bot })),
     ...rooms.map((group): PaletteEntry => ({ kind: "room", group })),
-    // message hits only make sense for a typed query; empty = switcher mode
     ...(q ? messageHits.map((hit): PaletteEntry => ({ kind: "message", hit })) : []),
   ];
-  // hits arriving or rows filtering away can strand the cursor past the end
   const selected = entries.length ? Math.min(cursor, entries.length - 1) : 0;
 
   const activate = async (entry: PaletteEntry) => {
@@ -125,7 +110,6 @@ export function CommandPalette({ onOpenChange }: { onOpenChange?: (open: boolean
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      // shield the window listeners other modals hang their own Esc on
       e.stopPropagation();
       setOpen(false);
     } else if (e.key === "ArrowDown") {
@@ -141,7 +125,6 @@ export function CommandPalette({ onOpenChange }: { onOpenChange?: (open: boolean
     }
   };
 
-  // flat cursor across sections; each row needs its absolute index
   const roomOffset = bots.length;
   const messageOffset = bots.length + rooms.length;
 
@@ -150,8 +133,7 @@ export function CommandPalette({ onOpenChange }: { onOpenChange?: (open: boolean
       key={key}
       ref={index === selected ? selectedRef : undefined}
       onClick={onPick}
-      // mousemove, not mouseenter: rows shifting under a resting pointer
-      // (hits arriving) must not steal the keyboard selection
+      // mousemove, not mouseenter: rows shifting under a resting pointer must not steal the keyboard selection.
       onMouseMove={() => setCursor(index)}
       className={cn(
         "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left",

@@ -281,7 +281,6 @@ describe("closing this data dir's browsers nothing uses", () => {
     expect(closed()).toEqual(["/engine/agent-browser bot-b"]);
   });
 
-  // A turn may think for longer than the idle window between browser calls.
   it("never closes a browser a turn holds, however long it went unused", async () => {
     home(["bot-a", "bot-b"]);
     const { value, closeIdle, closed } = sweep({ live: ["bot-a"], held: ["bot-a", "bot-b"], idle: async () => true });
@@ -328,8 +327,6 @@ describe("closing this data dir's browsers nothing uses", () => {
     expect(closeIdle).toHaveBeenCalledTimes(4);
   });
 
-  // A Chrome whose daemon was killed under it (OOM, by hand) runs on with no
-  // daemon to close it; it is found by the session its environment names.
   it("stops a browser of this data dir whose engine was killed, at boot and while daemons run, and no one else's", async () => {
     const orphan = (session: string): { session: string; tree: BrowserProcessTree } => ({ session, tree: { daemon: 42, members: new Map([[42, "t"]]), groups: [42] } });
     home([]);
@@ -344,7 +341,6 @@ describe("closing this data dir's browsers nothing uses", () => {
     const running = sweep({ live: ["bot-b"] }).value;
     await running.sweep();
     expect(vi.mocked(stopBrowserProcesses).mock.calls).toEqual([[orphan("guest-0f0f0f0f-1").tree]]);
-    // The pass after the last daemon is gone still looks: one may have died since.
     rmSync(join(process.env.XDG_RUNTIME_DIR!, "agent-browser", "bot-b.pid"));
     await running.sweep();
     expect(orphanedBrowsers).toHaveBeenCalledTimes(2);
@@ -353,8 +349,10 @@ describe("closing this data dir's browsers nothing uses", () => {
     info.mockRestore();
   });
 
-  it("closes an unused browser after ten minutes unless config.json says otherwise", () => {
+  it("closes an unused browser after ten minutes, three on a Cloud home, unless config.json says otherwise", () => {
     expect(browserIdleMs({})).toBe(10 * 60_000);
+    expect(browserIdleMs({}, { cloudHome: true })).toBe(3 * 60_000);
     expect(browserIdleMs({ browserEngine: { idleTimeoutMinutes: 2 } })).toBe(2 * 60_000);
+    expect(browserIdleMs({ browserEngine: { idleTimeoutMinutes: 20 } }, { cloudHome: true })).toBe(20 * 60_000);
   });
 });

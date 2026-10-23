@@ -1,7 +1,3 @@
-// Saved engine model lists. A later start (bots.json already has bots) serves
-// the last list and refreshes it behind listen. The first run still waits, so
-// the seeded bot's default model is the one discovery just chose. The file is
-// a derived cache under providers/, which backups and Move to Cloud skip.
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -16,9 +12,6 @@ export function startupModelCachePath(instanceId: string): string | null {
   return join(DATA_DIR, "providers", "engine-models", `${instanceId}.json`);
 }
 
-/** True once this data dir has been through a boot that saved bots. The
- * store does not exist yet at registry.load, and this is the same file it
- * will read. */
 export function laterStartup(): boolean {
   try {
     const parsed = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8")) as unknown;
@@ -93,9 +86,7 @@ export function writeStartupModelCache(instanceId: string, catalog: ModelCatalog
   writeFileAtomic(path, JSON.stringify(stored), { durable: false });
 }
 
-/** A later start returns this object, not a promise, so `await` does not
- * follow the refresh. An async function cannot return a promise without
- * the caller waiting for it. */
+/** An object, not a promise: an async function cannot hand back a promise without `await` following it. */
 export type DeferredStartupModelRefresh = { pending: Promise<void> };
 
 export function openStartupModelCatalog(input: {
@@ -110,7 +101,6 @@ export function openStartupModelCatalog(input: {
     try {
       writeStartupModelCache(input.instanceId, input.current());
     } catch {
-      // A derived cache. The in-memory list is already what this process serves.
     }
   };
   if (!laterStartup()) {

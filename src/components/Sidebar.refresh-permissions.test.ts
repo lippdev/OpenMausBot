@@ -1,7 +1,4 @@
 // @vitest-environment happy-dom
-// Refresh permissions on a thread copies the bot's level onto it. Full
-// access copies at once, with no confirmation (owner decision, Oct 12);
-// Auto on this computer still shows its warning first.
 import { createElement, type ComponentProps } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";

@@ -1,46 +1,17 @@
-// A bot's small chart spec → the SQL that reduces the data and the Vega-Lite
-// that draws the result (PLAN D5, D7). The model never writes a chart
-// grammar, and raw rows never reach a renderer: every statement here
-// aggregates, bins, folds, buckets, samples or M4-downsamples in DuckDB, and
-// the panel binds what comes back as the dataset named "table".
-//
-// The compiler sees the spec, the result's columns and where to read from
-// — never the data. So every reduction is written to be safe at any size:
-// the top-N fold only folds when there are more than N categories, the time
-// unit is picked inside the SQL from the data's own range, M4 keeps at most
-// four points per pixel column, the scatter sample caps itself. The one
-// thing SQL cannot promise is a bound on grouped output (a heatmap of two
-// wide columns), so every statement ends with `LIMIT CHART_SQL_LIMIT`: a
-// result of exactly that many rows means the reduction overflowed and the
-// caller answers `output_too_large` rather than drawing a truncated chart.
-//
-// Output columns are named for the Vega-Lite channel they feed (x, x2, y,
-// y2, color, size), never for the source column: a source may itself have a
-// column called "count" or "x", and a bin start or a fold has no source name.
-// Axis titles and tooltips carry the source names instead.
+// Every statement ends with `LIMIT CHART_SQL_LIMIT`: exactly that many rows means the reduction overflowed and
+// the caller answers output_too_large. Output columns are named for their Vega-Lite channel, never the source column.
 import { DATA_LIMITS } from "../../shared/data-surface.ts";
 import { DataFailure, type ChartCompiler, type CompiledChart, type DataColumn, type OmbChartSpec } from "./types.ts";
 
-/** One more row than a chart may draw. A result with this many rows is an
- * overflow, never a chart; below it the count is exact. */
 export const CHART_SQL_LIMIT = DATA_LIMITS.chartMaxMarks + 1;
-/** Categories kept before the rest fold into "other" (Hex, sqlrooms: 20). */
 export const TOP_N_DEFAULT = 20;
 export const BINS_DEFAULT = 30;
-/** A time axis aims for at most this many buckets when the spec names no
- * unit; the SQL picks the coarsest unit that stays under it. */
 export const TIME_BUCKETS_TARGET = 500;
-/** Pixel columns for M4. A card is narrower than this on a laptop, and four
- * points per column reproduce the rasterised line exactly at that width. */
 export const M4_WIDTH = 800;
-/** Reservoir sampling is repeatable so a refresh draws the same points. */
 export const SAMPLE_SEED = 42;
 
 export type ColumnClass = "numeric" | "temporal" | "categorical" | "boolean";
 
-/** What a DuckDB type name means for a chart. Nested types (lists, structs,
- * maps) and everything unknown are categorical: they can be grouped by their
- * text, nothing else. */
 export function columnClass(type: string): ColumnClass {
   const t = type.trim().toUpperCase();
   if (t.includes("[") || /^(STRUCT|MAP|LIST|UNION)\b/.test(t)) return "categorical";
@@ -50,7 +21,6 @@ export function columnClass(type: string): ColumnClass {
   return "categorical";
 }
 
-/** DuckDB quotes identifiers with double quotes and doubles the quote inside. */
 export const quoteIdentifier = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 
 const CHART_TYPES = new Set<OmbChartSpec["type"]>(["bar", "line", "area", "scatter", "histogram", "pie", "heatmap"]);
@@ -65,8 +35,7 @@ const TIME_UNITS: Record<NonNullable<OmbChartSpec["timeUnit"]>, string> = {
   year: "INTERVAL 1 YEAR",
 };
 
-/** `from` is a bare or qualified (optionally quoted) table name, or a
- * parenthesised subquery. Anything else is refused before it reaches SQL. */
+/** A bare or qualified (optionally quoted) table name, or a parenthesised subquery; anything else is refused before SQL. */
 const IDENTIFIER = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`;
 const FROM_TARGET = new RegExp(`^(?:\\([\\s\\S]+\\)|${IDENTIFIER}(?:\\.${IDENTIFIER}){0,2})$`);
 
@@ -74,8 +43,6 @@ function fail(message: string, extra: { hint?: string; candidates?: string[] } =
   throw new DataFailure({ code: "spec_invalid", message, ...extra });
 }
 
-/** Columns most like a misspelt name, closest first: same letters in another
- * case, then a containing or contained name, then a shared initial. */
 function candidatesFor(name: string, columns: DataColumn[]): string[] {
   const needle = name.toLowerCase();
   const score = (c: string): number => {
@@ -88,7 +55,6 @@ function candidatesFor(name: string, columns: DataColumn[]): string[] {
 interface Resolved {
   column: DataColumn;
   cls: ColumnClass;
-  /** The quoted identifier, ready for SQL. */
   id: string;
 }
 
@@ -113,26 +79,19 @@ const vegaType = (c: Resolved): VegaType => (c.cls === "numeric" ? "quantitative
 
 interface Cte {
   name: string;
-  /** The parenthesised body. */
   body: string;
 }
 
-/** One dimension of a chart: how SQL produces it, how Vega-Lite reads it. */
 interface Dimension {
-  /** The channel's SQL expression. */
   expr: string;
-  /** The band end (bins and bucketed bars): its channel and expression. */
   end?: { channel: string; expr: string };
-  /** A CTE the expression reads (the range of the column), or none. */
   cte?: Cte;
-  /** The Vega-Lite field defs for the channel and its band end. */
   encoding: Encoding;
   endEncoding?: Encoding;
   tooltip: Encoding[];
   reduction: Reduction;
 }
 
-/** Categories as text. NULL stays NULL here and folds into "other" later. */
 function categorical(x: Resolved, channel: string, spec: OmbChartSpec): Dimension {
   const sort = spec.sort === "-x" ? "descending" : spec.sort === "y" || spec.sort === "-y" ? spec.sort : undefined;
   return {
@@ -143,8 +102,6 @@ function categorical(x: Resolved, channel: string, spec: OmbChartSpec): Dimensio
   };
 }
 
-/** Equal-width bins over the column's range; the last bin takes the maximum.
- * A constant column gets one bin of width 1 so the bar still shows. */
 function binned(x: Resolved, channel: string, bins: number, bars: boolean): Dimension {
   const v = `CAST(${x.id} AS DOUBLE)`;
   const cte: Cte = {
@@ -158,7 +115,6 @@ function binned(x: Resolved, channel: string, bins: number, bars: boolean): Dime
   const bin = `least(floor((${v} - ${cte.name}.lo) / ${cte.name}.width), ${bins - 1})`;
   const start = `${cte.name}.lo + ${bin} * ${cte.name}.width`;
   const end = `${channel}2`;
-  // Bars span the bin; a line sits on its centre.
   return bars
     ? {
         expr: start,
@@ -181,9 +137,6 @@ function binned(x: Resolved, channel: string, bins: number, bars: boolean): Dime
       };
 }
 
-/** `time_bucket` with the unit from the spec, or chosen in SQL from the
- * data's range: the coarsest of hour/day/week/month/quarter/year that keeps
- * the axis under TIME_BUCKETS_TARGET buckets. A DATE never buckets by hour. */
 function timeBucketed(x: Resolved, channel: string, spec: OmbChartSpec, bars: boolean): Dimension {
   const isDate = x.column.type.trim().toUpperCase() === "DATE";
   let unit: string;
@@ -237,9 +190,6 @@ interface Measure {
   type: VegaType;
 }
 
-/** The aggregate per group: count by default, sum when y is named. Sums,
- * averages and medians of text are refused here rather than by DuckDB, so
- * the bot reads one clear reason. */
 function measure(spec: OmbChartSpec, y: Resolved | undefined): Measure {
   const agg = spec.agg ?? (y ? "sum" : "count");
   if (agg === "count") {
@@ -264,10 +214,8 @@ function colorEncoding(color: Resolved): Encoding {
   return { field: "color", type: vegaType(color), title: color.column.name };
 }
 
-/** What a chart type compiles to before the source is known. */
 interface Plan {
   ctes: Cte[];
-  /** SELECT … FROM … GROUP BY … ORDER BY …, without the LIMIT. */
   body: string;
   vegaLite: Record<string, unknown>;
   reduction: Reduction;
@@ -301,10 +249,6 @@ function checkSpec(spec: OmbChartSpec): void {
   if (spec.stack !== undefined && typeof spec.stack !== "boolean") fail("chart.stack must be true or false");
 }
 
-/** Bars, lines, areas and histograms: one dimension on x, an aggregate on
- * y, an optional series. A categorical x folds to the top N; a numeric x
- * bins; a temporal x buckets — or, for a line/area of a raw numeric y with
- * neither agg nor timeUnit, M4-downsamples instead of aggregating. */
 function planCartesian(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined, color: Resolved | undefined): Plan {
   const bars = spec.type === "bar" || spec.type === "histogram";
   const mark = bars ? "bar" : spec.type;
@@ -319,8 +263,7 @@ function planCartesian(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined,
   let xExpr = dim.expr;
   let reduction = dim.reduction;
   if (x.cls === "categorical" || x.cls === "boolean") {
-    // Top N by the measure, the rest (and NULL) as "other". `IN (subquery)`
-    // is NULL for a NULL category, so NULL lands in "other" with the tail.
+    // `IN (subquery)` is NULL for a NULL category, so NULL lands in "other" with the tail.
     const n = spec.limit ?? TOP_N_DEFAULT;
     ctes.push({
       name: "kept",
@@ -353,7 +296,6 @@ function planCartesian(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined,
     tooltip.push({ field: "color", type: "nominal", title: color.column.name });
     if (spec.stack === false) {
       yEncoding.stack = null;
-      // Grouped bars need a discrete x; binned or bucketed bars overlap, so fade them.
       if (bars && (x.cls === "categorical" || x.cls === "boolean")) encoding.xOffset = { field: "color" };
       else if (mark !== "line") encoding.opacity = { value: 0.6 };
     }
@@ -363,9 +305,7 @@ function planCartesian(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined,
   return { ctes, body, vegaLite: vegaLiteSpec(mark, encoding, tooltip), reduction };
 }
 
-/** M4 (Jugel et al., VLDB 2014): per pixel column keep the first, last,
- * lowest and highest point. At most 4·M4_WIDTH rows per series, and the
- * line drawn at that width is identical to the one from every row. */
+/** M4 (Jugel et al., VLDB 2014): per pixel column keep the first, last, lowest and highest point. */
 function planM4(x: Resolved, y: Resolved, color: Resolved | undefined, mark: string): Plan {
   const t = `epoch_ms(CAST(${x.id} AS TIMESTAMP))`;
   const partition = color ? "px, color" : "px";
@@ -415,7 +355,6 @@ function planM4(x: Resolved, y: Resolved, color: Resolved | undefined, mark: str
   };
 }
 
-/** Slices are categories whatever the column's type; the top N by the measure. */
 function planPie(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined): Plan {
   const m = measure(spec, y);
   const n = spec.limit ?? TOP_N_DEFAULT;
@@ -438,7 +377,6 @@ function planPie(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined): Plan
   const encoding: Encoding = {
     theta: { field: "y", type: "quantitative", title: m.title },
     color: { field: "x", type: "nominal", title: x.column.name },
-    // Slices in the order of their size; "other" sits where its total puts it.
     order: { field: "y", type: "quantitative", sort: spec.sort === "y" ? "ascending" : "descending" },
   };
   const tooltip: Encoding[] = [
@@ -448,9 +386,6 @@ function planPie(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined): Plan
   return { ctes, body, vegaLite: vegaLiteSpec("arc", encoding, tooltip), reduction: { method: "topN", note: `top ${n} of ${x.column.name} by ${m.title}, the rest as "other"` } };
 }
 
-/** Points straight from the source through a repeatable reservoir sample of
- * chartMaxMarks rows. The sample is the whole table when the table is
- * smaller, so the caller may report "none" when input and output counts match. */
 function planScatter(x: Resolved, y: Resolved | undefined, color: Resolved | undefined, size: Resolved | undefined): Plan {
   if (!y) fail("scatter needs y", { hint: "Name the column for the y axis" });
   if (size && size.cls !== "numeric") fail(`size needs a numeric column; "${size.column.name}" is ${size.column.type}`);
@@ -482,9 +417,6 @@ function planScatter(x: Resolved, y: Resolved | undefined, color: Resolved | und
   };
 }
 
-/** Two dimensions (x, and the spec's `color` on the y axis) with the
- * measure as the cell colour. Numeric dimensions bin, temporal ones bucket,
- * categories stand as they are: the LIMIT catches two wide columns. */
 function planHeatmap(spec: OmbChartSpec, x: Resolved, y: Resolved | undefined, color: Resolved | undefined): Plan {
   if (!color) fail("heatmap needs color: the column for the second axis", { hint: "x and color are the two axes; y (or count) colours the cells" });
   const m = measure(spec, y);
@@ -538,8 +470,7 @@ export const compileChart: ChartCompiler = (spec, columns, from) => {
     default:
       plan = planCartesian(spec, x, y, color);
   }
-  // The source is the one piece of text here the compiler did not write
-  // itself, and it enters the statement exactly once, as the first CTE.
+  // The source is the only text the compiler did not write, and it enters the statement once, as the first CTE.
   const ctes = [{ name: "src", body: `SELECT * FROM ${source}` }, ...plan.ctes].map((c) => `${c.name} AS (${c.body})`);
   const sql = `WITH ${ctes.join(",\n")}\n${plan.body}\nLIMIT ${CHART_SQL_LIMIT}`;
   return { sql, vegaLite: plan.vegaLite, reduction: plan.reduction };

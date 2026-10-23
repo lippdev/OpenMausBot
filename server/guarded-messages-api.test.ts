@@ -1,5 +1,4 @@
-// Exercises the actual guarded route under the prescribed disposable-home
-// launcher. The only provider is its fake CLI; each thread has its own gate.
+// The only provider is the launcher's fake CLI; each thread has its own gate.
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -47,9 +46,7 @@ describe("guarded external messages through an isolated runtime", () => {
     }, { timeout: 15_000 }).toBe(true);
   };
   const initialOutputProcessed = async (threadId: string) => {
-    // The launch dump precedes stdout. Wait for the initial tool result to
-    // reach the runtime before snapshotting the leaf; slow mode then emits
-    // no more messages until this thread's finish gate is released.
+    // The launch dump precedes stdout: wait for the first tool result before snapshotting the leaf.
     await expect.poll(async () => (await page(threadId)).messages.some(message =>
       message.kind === "activity" && message.tool?.name === "Bash" && message.tool.ok === true,
     ), { timeout: 15_000 }).toBe(true);
@@ -206,8 +203,6 @@ describe("guarded external messages through an isolated runtime", () => {
     expect(typeof snapshot.executionId).toBe("string");
     const target = { threadId: bot.activeTaskId, messageId: snapshot.messageId, expectedActiveLeafId: snapshot.activeLeafId,
       expectedTurnId: snapshot.activeTurnId, expectedExecutionId: snapshot.executionId };
-    // A null/old setup lease must never match a newer generation, even if a
-    // provider has not assigned its own turn id yet.
     expect((await api("POST", `${route}/interrupt`, { ...target, expectedExecutionId: null })).status).toBe(409);
     expect((await api("POST", `${route}/interrupt`, { ...target, expectedTurnId: "foreign-turn" })).status).toBe(409);
     expect((await api("POST", `${route}/interrupt`, { ...target, extra: true })).status).toBe(400);
@@ -272,9 +267,7 @@ it("refuses a parked conversation after its own provider settles while its teamm
     await control(["send", "--bot", chief.id, "--task", chief.activeTaskId, "--text", "Coordinate the gated fixture check."]);
     const nodes = () => readHandoffs(fixture.info.dataDir);
     await expect.poll(() => { try { return nodes().find(node => node.botId === teammate.id)?.status; } catch { return undefined; } }, { timeout: 15_000 }).toBe("running");
-    // Unlike the public busy flag (which includes coordination), this no-op
-    // permission PATCH only succeeds after the exact task's raw busy flag
-    // AND its synchronous provider dispatch claim have both been released.
+    // This no-op PATCH succeeds only once the task's raw busy flag and its dispatch claim are both released.
     await expect.poll(async () => (await api("PATCH", `/api/bots/${chief.id}/tasks/${chief.activeTaskId}`, { approvalMode: "ask" })).status,
       { timeout: 15_000 }).toBe(200);
     const pagePath = `/api/threads/${chief.activeTaskId}/messages?limit=100`;

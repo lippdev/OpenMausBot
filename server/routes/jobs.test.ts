@@ -1,6 +1,3 @@
-// GET /api/threads/:id/job through the route table, over a real store and a
-// stand-in coordinator: the read, its refusals, and the held read that
-// answers at the job's next change (or when its wait runs out).
 import { rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -26,7 +23,6 @@ afterEach(async () => {
 
 interface Fixture {
   store: Store; rows: Assignment[]; reads: number; hidden: Set<string>; subscribers: () => number; failing?: boolean;
-  /** A paired session asks instead of this computer; `live` is whether it is still signed in. */
   session?: { live: boolean };
 }
 
@@ -103,7 +99,6 @@ describe("GET /api/threads/:id/job", () => {
     expect(status).toBe(200);
     expect(body).toMatchObject({ threadId: f.threadId, scope: "job", since: 0, now: 5_000, state: "completed", roots: ["root"],
       conversation: { kind: "bot", busy: false, queued: 0 } });
-    // no since: the work open now
     expect((await get(base, `/api/threads/${f.threadId}/job`)).body.since).toBe(5_000);
     expect((await get(base, "/api/threads/nobody/job")).status).toBe(404);
     f.hidden.add(f.threadId);
@@ -124,7 +119,6 @@ describe("GET /api/threads/:id/job", () => {
     const started = Date.now();
     const held = get(base, `/api/threads/${f.threadId}/job?since=0&wait=20000&version=${first.version}`);
     await expect.poll(() => f.subscribers()).toBe(1);
-    // The turn ends: the row settles and the bot goes idle (a store change).
     f.rows = [f.root({ status: "completed", result: "Done", finishedAt: 4_000 })];
     f.store.setTaskActivity(f.botId, f.threadId, "idle");
     const answered = await held;

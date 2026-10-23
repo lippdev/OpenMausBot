@@ -1,6 +1,3 @@
-// A focused setup card shared by onboarding, the model picker, and runtime
-// errors. The command has one inline copy action and one primary next step;
-// unusable model lists stay out of the way until the engine is ready.
 import { useEffect, useState } from "react";
 import { AlertTriangle, Check, Copy, Download, ExternalLink, KeyRound, Loader2, LogIn, TerminalSquare, X } from "lucide-react";
 import { api, type EngineInstall, type InstanceInfo, useStore } from "@/state/store";
@@ -22,43 +19,27 @@ function hostPlatform(): Platform {
   return "linux";
 }
 
-/** The install command for this machine, or null when the engine has none
- * here (a GUI download, or a POSIX-only installer viewed on Windows). */
 export function installCommandFor(install: EngineInstall | undefined): string | null {
   return install?.command?.[install.platform ?? hostPlatform()] ?? null;
 }
 
-/** Installed but missing the cloud account session. */
 export function needsSignIn(instance: InstanceInfo | undefined): boolean {
   return instance?.snapshot.state === "available" && instance.snapshot.authenticated === false;
 }
 
-/** The card EngineSetup shows for this engine is its sign-in — not an API
- * key row, an install, or a note that it cannot be set up here. A caller
- * that words a line around that card (a failed turn's headline) asks this,
- * so the line and the card never disagree. */
 export function offersSignIn(instance: InstanceInfo | undefined): boolean {
   return Boolean(instance && needsSignIn(instance) && instance.install
     && !instance.snapshot.authenticationUnavailableReason && !apiKeySetup(instance));
 }
 
-/** The engine needs setup; unavailable does not prove its CLI is absent.
- * Local-model injection still requires an available engine, but no cloud sign-in. */
 export function needsCli(instance: InstanceInfo | undefined): boolean {
   return instance?.snapshot.state !== "available";
 }
 
-/** A terminal opened from this page runs on the machine the server runs on:
- * the desktop app's own window on its own server. Never a browser, a paired
- * remote client, or My Cloud, where a terminal command is a dead end. */
 export function serverTerminal(cloudHome: boolean): boolean {
   return Boolean(window.ogb?.openInstallTerminal) && window.ogb?.remoteClient?.active !== true && !cloudHome;
 }
 
-/** Grok Build cannot run here (no Grok CLI on this server, an older Cloud
- * computer image for one) and nobody here can install it. Its models are
- * still an xAI API key away, so the card says that instead of handing over
- * an install command that cannot run. */
 export function grokKeyInstead(instance: InstanceInfo, cloudHome: boolean): boolean {
   return instance.driverKind === "grokAgent" && needsCli(instance) && !serverTerminal(cloudHome);
 }
@@ -82,7 +63,6 @@ export function CommandRow({
     window.setTimeout(() => setStatus(null), 2200);
   };
 
-  // The command remains selectable when clipboard access is blocked.
   const copy = async () => {
     const result = await copyText(command);
     if (result !== "empty") settle(result);
@@ -178,10 +158,7 @@ export function CommandRow({
   );
 }
 
-/** One click installs or updates the engine on the machine running the
- * server, as the server's own user, into the app's own folder. The terminal
- * command stays behind a disclosure for people who prefer it. */
-function ServerEngineInstall({ instance, mode, command }: { instance: InstanceInfo; mode: "install" | "update"; command: string | null }) {
+function ServerEngineInstall({ instance, mode, command, quiet = false }: { instance: InstanceInfo; mode: "install" | "update"; command: string | null; quiet?: boolean }) {
   const { state, dispatch, refreshModels } = useStore();
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
@@ -214,7 +191,8 @@ function ServerEngineInstall({ instance, mode, command }: { instance: InstanceIn
         type="button"
         disabled={busy}
         onClick={() => void run()}
-        className="flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-3 py-2 text-[12.5px] font-semibold text-white hover:brightness-110 disabled:cursor-wait disabled:opacity-70"
+        className={cn("flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-[12.5px] font-semibold disabled:cursor-wait disabled:opacity-70",
+          quiet ? "bg-control text-ink hover:bg-raised-hover" : "bg-accent text-white hover:brightness-110")}
       >
         {busy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
         {busy
@@ -233,16 +211,17 @@ function ServerEngineInstall({ instance, mode, command }: { instance: InstanceIn
   );
 }
 
+/** `quiet` keeps an optional update from competing with a card's main action (Sign in). */
 export function EngineUpdateNotice({
   update,
   instance,
   className,
+  quiet = false,
 }: {
   update: NonNullable<InstanceInfo["snapshot"]["update"]>;
-  /** When given and the server can update this engine itself, the notice
-   * offers a button instead of a terminal command. */
   instance?: InstanceInfo;
   className?: string;
+  quiet?: boolean;
 }) {
   return (
     <div
@@ -257,14 +236,12 @@ export function EngineUpdateNotice({
         </div>
       </div>
       {instance?.install?.server
-        ? <ServerEngineInstall instance={instance} mode="update" command={update.command} />
+        ? <ServerEngineInstall instance={instance} mode="update" command={update.command} quiet={quiet} />
         : <CommandRow command={update.command} actionLabel={t("engineSetup.openUpdate")} compact />}
     </div>
   );
 }
 
-/** Like the update notice, minus the command: there is nothing to run, only
- * something to know — the message says what and where to change it. */
 export function EngineWarningNotice({
   warning,
   className,
@@ -314,8 +291,6 @@ function ManagedEngineSetup({ instance, signInOnly }: { instance: InstanceInfo; 
     try {
       await api(`/api/instances/${encodeURIComponent(instance.instanceId)}/install`, { method: "POST" });
     } finally {
-      // Keep the latest setup reason without replacing the install error if
-      // the status refresh also fails.
       await refreshInstances().catch(() => {});
     }
   });
@@ -415,24 +390,20 @@ function ManagedEngineSetup({ instance, signInOnly }: { instance: InstanceInfo; 
   );
 }
 
-/** Engines that run on a pasted API key. Their setup is the key row in
- * Settings → API keys, never a terminal command or a sign-in. Claude on the
- * workspace key still needs its CLI first, which the install card covers. */
 export function isApiKeyEngine(instance: InstanceInfo | undefined): boolean {
   if (!instance || instance.access !== "api" || instance.managed) return false;
   return instance.driverKind !== "claudeAgent" || Boolean(instance.snapshot.version);
 }
 
-/** A key engine whose key is saved. A mistyped key counts too: it is only
- * found wrong when used or tested. */
 export function hasSavedApiKey(instance: InstanceInfo): boolean {
   return isApiKeyEngine(instance) && instance.snapshot.authenticated === true;
 }
 
-/** Its setup is a key in Settings → API keys, and that is not done yet. */
 function apiKeySetup(instance: InstanceInfo): boolean {
-  return (isApiKeyEngine(instance) || instance.install?.settings === "connections") && !instance.snapshot.authenticationUnavailableReason
-    && (instance.snapshot.state !== "available" || instance.snapshot.authenticated === false);
+  if (!(isApiKeyEngine(instance) || instance.install?.settings === "connections") || instance.snapshot.authenticationUnavailableReason) return false;
+  // A key engine with its own CLI (DeepSeek Harness) is installed first, then given the key.
+  if (instance.snapshot.state !== "available") return !installCommandFor(instance.install);
+  return instance.snapshot.authenticated === false;
 }
 
 function GrokKeyInstead({ className, unframed }: { className?: string; unframed: boolean }) {
@@ -446,7 +417,6 @@ function GrokKeyInstead({ className, unframed }: { className?: string; unframed:
         </span>
         <p className="min-w-0 text-[12.5px] leading-relaxed text-ink">{t("engineSetup.grok.notInstalled")}</p>
       </div>
-      {/* a remote client's Settings has no API keys to open (ApiKeyEngineSetup) */}
       {!remote && (
         <button
           type="button"
@@ -461,8 +431,6 @@ function GrokKeyInstead({ className, unframed }: { className?: string; unframed:
   );
 }
 
-/** `configured`: the key is saved, so the card offers to change it instead.
- * A typo'd key still counts as saved, and this is the way back to fix it. */
 function ApiKeyEngineSetup({ instance, className, unframed, configured = false }: { instance: InstanceInfo; className?: string; unframed: boolean; configured?: boolean }) {
   const { dispatch } = useStore();
   const remote = window.ogb?.remoteClient?.active === true;
@@ -480,8 +448,9 @@ function ApiKeyEngineSetup({ instance, className, unframed, configured = false }
           <p className="mt-0.5 text-[12px] leading-relaxed text-ink-secondary">{t(copy.description)}</p>
         </div>
       </div>
-      {/* a saved key the provider refused reads as installed but signed out */}
-      {needsSignIn(instance) && (
+      {/* An API-only engine is available only with a saved key, so unauthenticated means rejected.
+          A key engine with its own CLI (DeepSeek Harness) is unauthenticated simply when no key is saved yet. */}
+      {isApiKeyEngine(instance) && needsSignIn(instance) && (
         <p role="alert" className="mt-2 text-[12px] leading-relaxed text-danger">{t("engineSetup.apiKey.rejected")}</p>
       )}
       {!remote && (
@@ -498,9 +467,6 @@ function ApiKeyEngineSetup({ instance, className, unframed, configured = false }
   );
 }
 
-/** A ready engine that runs on a pasted key: name the key and link to where it
- * is replaced or cleared. Without this, saving any key (even a wrong one)
- * left Model providers with no way back to it. */
 export function ApiKeyEngineManage({ instance, className }: { instance: InstanceInfo; className?: string }) {
   if (!hasSavedApiKey(instance)) return null;
   return <ApiKeyEngineSetup instance={instance} className={className} unframed={false} configured />;
@@ -515,12 +481,8 @@ export function EngineSetup({
 }: {
   instance: InstanceInfo;
   className?: string;
-  /** `inject` installs the CLI but deliberately skips cloud sign-in. */
   intent?: "cloud" | "inject";
-  /** The containing engine disclosure already supplies the card surface. */
   unframed?: boolean;
-  /** Why this install is needed, when the caller knows better (a Company
-   * model that runs this CLI with the organisation's access). */
   description?: string;
 }) {
   const { state } = useStore();
@@ -565,8 +527,6 @@ export function EngineSetup({
     return <GrokKeyInstead className={className} unframed={unframed} />;
   }
 
-  // Some engines are configured elsewhere (for example, a cloud computer
-  // token) and intentionally have no install descriptor.
   if (!install || instance.snapshot.authenticationUnavailableReason) {
     return (
       <div className={cn(!unframed && "rounded-xl border border-hairline/40 bg-control/30 p-3", className)}>
@@ -599,8 +559,6 @@ export function EngineSetup({
       {deviceSignIn || browserSignIn ? (
         <>
           <DeviceSignIn key={instance.instanceId} instanceId={instance.instanceId} browserPkce={browserSignIn} provider={provider} />
-          {/* Grok keeps its terminal sign-in for people who prefer one, where
-              a terminal runs on this server; the code above needs none. */}
           {deviceSignIn && provider === "grok" && signInCommand && serverTerminal(cloudHome) && (
             <details className="mt-2 rounded-lg border border-hairline/50 bg-app px-2.5 py-2 text-[11.5px] text-ink-secondary">
               <summary className="cursor-pointer select-none">{t("engineSetup.preferTerminal")}</summary>
@@ -628,8 +586,6 @@ export function EngineSetup({
 
       {!signInOnly && install.needsNode && !install.server && (
         <p className="mt-2 text-[11px] leading-relaxed text-ink-tertiary">
-          {/* the sentence is one catalog entry; {npm} marks where the code
-              chip goes, so a translator can move it */}
           {t("engineSetup.needsNode").split("{npm}").flatMap((part, index) =>
             index === 0
               ? [part]

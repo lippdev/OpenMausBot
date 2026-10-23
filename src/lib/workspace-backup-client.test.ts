@@ -42,6 +42,15 @@ describe("full-backup browser state", () => {
     expect(storage.getItem("omb-color-user-bubbles")).toBeNull();
   });
 
+  it("carries the chat width choice and clears it for older backups", () => {
+    const storage = memory({ "omb-chat-width": "full" });
+    expect(collectWorkspaceClientState(storage)).toEqual({ "omb-chat-width": "full" });
+    applyWorkspaceClientState({ "omb-chat-width": "wide" }, storage);
+    expect(storage.getItem("omb-chat-width")).toBe("wide");
+    applyWorkspaceClientState({}, storage);
+    expect(storage.getItem("omb-chat-width")).toBeNull();
+  });
+
   it.each([null, [], { "auth-token": "injected" }, { "omb-webhook-credentials": "source URL" }, { "omb-drafts": 1 }])("rejects invalid client state before clearing anything (%j)", (value) => {
     const storage = memory({ "omb-drafts": "old", "auth-token": "keep" });
     expect(() => applyWorkspaceClientState(value, storage)).toThrow("Invalid backup browser state");

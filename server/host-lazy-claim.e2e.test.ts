@@ -1,25 +1,17 @@
-// Issue #1650: the Auto host fallback must mount the gated CUA integration
-// without taking the exclusive computer:host seat, and a conversation pins
-// the host desktop only when a screen tool call actually claims it. Real
-// server, fake engine, a reachable CUA descriptor, and no Local VM in the
-// inventory so Auto falls through to the host desktop.
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { writeFileAtomic } from "./atomic.ts";
 import { CONTROL_BUSY, CONTROL_HANDED_BACK, CONTROL_REFUSAL_PLAIN, CONTROL_WAITED, controlRefusal, createControlClient } from "./control-client.ts";
 import { computerPersonAwayText } from "./computer-wait.ts";
 import { freePortBlock } from "./testing/ports.ts";
 import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-/** One computer call's wait, shortened — but past the 2 s after which the
- * bridges' old control client gave up and told the model a person had
- * taken control. */
-const CALL_WAIT_MS = 3_000;
-/** How soon a call must get its computer to act, shortened likewise. */
+const CALL_WAIT_MS = 5_000;
 const ACT_WITHIN_MS = 1_000;
 
 describe("lazy host claim and pin on use (issue #1650)", () => {
@@ -33,9 +25,8 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
   let child: ChildProcess | null = null;
   let base = "";
 
-  // No Local VM anywhere: the boot inventory marks nothing seen, so an Auto
-  // turn falls past attachLocalVm to the host fallback.
-  const vmState = () => writeFileSync(stateFile, JSON.stringify({ noContainers: true }));
+  // No Local VM anywhere, so an Auto turn falls past attachLocalVm to the host fallback.
+  const vmState = () => writeFileAtomic(stateFile, JSON.stringify({ noContainers: true }));
   const resetTurn = () => { vmState(); rmSync(dumpFile, { force: true }); rmSync(finishFile, { force: true }); };
   const api = async (method: string, path: string, body?: unknown) => {
     const response = await fetch(base + path, {
@@ -67,8 +58,6 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     } catch { return null; }
   }, Boolean);
   const mountedComputer = (sent: any) => sent.mcpConfig.mcpServers.computer;
-  // A screen tools/call's check, exactly as the mounted bridge makes it:
-  // the real control client, with its own timeout.
   const gate = (computer: any) =>
     createControlClient({ url: computer.env.OMB_CONTROL_URL, token: computer.env.OMB_CONTROL_TOKEN }).state(true);
   const timed = async <T>(work: Promise<T>) => {
@@ -154,14 +143,9 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     await apiOk("POST", `/api/bots/${holder.id}/messages`, { text: "Work slowly without touching the screen.", threadId: task.threadId });
     await busy(holder.id, task.threadId);
     const computer = mountedComputer(await dumpFor(holder.id));
-    // The gated host integration is mounted…
     expect(computer.env.OMB_CUA_COMMAND).toBe("/fixture/cua-driver");
     expect(computer.args.some((arg: string) => arg.includes("local-computer-proxy"))).toBe(true);
-    // …but the turn pinned nothing and took no seat.
     expect(savedTask(holder.id, task.threadId)).not.toHaveProperty("surface");
-    // Another turn's first screen call claims instantly — proof the
-    // screen-less turn holds no computer:host claim — and pins its own
-    // conversation, never the screen-less one's.
     const { bot: claimer } = await apiOk("POST", "/api/bots", { name: "Host Claim Bot" });
     const { task: claimTask } = await apiOk("POST", `/api/bots/${claimer.id}/tasks`, {});
     await apiOk("POST", `/api/bots/${claimer.id}/messages`, { text: "Work slowly too.", threadId: claimTask.threadId });
@@ -183,14 +167,9 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     await busy(bot.id, task.threadId);
     const computer = mountedComputer(await dumpFor(bot.id));
     expect(savedTask(bot.id, task.threadId)).not.toHaveProperty("surface");
-    // First screen tools/call: the gate fires the deferred exclusive claim…
     expect(await gate(computer)).toEqual({ held: false, helpOpen: false });
-    // …and the conversation pins the desktop this turn now actually holds.
     await until(() => savedTask(bot.id, task.threadId)?.surface === "local", Boolean);
     expect(savedTask(bot.id, task.threadId)).toMatchObject({ surface: "local", surfaceSource: "auto" });
-    // The seat stays held for the rest of the turn: another turn's first
-    // screen call waits for it, then — still taken — is told so honestly,
-    // through the real client, never as a person's hold.
     const { bot: second } = await apiOk("POST", "/api/bots", { name: "Host Contended Bot" });
     const { task: secondTask } = await apiOk("POST", `/api/bots/${second.id}/tasks`, {});
     await apiOk("POST", `/api/bots/${second.id}/messages`, { text: "Also work slowly.", threadId: secondTask.threadId });
@@ -217,11 +196,6 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     expect(await gate(holder.computer)).toEqual({ held: false, helpOpen: false });
     const waiter = await turn("Host Waiter Bot");
 
-    // Contention: the waiter's call is held open — its claim queued with
-    // the waiting chip — and answers the moment the holder's turn ends. It
-    // waited past ACT_WITHIN_MS, so it is not performed: an action started
-    // that late could outlive the engine's patience with the call and run
-    // twice. The computer is the waiter's now, and its next call acts at once.
     const waiting = timed(gate(waiter.computer));
     await until(() => api("GET", `/api/threads/${waiter.threadId}/messages`).then(({ body }) =>
       (body.messages as any[]).some(m => String(m.tool?.name ?? "").startsWith("Waiting for its turn on this computer"))), Boolean);
@@ -235,8 +209,6 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     expect(next.ms).toBeLessThan(ACT_WITHIN_MS);
     await until(() => savedTask(waiter.bot.id, waiter.threadId)?.surface === "local", Boolean);
 
-    // A person takes the wheel: the call waits for them, and once they hand
-    // it back it is answered without acting — the screen moved under them.
     const control = (action: "take" | "release") => apiOk("POST", `/api/bots/${waiter.bot.id}/computer/control`, { action });
     await control("take");
     const handedBack = timed(gate(waiter.computer));
@@ -246,14 +218,12 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     expect((await handedBack).ms).toBeLessThan(CALL_WAIT_MS);
     expect(await gate(waiter.computer)).toEqual({ held: false, helpOpen: false });
 
-    // A hold that outlasts the call is the person's, and says so.
     await control("take");
     const stillHeld = await timed(gate(waiter.computer));
     expect(stillHeld.value).toEqual({ held: true, helpOpen: false, reason: "person" });
     expect(controlRefusal(stillHeld.value)).toBe(CONTROL_REFUSAL_PLAIN);
     expect(stillHeld.ms).toBeGreaterThanOrEqual(CALL_WAIT_MS - 200);
 
-    // Stopping the turn ends a waiting call at once.
     const cancelled = timed(gate(waiter.computer));
     await new Promise(resolve => setTimeout(resolve, 300));
     await apiOk("POST", `/api/bots/${waiter.bot.id}/interrupt`, { threadId: waiter.threadId });
@@ -276,8 +246,6 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     const control = (action: "take" | "release") => apiOk("POST", `/api/bots/${bot.id}/computer/control`, { action });
     await control("take");
     const tookAt = Date.now();
-    // Waited for until the hold reaches the ceiling — not for the whole call,
-    // and not again: every later call is answered at once.
     const away = { held: true, helpOpen: false, blockedReason: computerPersonAwayText(ceilingMs) };
     const first = await timed(gate(computer));
     expect(first.value).toEqual(away);
@@ -308,9 +276,6 @@ describe("lazy host claim and pin on use (issue #1650)", () => {
     const waiting = timed(gate(waiter.computer));
     await until(() => api("GET", `/api/threads/${waiter.threadId}/messages`).then(({ body }) =>
       (body.messages as any[]).some(m => String(m.tool?.name ?? "").startsWith("Waiting for its turn on this computer"))), Boolean);
-    // Stopping the waiter settles its turn — its claim, slot and seat
-    // cleared — while the call is still parked in the gate. The call must
-    // come back refused at once, never as a free computer to click on.
     await apiOk("POST", `/api/bots/${waiter.bot.id}/interrupt`, { threadId: waiter.threadId });
     const stopped = await waiting;
     expect(stopped.value.held).toBe(true);

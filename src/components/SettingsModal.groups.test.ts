@@ -47,6 +47,10 @@ vi.mock("@/lib/sidebar-preferences", async (importOriginal) => ({
 vi.mock("@/lib/notification-preferences", () => ({
   useNotificationSounds: () => fixture.notificationSounds,
   setNotificationSounds: fixture.setNotificationSounds,
+  useNotificationFeed: () => false,
+  setNotificationFeed: vi.fn(),
+  useFinishedNotifications: () => true,
+  setFinishedNotifications: vi.fn(),
 }));
 vi.mock("@/lib/interface-mode", () => ({
   useAdvancedMode: () => fixture.advancedMode,
@@ -89,7 +93,6 @@ vi.mock("@/lib/use-owner-or-admin", () => ({ useOwnerOrAdmin: () => fixture.owne
 
 const render = () => renderToStaticMarkup(createElement(SettingsModal));
 
-/** The rail as drawn: each group with the section ids under it, in order. */
 function rail(html: string): Record<string, string[]> {
   const groups: Record<string, string[]> = {};
   let current = "";
@@ -101,26 +104,25 @@ function rail(html: string): Record<string, string[]> {
 }
 
 describe("Settings rail groups", () => {
-  it("files every page under You, AI, Computers or Account, in that order", () => {
+  it("files every page under You, AI, Devices or Account, in that order", () => {
     expect(SETTINGS_GROUPS.map((group) => group.id)).toEqual(["you", "ai", "computers", "account"]);
     const ids = SECTIONS.map((entry) => entry.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(ids).toHaveLength(18); // 16 + the shared Skills library (AI group) + Logins (Computers)
+    expect(ids).toHaveLength(19); // 16 + the shared Skills library (AI group) + Logins (Devices) + Import (Account)
     for (const entry of SECTIONS) expect(SETTINGS_GROUPS.map((group) => group.id)).toContain(entry.group);
   });
 
   it("shows every desktop page under its labelled group", () => {
     vi.stubGlobal("window", { ogb: { environments: {}, organization: {}, cloudAccount: {} } });
     const html = render();
-    for (const label of ["You", "AI", "Computers", "Account"]) expect(html).toContain(`>${label}</div>`);
+    for (const label of ["You", "AI", "Devices", "Account"]) expect(html).toContain(`>${label}</div>`);
     expect(html).toContain("glass-surface");
     expect(rail(html)).toEqual({
       you: ["general", "appearance", "companion"],
       ai: ["engines", "connections", "decisionModel"],
       computers: ["desktopWorkspaces", "computer", "logins"],
-      account: ["cloudAccount", "organization", "usage", "backups", "experimental"],
+      account: ["cloudAccount", "organization", "usage", "backups", "import", "experimental"],
     });
-    // the narrow-window picker carries the same groups
     expect(html).toContain('<optgroup label="AI">');
   });
 
@@ -128,7 +130,6 @@ describe("Settings rail groups", () => {
     fixture.ownerOrAdmin = true;
     const groups = rail(render());
     expect(groups.account).toEqual(["usage", "backups", "people", "activity", "experimental"]);
-    // desktop-only pages stay out of a browser
     expect(Object.values(groups).flat()).not.toContain("desktopWorkspaces");
     expect(Object.values(groups).flat()).not.toContain("cloudAccount");
   });

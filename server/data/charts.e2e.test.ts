@@ -1,6 +1,3 @@
-// The whole chart path on a real DuckDB: compile the bot's spec → run the
-// reducing SQL in-memory → bind the JSON rows → SVG. No engine module yet;
-// this talks to @duckdb/node-api directly, the way engine.ts will.
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -17,8 +14,6 @@ async function describeTable(table: string): Promise<DataColumn[]> {
   return result.getRowObjectsJson().map((row) => ({ name: String(row.column_name), type: String(row.column_type) }));
 }
 
-/** Runs a compiled statement and shapes it as the engine's RunResult will:
- * columns with DuckDB's type names, rows as JSON cells. */
 async function run(sql: string): Promise<{ columns: DataColumn[]; rows: Cell[][] }> {
   const result = await connection.runAndReadAll(sql);
   const names = result.columnNames();
@@ -140,7 +135,6 @@ describe("charts end to end on DuckDB", () => {
     const sampled = await chart({ type: "scatter", x: "amount", y: "noise", size: "id" }, "big");
     expect(sampled.reduced.rows).toHaveLength(DATA_LIMITS.chartMaxMarks);
     expect(sampled.reduced.rows.length).toBeLessThan(CHART_SQL_LIMIT);
-    // Repeatable: the same seed draws the same rows.
     const again = await run(sampled.compiled.sql);
     expect(again.rows.map((r) => r[0])).toEqual(sampled.reduced.rows.map((r) => r[0]));
     const svg = await chartRenderer.svg(sampled.compiled.vegaLite, sampled.reduced.rows, sampled.reduced.columns, { theme: "dark" });

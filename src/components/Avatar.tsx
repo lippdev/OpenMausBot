@@ -1,9 +1,3 @@
-// Bot avatar — the Blob Studio "Cursor" mascot (CursorAvatar.tsx), wrapped
-// in the app's historical MausAvatar API so no call site changes: per-bot
-// color becomes a body gradient, the app's one-shot motion beats borrow the
-// face/state for a moment, and the eyes follow the pointer. The previous
-// hand-built Maus body + face engine (maus-engine/face/driver) is gone;
-// CursorAvatar owns morphing, blinking, drift, body motion and effects.
 import {
   forwardRef,
   memo,
@@ -13,24 +7,20 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { MAUS_COLORS, type MausColor, type MausMotion, type MausState } from "@/lib/mascot";
+import { CHROME_EYES, CHROME_GRADIENT, MAUS_COLORS, type MausColor, type MausMotion, type MausState } from "@/lib/mascot";
 import { CursorAvatar, type CursorAvatarHandle } from "./CursorAvatar";
 import { avatarCropRadius, botAvatarProfile, clampAvatarFocus, clampAvatarZoom, type BotAvatarCrop } from "../../shared/bot-avatar";
-import { MASCOT_BODIES, botMascotBody, type MascotBodyId } from "../../shared/mascot-bodies";
+import { MASCOT_BODIES, botMascotBody } from "../../shared/mascot-bodies";
+import { isHalloweenBody, type BotBodyId } from "../../shared/bot-body";
+import { useHalloweenDressed, wornBody } from "@/lib/halloween-dress";
+import { CarvedAvatar } from "./CarvedAvatar";
+import { steelBodyImage } from "@/lib/steel-body";
 
 export const EYE_SCALE = 1.12;
 export const MOUTH_WEIGHT = 11;
 
-/**
- * How far the pointer may pull the eyes. Facing forward the full range is
- * safe; with the expressions' authored gaze they already start off-centre.
- */
 const POINTER_GAZE = { forward: 1, authored: 0.25 };
 
-/**
- * What a one-shot motion does while it plays: CursorAvatar animates the body
- * per state, so borrowing the state for a beat moves body and face together.
- */
 interface MotionFaces
   extends Partial<
     Record<Exclude<MausMotion, "none">, { state?: MausState; blink?: boolean; spin?: number }>
@@ -51,10 +41,8 @@ const MOTION_FACE: MotionFaces = {
   failure: { state: "sad" },
 };
 
-/** How long a one-shot motion holds its state before the bot's own returns. */
 const MOTION_FACE_MS = 1400;
 
-/** Channel-wise mix of a hex color toward another, t in 0..1. */
 function mix(hex: string, toward: string, t: number): string {
   const a = Number.parseInt(hex.slice(1), 16);
   const b = Number.parseInt(toward.slice(1), 16);
@@ -68,19 +56,12 @@ function mix(hex: string, toward: string, t: number): string {
     .join("")}`;
 }
 
-/**
- * Bot color -> the mascot's three-stop body gradient (highlight, base,
- * shadow), with the same light/dark spread as the pack's default green
- * ["#9FE6B5", "#3FAE6E", "#1C7A4C"].
- */
 const gradientFor = (color: MausColor): [string, string, string] => {
+  if (color === "chrome") return CHROME_GRADIENT;
   const fill = MAUS_COLORS[color] ?? MAUS_COLORS.green;
   return [mix(fill, "#ffffff", 0.55), fill, mix(fill, "#000000", 0.42)];
 };
 
-/** Room speaker mark. The mid stop is the skin's identity tone, which clears
- * 4.5:1 on the thread. Highlight and shadow stay within 18% of that tone so
- * the whole mark stays above 3:1 on the same ground. */
 export function roomAvatarGradient(color: MausColor): [string, string, string] {
   const fill = `var(--identity-${color})`;
   return [
@@ -94,39 +75,49 @@ export type MausAvatarHandle = CursorAvatarHandle;
 
 export type MausAvatarProps = {
   color: MausColor;
-  /** Named behaviour — drives the expression pool, its cadence and blinking. */
   state?: MausState;
-  /** Pin one of the 25 faces and stop the state's own drift. */
   expression?: number;
   size?: number;
   label?: string;
   motion?: MausMotion;
   motionKey?: number;
-  /** Head turn in degrees. */
   turn?: number;
   gaze?: { x?: number; y?: number };
   spring?: number;
   eyeScale?: number;
   showMouth?: boolean;
   mouthStroke?: number;
-  /**
-   * Face the viewer at turn 0, cancelling each expression's authored gaze
-   * direction. Off restores the engine's own drawn-in directions.
-   */
   forward?: boolean;
-  /** How much each expression glances around. Overrides `forward`'s 0-or-1. */
   lookAround?: number;
-  /** Let the eyes follow the pointer across this avatar. */
   trackPointer?: boolean;
-  /** Run the animation. Off renders the state's resting face. */
   animated?: boolean;
-  /** Which body the bot wears. Unknown values fall back to the cursor. */
-  bodyId?: MascotBodyId;
-  /** Replaces the palette gradient. Room labels pass the identity tone. */
+  bodyId?: BotBodyId;
   gradient?: [string, string, string];
 };
 
-function MausAvatarComponent(
+function MausAvatarComponent(props: MausAvatarProps, ref: React.Ref<MausAvatarHandle>) {
+  const { bodyId, color, size, state, motion, motionKey, gaze, trackPointer, animated, label } = props;
+  if (isHalloweenBody(bodyId)) {
+    return (
+      <CarvedAvatar
+        ref={ref}
+        body={bodyId}
+        color={color}
+        size={size}
+        state={state}
+        motion={motion}
+        motionKey={motionKey}
+        gaze={gaze}
+        trackPointer={trackPointer}
+        animated={animated}
+        label={label}
+      />
+    );
+  }
+  return <GradientAvatar ref={ref} {...props} />;
+}
+
+function GradientAvatarComponent(
   {
     color,
     state = "idle",
@@ -151,6 +142,7 @@ function MausAvatarComponent(
   ref: React.Ref<MausAvatarHandle>,
 ) {
   const silhouette = MASCOT_BODIES[botMascotBody(bodyId)];
+  const chrome = color === "chrome";
   const inner = useRef<CursorAvatarHandle>(null);
   useImperativeHandle(ref, () => ({
     blink: () => inner.current?.blink(),
@@ -158,7 +150,6 @@ function MausAvatarComponent(
     setExpression: (index: number) => inner.current?.setExpression(index),
   }));
 
-  // A one-shot motion borrows the state for a moment, then hands it back.
   const [motionState, setMotionState] = useState<MausState | null>(null);
   useEffect(() => {
     if (motion === "none" || !animated) return;
@@ -172,7 +163,6 @@ function MausAvatarComponent(
     return () => clearTimeout(timer);
   }, [motion, motionKey, animated]);
 
-  // Pointer-follow gaze, composed with any gaze the caller pins.
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   const range = forward ? POINTER_GAZE.forward : POINTER_GAZE.authored;
   const onPointerMove = (event: ReactPointerEvent<HTMLSpanElement>) => {
@@ -198,6 +188,8 @@ function MausAvatarComponent(
         size={size}
         silhouette={silhouette}
         gradient={gradient ?? gradientFor(color)}
+        picture={chrome ? steelBodyImage(silhouette.id, size, globalThis.devicePixelRatio ?? 1) : null}
+        eyeColor={chrome ? CHROME_EYES : undefined}
         title={label ?? null}
         lookAround={lookAround ?? (forward ? 0 : 1)}
         gaze={{ x: (gaze?.x ?? 0) + pointer.x, y: (gaze?.y ?? 0) + pointer.y }}
@@ -212,10 +204,11 @@ function MausAvatarComponent(
   );
 }
 
+const GradientAvatar = forwardRef(GradientAvatarComponent);
+
 export const MausAvatar = memo(forwardRef(MausAvatarComponent));
 
 export type BotAvatarProps = Omit<MausAvatarProps, "color" | "gradient"> & {
-  /** Paint the mascot with the skin's readable tone of this bot's color. */
   readable?: boolean;
   bot: {
     name?: string;
@@ -225,24 +218,13 @@ export type BotAvatarProps = Omit<MausAvatarProps, "color" | "gradient"> & {
     avatarZoom?: number;
     avatarFocusX?: number;
     avatarFocusY?: number;
-    mascotBody?: MascotBodyId | null;
+    mascotBody?: BotBodyId | null;
   };
 };
 
 export type BotAvatarOutcome = "flatImage" | "gradientMascot";
 
-/**
- * Pick which of the two ways to render a bot's avatar, given the parsed
- * profile plus whether the image has already failed to load. Kept as a pure
- * function — independent of React state and effects — so both arms can be
- * unit-tested directly: `imageFailed` is set by the `<img>`'s own `onError`,
- * which `renderToStaticMarkup` never fires, so the failure fallback is
- * unreachable from a synchronous render test.
- *
- * The iOS half of this decision is `resolveBotAvatarOutcome` in
- * `ios/Sources/CompanionCore/BotAvatarRendering.swift`, which mirrors this
- * union name for name so the two renderers can be read side by side.
- */
+/** Mirrored name for name by resolveBotAvatarOutcome in ios/Sources/CompanionCore/BotAvatarRendering.swift. */
 export function resolveBotAvatarOutcome(params: {
   avatarCrop: BotAvatarCrop;
   hasUrl: boolean;
@@ -255,13 +237,9 @@ export function resolveBotAvatarOutcome(params: {
   return "flatImage";
 }
 
-/**
- * The one renderer for a bot's chosen profile image. Malformed persisted
- * values and images that fail to load both fall back to the animated mascot,
- * so an old/corrupt profile can never leave a broken-image icon in the app.
- */
 export function BotAvatar({ bot, size = 44, label, readable = false, ...mascotProps }: BotAvatarProps) {
   const profile = botAvatarProfile(bot);
+  const dressed = useHalloweenDressed();
   const [imageFailed, setImageFailed] = useState(false);
 
   useEffect(() => setImageFailed(false), [profile.avatarUrl]);
@@ -275,7 +253,7 @@ export function BotAvatar({ bot, size = 44, label, readable = false, ...mascotPr
   if (outcome !== "flatImage") {
     return (
       <MausAvatar
-        bodyId={bot.mascotBody ?? undefined}
+        bodyId={wornBody(bot.mascotBody, bot.color, dressed)}
         {...mascotProps}
         color={bot.color}
         gradient={readable ? roomAvatarGradient(bot.color) : undefined}
@@ -317,11 +295,18 @@ export function BotAvatar({ bot, size = 44, label, readable = false, ...mascotPr
 
 export function InitialsAvatar({
   initials,
+  avatarUrl,
   size = 32,
 }: {
   initials: string;
+  avatarUrl?: string;
   size?: number;
 }) {
+  // A picture that is gone (a restored backup carries the address, not the file) falls back to the initials.
+  const [failed, setFailed] = useState<string | null>(null);
+  if (avatarUrl && failed !== avatarUrl) {
+    return <img src={avatarUrl} alt="" onError={() => setFailed(avatarUrl)} className="shrink-0 rounded-full object-cover" style={{ width: size, height: size }} />;
+  }
   return (
     <div
       className="flex shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary font-medium"

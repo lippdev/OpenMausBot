@@ -3,8 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { initialState, type Bot } from "@/state/store";
 
-// Preserve only the owner's hook state across prop updates. Descendants still
-// render with React's real hooks; no DOM or live workspace is needed here.
+// Preserves only the owner's hook state across prop updates; descendants render with React's real hooks.
 const fixture = vi.hoisted(() => ({
   capturing: false, cursor: 0, slots: [] as unknown[], effects: [] as EffectCallback[],
   state: { activeView: "chat" as const, selectedId: "atlas", revealThread: null as null | { threadId: string; nonce: number } },
@@ -28,6 +27,8 @@ vi.mock("react", async (original) => {
   };
 });
 vi.mock("./DesktopCapabilities", () => ({ useDesktopCapabilities: () => ({}) }));
+// Thread trees are an Advanced surface: Simple mode lists bots only.
+vi.mock("@/lib/interface-mode", async (original) => ({ ...await original<typeof import("@/lib/interface-mode")>(), useAdvancedMode: () => true }));
 vi.mock("@/lib/thread-preferences", async (original) => ({ ...await original<typeof import("@/lib/thread-preferences")>(),
   useShowThreads: () => true,
 }));
@@ -84,7 +85,6 @@ describe("bot row expansion follows the visible thread tree", () => {
 
   it("restores the owner row when an expanded list loses its second thread", () => {
     const multiple = { ...bot, tasks: [...bot.tasks!, { threadId: "older", title: "Earlier", createdAt: 0 }] };
-    // opened the way a person lands on a thread: a reveal, not a search
     fixture.state.revealThread = { threadId: "older", nonce: 1 };
     render(multiple);
     fixture.effects.forEach(effect => effect());

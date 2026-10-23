@@ -1,8 +1,5 @@
-// When a call can't start for want of a voice, the call button's help offers
-// "Set up voice", which opens a pop-up over the chat instead of the bot's
-// full settings. Same hook-by-call-order harness as
-// BotSettingsDialog.simple.test.ts: component state survives between renders,
-// effects never run, and handlers are read off the returned element tree.
+// Hook-by-call-order harness: component state survives between renders, effects never run, and handlers are read off
+// the element tree.
 import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,12 +33,11 @@ vi.mock("react", async (original) => ({
 }));
 vi.mock("@/state/store", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/state/store")>();
-  return { ...original, useStore: () => ({ state: { ...original.initialState, config: fixture.config, bots: fixture.bots }, dispatch: fixture.dispatch }) };
+  return { ...original, useStore: () => ({ state: { ...original.initialState, config: fixture.config, bots: fixture.bots, instances: [{ instanceId: "codex", driverKind: "codex" }, { instanceId: "claude-3f0c2b1e-9d1a-4c55-8a51-0a3a6f1e2b7c", driverKind: "claudeAgent" }] }, dispatch: fixture.dispatch }) };
 });
 vi.mock("@/lib/thread-preferences", () => ({ useShowThreads: () => fixture.showThreads }));
 vi.mock("./DesktopCapabilities", async (importOriginal) => ({
   ...await importOriginal<typeof import("./DesktopCapabilities")>(),
-  // the Mac app: only a Mac is sent to This computer for a call
   useDesktopCapabilities: () => ({ capabilities: { host: { platform: "darwin" }, dictation: fixture.dictation }, ready: true }),
 }));
 vi.mock("@/lib/call", async (importOriginal) => ({
@@ -55,7 +51,7 @@ vi.mock("@/lib/local-voice", async (importOriginal) => ({
   localSystemVoiceActive: () => false,
 }));
 vi.mock("@/lib/analytics", () => ({ track: fixture.track }));
-// The help card shows exactly while it is open; no exit animation to wait out.
+// No exit animation, so the help card shows exactly while it is open.
 vi.mock("./MenuMotion", async (importOriginal) => ({
   ...await importOriginal<typeof import("./MenuMotion")>(),
   useMenuMotion: (open: boolean) => ({ shown: open, closing: false, className: "", exitProps: {} }),
@@ -87,7 +83,6 @@ function nodes(value: ReactNode): Node[] {
   });
 }
 
-/** The composer's call button for Pepper, unless a room's props are given. */
 function render(props?: Props) {
   fixture.values.length = Math.min(fixture.values.length, fixture.own);
   fixture.dialog = null;
@@ -106,7 +101,6 @@ const find = (rendered: { nodes: Node[] }, attribute: string) =>
   rendered.nodes.find((node) => node.props[attribute] !== undefined)!;
 const click = (node: Node) => (node.props.onClick as () => void)();
 
-/** Click the call button, then the help's "Set up voice". */
 function openVoiceSetup(props?: Props) {
   click(find(render(props), "data-call-button"));
   const help = render(props);
@@ -155,7 +149,6 @@ describe("setting up a voice from the call button", () => {
     expect(opened.html).not.toContain("Call unavailable");
     expect(opened.html).toContain('data-voice-setup-stub="pepper"');
     expect(fixture.dialog).toMatchObject({ bot: pepper, callName: "Pepper", ready: false });
-    // Focus goes back to the call button, not to the help that has gone.
     expect(fixture.dialog!.returnFocusRef).toBe(find(opened, "data-call-button").props.ref);
     expect(fixture.startCall).not.toHaveBeenCalled();
     expect(fixture.dispatch).not.toHaveBeenCalled();
@@ -173,7 +166,6 @@ describe("setting up a voice from the call button", () => {
   it("tells the pop-up when a voice is ready, and starts the call the way the button does", () => {
     openVoiceSetup();
     expect(fixture.dialog!.ready).toBe(false);
-    // the key was saved and a voice picked, inside the pop-up
     fixture.config = { tts: { configured: true, ready: true } };
     const ready = render();
     expect(ready.html).toContain('data-voice-setup-stub="pepper"');
@@ -186,7 +178,6 @@ describe("setting up a voice from the call button", () => {
   });
 
   it("does the same from a room's header button, member by member", () => {
-    // GroupCallButton's props: the first member without a voice, else the first.
     const room: Props = {
       targetId: "room-1",
       targetName: "Standup",
@@ -200,14 +191,11 @@ describe("setting up a voice from the call button", () => {
     expect(String(find(opened, "data-call-button").props.className).split(" ")).toContain("size-9");
     expect(fixture.dialog).toMatchObject({ bot: pepper, callName: "Standup", ready: false });
 
-    // Pepper gets a voice; the pop-up moves on to Basil.
     room.voices = ["voice-2", undefined];
     room.setupBotId = "basil";
     render(room);
     expect(fixture.dialog).toMatchObject({ bot: basil, ready: false });
 
-    // Basil too: the room can be called, and the pop-up stays on Basil
-    // rather than jumping back to the room's fallback member.
     room.voices = ["voice-2", "voice-3"];
     room.setupBotId = "pepper";
     render(room);
@@ -218,20 +206,14 @@ describe("setting up a voice from the call button", () => {
   });
 
   it("opens the remote agent settings instead on a desktop paired to another computer", () => {
-    // This Mac speaks with the host's voices; the host has a key but no
-    // default voice, and Pepper has none of its own.
     vi.stubGlobal("window", { ogb: { speechStart: () => {}, remoteClient: { active: true } } });
     fixture.config = { tts: { configured: true, ready: false } };
     click(find(render(), "data-call-button"));
     const help = render();
     expect(help.html).toContain("Set up voice");
     const setUp = find(help, "data-voice-setup-open");
-    // A side panel, not a dialog.
     expect(setUp.props["aria-haspopup"]).toBeUndefined();
     click(setUp);
-    // The pop-up's saves (the bot update, the voice config) are refused by
-    // the pairing; the remote agent settings save through the host's
-    // profile route, so the button opens those, as it always did.
     expect(fixture.dispatch.mock.calls).toEqual([[{ type: "toggleSettings", open: true, section: "voice" }]]);
     const after = render();
     expect(after.html).not.toContain("data-voice-setup-stub");
@@ -281,9 +263,6 @@ describe("setting up a voice from the call button", () => {
     ]);
   });
 
-  // A server's page can't take turns, so a missing voice is no reason to
-  // stop: the call is Live. Its first press asks for the microphone (then,
-  // if the server has no key, for the key), never for a voice.
   it("starts the Live call, not voice set-up, where the device can't take turns", () => {
     fixture.dictation = { available: false, reasonCode: "remote-server" };
     const getUserMedia = vi.fn(() => new Promise<MediaStream>(() => {}));

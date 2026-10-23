@@ -9,8 +9,7 @@ import type { ProviderInstance, RuntimeEvent } from "../contracts.ts";
 import { MuseCodeDriver } from "./muse-code.ts";
 
 const live = process.env.OMB_LIVE_MUSE === "1";
-// The test setup points HOME at a temp dir; the engine alone gets the real
-// one, where `muse login` saved the sign-in.
+// The test setup points HOME at a temp dir; only the engine gets the real one, where `muse login` saved.
 const home = userInfo().homedir;
 const cli = process.env.OMB_MUSE_CLI ?? join(home, ".local", "bin", "muse");
 

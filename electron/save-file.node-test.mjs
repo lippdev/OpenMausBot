@@ -6,10 +6,9 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { collisionFreeDownloadPath, defaultSaveName, resolveSavablePath, revealDownloadWhenDone, revealInFolder, withSavableFile } from "./save-file.mjs";
+import { collisionFreeDownloadPath, defaultSaveName, openLogsFolder, resolveSavablePath, revealDownloadWhenDone, revealInFolder, withSavableFile } from "./save-file.mjs";
 
-// Creating a symlink on Windows needs elevation or developer mode, so the
-// symlink cases only run where the runner can actually make one.
+// Creating a symlink on Windows needs elevation or developer mode.
 const canSymlink = (() => {
   const probe = fs.mkdtempSync(path.join(os.tmpdir(), "omb-symlink-probe-"));
   try {
@@ -40,9 +39,7 @@ after(() => {
 describe("save-file path validation", () => {
   it("accepts a file inside the bot home, as a path or a file:// URL", async () => {
     const file = path.join(botHome, "workspaces", "bot", "report.docx");
-    // must be fs.promises.realpath, the same call the module makes: on Windows
-    // the callback API leaves 8.3 short names ("RUNNER~1") that the promises
-    // API expands ("runneradmin"), so mixing the two compares different strings
+    // fs.promises.realpath, as the module uses: on Windows the callback API leaves 8.3 short names that the promises API expands.
     const expected = await fs.promises.realpath(file);
     assert.equal(await resolveSavablePath(file, { home }), expected);
     assert.equal(await resolveSavablePath(pathToFileURL(file).href, { home }), expected);
@@ -152,7 +149,7 @@ describe("attachment download destination", () => {
     assert.notEqual(handler, -1);
     assert.match(main.slice(handler), /item\.setSavePath\(collisionFreeDownloadPath\(/);
     assert.match(main.slice(handler), /revealDownloadWhenDone\(item, /);
-    assert.ok(handler < main.indexOf("createWindow();"));
+    assert.ok(handler < main.indexOf("!deliveredCloudEntry) await showHome();"));
   });
 
   it("reveals only a completed download at its actual save path", () => {
@@ -194,8 +191,7 @@ describe("save-file source handles", () => {
 
   it("rejects a validation-to-open identity swap on Windows", async () => {
     const source = path.join(botHome, "workspaces", "bot", "report.docx");
-    // These IDs are distinct BigInts but collapse to the same Number. The
-    // options assertions below make the precision guarantee executable.
+    // Distinct BigInts that collapse to the same Number.
     const expected = { dev: 1n, ino: 9007199254740992n, isFile: () => true };
     const opened = { dev: 1n, ino: 9007199254740993n, isFile: () => true };
     let closed = false;
@@ -229,8 +225,6 @@ describe("save-file source handles", () => {
 });
 
 describe("Show in folder for a file outside the workspace", () => {
-  // Stands in for Electron's shell: revealing is the only thing that may
-  // happen to the path, and only after it has been validated.
   const shell = () => {
     const shown = [];
     return { shown, reveal: (target) => shown.push(target) };
@@ -270,5 +264,29 @@ describe("Show in folder for a file outside the workspace", () => {
     const rawPath = "C:\\Users\\Maus\\_draft\\..\\_draft\\ollama-gen.js";
     assert.equal(await revealInFolder(rawPath, { reveal, fsp, pathApi: path.win32 }), "shown");
     assert.deepEqual(shown, ["C:\\Users\\Maus\\_draft\\ollama-gen.js"]);
+  });
+});
+
+describe("openLogsFolder", () => {
+  it("opens exactly main's own logs folder, making it first, and says where it is when the system cannot open it", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "omb-logs-folder-"));
+    try {
+      const folder = path.join(root, "OpenMausBot", "logs");
+      const opened = [];
+      assert.deepEqual(await openLogsFolder(folder, { open: async (target) => { opened.push(target); return ""; } }), { folder, opened: true });
+      assert.deepEqual(opened, [folder]);
+      assert.equal(fs.statSync(folder).isDirectory(), true);
+      assert.deepEqual(await openLogsFolder(folder, { open: async () => "Failed to open path" }), { folder, opened: false, error: "Failed to open path" });
+      assert.deepEqual(await openLogsFolder(folder, { open: async () => { throw new Error("no file manager"); } }), { folder, opened: false, error: "no file manager" });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // The folder comes from main (app.getPath("logs")); the page asks with no path at all.
+  it("is wired in main to its own logs folder, for this computer's page and My Cloud's once it is home", () => {
+    const main = fs.readFileSync(new URL("./main.mjs", import.meta.url), "utf8");
+    assert.match(main, /ipcMain\.handle\("desktop:open-logs", localOrHome\("desktop:open-logs", \(\) => openLogsFolder\(LOG_DIR, \{ open: \(folder\) => shell\.openPath\(folder\) \}\)\)\);/);
+    assert.match(main, /const LOG_DIR = app\.getPath\("logs"\);/);
   });
 });

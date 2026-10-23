@@ -34,7 +34,6 @@ describe("MessageActions", () => {
     expect(html).toContain('aria-label="Message actions"');
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-expanded="false"');
-    // the moved actions are not in the row
     expect(html).not.toContain("Pin message");
   });
 

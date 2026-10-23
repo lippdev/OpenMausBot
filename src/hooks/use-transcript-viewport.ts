@@ -1,7 +1,3 @@
-// The scrolling transcript of a 1:1 chat or a room: which rows mount, when
-// the pane follows the bottom, and how it holds still while rows are
-// prepended. ChatView and GroupView both use this one copy, so a viewport fix
-// lands once.
 import {
   useCallback,
   useEffect,
@@ -24,9 +20,12 @@ import {
   resolveTranscriptWindow,
   tailWindowStart,
 } from "@/lib/transcript-window";
+import { reducedMotion } from "@/lib/onboarding";
 import { useStore } from "@/state/store";
 
 export const AUTO_EXPAND_TOP_THRESHOLD = 250;
+
+const WIDGETS_WITH_OWN_ARROW_KEYS = '[role="menu"], [role="menubar"], [role="listbox"], [role="tree"], [role="grid"], [role="tablist"], [role="radiogroup"], [role="slider"], select, [contenteditable="true"]';
 
 export function useTranscriptViewport<T extends { id: string; role?: string }>({
   ownerId,
@@ -36,18 +35,11 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
   transcriptShown = true,
   hasMore = false,
 }: {
-  /** The bot or room. Opening another conversation — another owner, or
-   * another thread of this owner — re-arms bottom-follow. */
   ownerId: string;
   threadId: string;
-  /** The full transcript. Only a window of it mounts. */
   messages: readonly T[];
-  /** Besides a new row, what moves a following reader to the end: busy
-   * flags, the composer's padding. Same length on every render. */
   pinOn: DependencyList;
-  /** False while something else covers the transcript (a room's set-up form). */
   transcriptShown?: boolean;
-  /** True when older messages remain on the server before messages[0]. */
   hasMore?: boolean;
 }) {
   const { state, dispatch } = useStore();
@@ -55,29 +47,12 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
   const transcriptRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
 
-  // Scroll pinning: follow the bottom while the user hasn't scrolled away.
-  // Follow breaks ONLY on an upward user gesture (wheel/touch/scrollbar/
-  // keys), never on scroll position checks — content growth flickers "at
-  // bottom" false for a frame, and breaking there kills follow permanently
-  // (upstream-verified failure). Scrolling back to the end re-arms it.
+  // Follow breaks only on an upward user gesture: content growth flickers "at bottom" false for a frame.
   const [follow, setFollow] = useState(true);
   const followRef = useRef(true);
   const previousScrollTop = useRef(0);
   const touchY = useRef(0);
 
-  // Windowed transcript: only a tail of the thread mounts (screenshots make
-  // full threads DOM-heavy). The boundary is per owner+thread; a render-phase
-  // reset re-tails it on switch so the old thread's boundary never flashes
-  // into the new one. While the reader follows the bottom, new rows slide the
-  // boundary up so the window stays one window long, except that it stops at
-  // the person's newest message while that message is mounted and at most one
-  // more window back: the question stays on screen while a turn of hidden tool
-  // steps answers it, and the window never passes two windows. A thread that
-  // shrinks (a branch switch) re-tails it (followWindowStart). The boundary
-  // holds still once they have scrolled away, so the rows they are reading
-  // stay put.
-  // Callers derive everything else (last reply, working dots) from the FULL
-  // list.
   const transcriptKey = `${ownerId}:${threadId}`;
   const tailStart = tailWindowStart(messages.length);
   const [transcriptWindow, setTranscriptWindow] = useState<{
@@ -115,13 +90,8 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
   }, []);
   useBottomFollowResize(scrollRef, transcriptRef, followRef, transcriptShown ? transcriptKey : null);
 
-  // A thread switch keeps the same owner, so the key is the transcript.
-  // The search-focus effect below still turns follow off for a jump.
   useEffect(() => setBottomFollow(true), [transcriptKey, setBottomFollow]);
 
-  // A search result may be hundreds of rows before the mounted tail. Open a
-  // bounded window around it first; useFocusMessage then scrolls and flashes
-  // the row after React commits that window.
   const appliedFocus = useRef<number | null>(null);
   useEffect(() => {
     const focus = state.focusMessage;
@@ -135,11 +105,7 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
   }, [threadId, messages, setBottomFollow, state.focusMessage, transcriptKey]);
   useFocusMessage(threadId, messages.length > 0);
 
-  // deps track the FULL messages.length, so expanding the window (which only
-  // changes windowedMessages) can never re-trigger this bottom scrollTo.
-  // `follow` is intentionally omitted: flipping it true used to yank the
-  // viewport to the end. Re-pinning only arms future content; Jump to latest
-  // and this effect on new rows do the scrolling.
+  // `follow` is omitted on purpose: re-arming only arms future content and never scrolls.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || !followRef.current) return;
@@ -148,19 +114,12 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- pinOn is the caller's dependency list
   }, [transcriptKey, messages.length, ...pinOn]);
 
-  // Rows prepended at the front — Show earlier widening the local window, or
-  // an older page arriving from the server — would push the row under the
-  // reader down. Capture the height first, then after the commit shift
-  // scrollTop by the growth so that row stays put (browser scroll anchoring
-  // is disabled on this container). The capture belongs to the thread it was
-  // taken in, and transcriptKey is a dependency so a switch drops a capture
-  // from the thread being left instead of shifting the new one.
+  // Shift scrollTop by the growth after commit (scroll anchoring is off here); a switch drops the capture.
   const preExpandHeight = useRef<{ key: string; height: number } | null>(null);
   const expandingRef = useRef(false);
 
   const holdRowForPrepend = () => {
     preExpandHeight.current = scrollRef.current ? { key: transcriptKey, height: scrollRef.current.scrollHeight } : null;
-    // reading scrollback: a mid-expand stream event must not pin the bottom
     setBottomFollow(false);
   };
   const oldestId = messages[0]?.id;
@@ -177,8 +136,6 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
       return;
     }
     el.scrollTop += el.scrollHeight - captured.height;
-    // keep the resume-follow heuristic from reading the restore as a
-    // downward user scroll
     previousScrollTop.current = el.scrollTop;
     expandingRef.current = false;
   }, [transcriptWindow.start, oldestId, transcriptKey]);
@@ -193,8 +150,6 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
     const nextEnd = Math.min(messages.length, endIndex + TRANSCRIPT_WINDOW_SIZE);
     setTranscriptWindow((w) => ({ ...w, end: nextEnd >= messages.length ? null : nextEnd }));
   };
-  // Scrollback across the network: the snapshot holds a bounded page, and
-  // everything before it is still on the server.
   const olderPending = Boolean(state.loadingOlder[threadId]);
   const loadOlder = () => {
     holdRowForPrepend();
@@ -205,8 +160,6 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
     if (!olderPending) expandingRef.current = false;
   }, [olderPending]);
 
-  // Seamless reverse infinite scroll: automatically reveals earlier messages
-  // when scrolling up near the top.
   const triggerAutoEarlier = useCallback(() => {
     if (expandingRef.current) return;
     if (hiddenCount > 0) {
@@ -238,12 +191,12 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
     return () => observer.disconnect();
   }, [triggerAutoEarlier]);
 
-  // keyboard is a scroll gesture too (upstream lesson): PageUp/Home/ArrowUp
-  // break follow like an upward wheel; the at-end onScroll check re-arms it.
-  // ArrowUp only counts outside inputs — in the composer it edits, not scrolls.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
+      const ownKeys = typeof (e.target as Element | null)?.closest === "function" &&
+        Boolean((e.target as Element).closest(WIDGETS_WITH_OWN_ARROW_KEYS));
+      if (ownKeys || !canScroll()) return;
       if (e.key === "PageUp" || ((e.key === "Home" || e.key === "ArrowUp") && !typing)) {
         setBottomFollow(false);
       }
@@ -252,6 +205,10 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
     return () => window.removeEventListener("keydown", onKey);
   }, [setBottomFollow]);
 
+  const canScroll = () => {
+    const el = scrollRef.current;
+    return Boolean(el && el.scrollHeight - el.clientHeight >= 1);
+  };
   const atEnd = () => {
     const el = scrollRef.current;
     return !el || el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_FOLLOW_THRESHOLD;
@@ -260,20 +217,18 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
     setBottomFollow(true);
     setTranscriptWindow({ key: transcriptKey, start: tailStart, end: null });
     requestAnimationFrame(() => {
-      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: reducedMotion() ? "auto" : "smooth" });
     });
   };
 
-  // For the scrolling element, next to ref={scrollRef}.
   const scrollHandlers = {
     onPointerDown: (e: PointerEvent<HTMLDivElement>) => {
-      // grabbing the scrollbar is a scroll gesture too — the lane lives
-      // past the content box (clientWidth excludes it)
+      // Grabbing the scrollbar is a scroll gesture: its lane lies past clientWidth.
       const el = scrollRef.current;
       if (el && e.target === el && e.nativeEvent.offsetX >= el.clientWidth) setBottomFollow(false);
     },
     onWheel: (e: WheelEvent<HTMLDivElement>) => {
-      if (e.deltaY < 0) {
+      if (e.deltaY < 0 && canScroll()) {
         setBottomFollow(false);
         const el = scrollRef.current;
         if (el && el.scrollTop <= AUTO_EXPAND_TOP_THRESHOLD) {
@@ -288,7 +243,7 @@ export function useTranscriptViewport<T extends { id: string; role?: string }>({
     },
     onTouchMove: (e: TouchEvent<HTMLDivElement>) => {
       const y = e.touches[0]?.clientY ?? 0;
-      if (y > touchY.current + 4) {
+      if (y > touchY.current + 4 && canScroll()) {
         setBottomFollow(false);
         const el = scrollRef.current;
         if (el && el.scrollTop <= AUTO_EXPAND_TOP_THRESHOLD) {

@@ -98,8 +98,6 @@ describe("message-linked files", () => {
     expect(messageReferencesFile("<file:///Users/milind/report.md>", "/Users/milind/report.md"))
       .toBe(true);
 
-    // Equivalent separators and dot segments are normalised within a path
-    // flavour, but distinct path flavours and casing remain distinct.
     expect(messageReferencesFile(
       "[Open it](C:/Users/Maus/drafts/../report.md)",
       "C:\\Users\\Maus\\report.md",
@@ -124,8 +122,6 @@ describe("message-linked files", () => {
       "//server/share/team notes.md",
     )).toBe(true);
 
-    // Decoding is deliberately single-pass: a double-encoded space must not
-    // authorize the ordinary decoded path.
     expect(messageReferencesFile(
       "[Open it](C:/Users/Maus/release%2520notes.md?download=1)",
       "C:\\Users\\Maus\\release notes.md",
@@ -141,7 +137,6 @@ describe("message-linked files", () => {
     expect(messageReferencesFile(markdown, report)).toBe(true);
     expect(messageReferencesFile(markdown, notes)).toBe(true);
     expect(messageImageTargetAt(markdown, markdown.indexOf("![Chart]"))).toBe(chart);
-    // The folders a dropped backslash would have joined are not what was linked.
     expect(messageReferencesFile(markdown, "C:\\Users\\Maus.openmausbot\\workspaces\\bot_drafts\\report.md")).toBe(false);
   });
 
@@ -328,7 +323,6 @@ describe("message-linked files", () => {
     writeFileSync(secret, "not for this conversation");
     symlinkSync(secret, join(workspace, "escape.md"));
 
-    // The code lets the client offer Show in folder for exactly this refusal.
     const refusal = { status: 403, code: "outside_workspace" };
     await expect(openMessageFile("../outside/secret.md", [workspace])).rejects.toMatchObject(refusal);
     await expect(openMessageFile(secret, [workspace])).rejects.toMatchObject(refusal);
@@ -397,9 +391,6 @@ describe("message-linked files", () => {
   });
 
   it("matches a raw file URL with non-ASCII names, then refuses it only for its folder", async () => {
-    // A bot saved to a folder the person asked for, outside every root. The
-    // link is the message's own, so the refusal is the root check, for a file
-    // and a folder alike, and the same link opens once that folder is a root.
     // Bots on macOS write the URL unencoded; Windows needs a real file URL.
     const url = (path: string) => process.platform === "win32" ? pathToFileURL(path).href : `file://${path}`;
     const folder = join(outside, "Posts", "2026-10-08_News");

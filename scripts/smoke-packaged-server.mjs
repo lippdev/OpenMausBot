@@ -1,15 +1,6 @@
-// Prove the built server actually STARTS with no node_modules in reach.
-//
-// 0.1.24 shipped a server that died on every launch with
-//   ERR_MODULE_NOT_FOUND: Cannot find package 'zod'
-// because `tsc` leaves bare imports verbatim and the packaged app carries no
-// node_modules. Every existing gate passed it: the unit suite runs in the repo
-// (where zod resolves), and the packaging check only asserts index.js EXISTS.
-//
-// So this copies dist-server OUT of the repo before running it. Inside the
-// repo a bare import still resolves by walking up to ./node_modules and the
-// test passes on a build that would be dead in the field — which is precisely
-// how the bug escaped. The copy is the whole point; do not "simplify" it away.
+// Prove the built server starts with no node_modules in reach. dist-server is
+// copied out of the repo first: inside it, a bare import still resolves by
+// walking up to ./node_modules.
 import { execFile, spawn } from "node:child_process";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -37,13 +28,9 @@ if (browserBundle !== undefined) {
     assert(statSync(paths[component]).isFile(), `Missing bundled ${component}`);
   }
 }
-/** Free loopback ports, asked of the OS (listen on port 0) rather than picked
- * at random: Windows reserves port ranges (Hyper-V and WinNAT exclusions), and
- * a random pick in one died with `listen EACCES 127.0.0.1:497xx` on the
- * Windows runners three times in October 2026. The OS never hands out a
- * reserved port. Every listener stays open until all are bound, so the ports
- * differ from each other; each server under test gets its app port and its
- * webhook port (which otherwise defaults to the app port + 1) this way. */
+/** Asked of the OS (listen on 0), not picked at random: Windows reserves port
+ * ranges (Hyper-V and WinNAT exclusions). Every listener stays open until all
+ * are bound, so the ports differ. */
 async function freePorts(count) {
   const servers = [];
   try {
@@ -69,7 +56,6 @@ const [port, webhookPort] = await freePorts(2);
 // Resources/server tree instead of the repo build.
 try {
   // A desktop install can live beneath a user's CommonJS package scope.
-  // Only metadata shipped with the server may establish its ESM format.
   writeFileSync(join(staging, "package.json"), '{"type":"commonjs"}\n');
   cpSync(process.env.OMB_SMOKE_DIST ?? join(root, "dist-server"), join(staging, "server"), { recursive: true });
   if (browserBundle) cpSync(resolve(browserBundle), join(staging, "browser-engine"), { recursive: true });
@@ -91,9 +77,7 @@ const fixtureEnv = {
   OMB_DATA_DIR: join(home, ".openmausbot"),
   OMB_PORT: String(port),
   OMB_WEBHOOK_PORT: String(webhookPort),
-  // Not a genuine key: enough to make the server look for its enterprise
-  // layer and say whether it found one (checked below), never enough to
-  // unlock anything.
+  // Not a genuine key: enough to make the server look for its enterprise layer.
   OMB_LICENSE_KEY: "omb1.not.real",
   ...(browserBundle ? {
     OMB_RESOURCES_PATH: staging,
@@ -112,18 +96,14 @@ let output = "";
 child.stdout.on("data", (chunk) => (output += chunk));
 child.stderr.on("data", (chunk) => (output += chunk));
 
-// Best-effort by design. Windows holds file handles open a little longer than
-// the process that owned them, so removing the scratch dir immediately after
-// the kill raises EPERM; Linux runners can raise EACCES the same way. Scratch
-// cleanup must never decide whether the build is good — it failed a green run
-// on Windows once already, and see f66d30f for the same lesson on Linux.
+// Best effort: Windows (and sometimes Linux) holds file handles past the
+// process, so removing the scratch dir right after the kill raises EPERM/EACCES.
 const cleanup = () => {
   child.kill("SIGKILL");
   for (const dir of [staging, home]) {
     try {
       rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     } catch {
-      /* the OS will reap it; the assertion below is what matters */
     }
   }
 };
@@ -139,9 +119,16 @@ while (Date.now() < deadline) {
       break;
     }
   } catch {
-    /* not up yet */
   }
   await new Promise((resolve) => setTimeout(resolve, 300));
+}
+
+// The image ships dist-server without the repo's package.json (Dockerfile): the version must come from the bundle.
+let versionReport = null;
+if (listening) {
+  try {
+    versionReport = (await (await fetch(`http://127.0.0.1:${port}/.well-known/openmausbot/environment`, { signal: AbortSignal.timeout(5_000) })).json()).version;
+  } catch (error) { versionReport = String(error); }
 }
 
 let searchReport = null;
@@ -162,13 +149,9 @@ if (browserBundle && listening) {
   } catch (error) { browserReport = { error: String(error) }; }
 }
 
-// Serving /api/health is necessary but nowhere near sufficient. Bundling
-// relocates import.meta.url, so a module that used to sit in drivers/ resolves
-// its sibling paths from the bundle's directory instead — one level too high.
-// The 0.1.24 candidate booted and answered /api/health perfectly while every
-// spawned proxy pointed outside Resources/server, silently killing permission
-// prompts, computer use and dweb. So check the paths the server ACTUALLY
-// resolved, from inside the staged copy, before calling the build good.
+// Bundling relocates import.meta.url, so a proxy's sibling paths can resolve one
+// level too high while /api/health still answers: check the paths the server
+// actually resolved, from inside the staged copy.
 const probe = join(staging, "server", "probe-proxy-paths.mjs");
 writeFileSync(
   probe,
@@ -181,8 +164,7 @@ writeFileSync(
 );
 
 // The packaged tree carries the bundled enterprise layer inside the server
-// root (server/enterprise/server/index.js). server/enterprise.ts must find it
-// there, or a licensed install silently runs the open-source edition.
+// root, or a licensed install silently runs the open-source edition.
 const layerShipped = existsSync(join(staging, "server", "enterprise", "server", "index.js"));
 let editionReport = null;
 if (listening) {
@@ -199,9 +181,8 @@ try {
   proxyReport = { error: String((error && error.message) || error) };
 }
 
-// The public MCP process is a second packaged entry point. Send a request and
-// close stdin immediately: this proves both that the bundle has no external
-// dependencies and that shutdown lets the final JSON-RPC frame drain.
+// The public MCP process is a second packaged entry point. Closing stdin right
+// after a request proves shutdown lets the final JSON-RPC frame drain.
 let mcpReport = null;
 if (listening) {
   const mcp = spawn(process.execPath, [join(staging, "server", "mcp-server.js")], {
@@ -231,8 +212,8 @@ if (listening) {
     if (mcp.exitCode !== null) break;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  // The ping is deliberately followed by EOF without waiting. If the stdio
-  // close path exits before buffered frames drain, id 3 will be missing.
+  // EOF without waiting: if the stdio close path exits before buffered frames
+  // drain, id 3 will be missing.
   mcp.stdin.end(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ping" })}\n`);
   const closed = new Promise((resolve) => mcp.once("close", (code, signal) => resolve({ code, signal })));
   let timeout;
@@ -300,10 +281,8 @@ if (listening) {
   } catch (error) { backupReport = { error: String(error) }; }
 }
 
-// The container image runs the server through server-launcher.js (Dockerfile,
-// deploy/podman/Containerfile). It must start the bundled index.js beside it
-// as its own child, and a stop (SIGTERM, `docker stop`) must end both with the
-// server's clean exit. Containers are Linux; Windows has no SIGTERM to pass on.
+// The container image runs the server through server-launcher.js: it must start
+// index.js as its own child, and SIGTERM must end both with a clean exit.
 let launcherReport = null;
 if (listening && process.platform !== "win32") {
   const launcherHome = mkdtempSync(join(tmpdir(), "omb-smoke-launcher-"));
@@ -342,11 +321,9 @@ if (listening && process.platform !== "win32") {
   }
 }
 
-// The packaged desktop forks desktop-entry.mjs, not index.js
-// (electron/server-child-launch.mjs): it turns on Node's compile cache, then
-// imports index.js beside it. Start it twice on one cache directory. The first
-// start must write the cache while it runs (Windows has no SIGTERM, so a kill
-// there skips Node's exit-time write); the second must start on top of it.
+// The packaged desktop forks desktop-entry.mjs, which turns on Node's compile
+// cache. Started twice on one cache directory: the first must write the cache
+// while it runs (Windows has no SIGTERM, so a kill skips the exit-time write).
 let desktopEntryReport = null;
 if (listening) {
   const entryHome = mkdtempSync(join(tmpdir(), "omb-smoke-entry-"));
@@ -417,6 +394,12 @@ if (!listening) {
   console.error(`the packaged server never served /api/health on port ${port}.`);
   console.error(`exit code: ${child.exitCode}`);
   console.error(output.trim() || "(no output)");
+  process.exit(1);
+}
+
+const repoVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+if (!process.env.OMB_SMOKE_DIST && versionReport !== repoVersion) {
+  console.error(`The packaged server reports version ${JSON.stringify(versionReport)}, not ${repoVersion}.`);
   process.exit(1);
 }
 

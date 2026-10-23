@@ -1,6 +1,3 @@
-// The job of a conversation as one state: what makes it running, done,
-// failed or waiting on the person, and what is left out (a one-way notice,
-// work whose requester stopped). Pure: rows in, view out.
 import { describe, expect, it } from "vitest";
 
 import { jobView, type ConversationState, type JobInput } from "./job-view.ts";
@@ -37,7 +34,6 @@ describe("the job of a conversation", () => {
   it("runs while the lead's own turn runs, and says who works", () => {
     expect(view([root()], { conversation: { kind: "bot", busy: true, activity: "working", queued: 0 } }))
       .toMatchObject({ state: "running", reason: "Room Lead is working" });
-    // a send waiting its turn is work still to do
     expect(view([], { conversation: { ...idle, queued: 1 } })).toMatchObject({ state: "running", reason: "A message is waiting its turn" });
   });
 
@@ -78,11 +74,9 @@ describe("the job of a conversation", () => {
     const notice = [root({ status: "completed" }), child("n1", "priya", { status: "running", reply: "none" })];
     expect(view(notice)).toMatchObject({ state: "completed" });
     expect(view(notice).nodes[1]).toMatchObject({ botName: "Priya", awaited: false });
-    // still not awaited while the lead waits on someone else
     const beside = view([root({ status: "waiting" }), child("a1", "marcus", { status: "running" }), child("n1", "priya", { status: "running", reply: "none" })]);
     expect(beside).toMatchObject({ state: "running", reason: "Waiting on 1 teammate task: Marcus" });
     expect(beside.nodes.map((node) => [node.botName, node.awaited])).toEqual([["Room Lead", true], ["Marcus", true], ["Priya", false]]);
-    // Stop ended the lead's root; a teammate still mid-turn, or parked, is nobody's.
     const stopped = [root({ status: "cancelled", outcome: "stopped" }), child("a1", "priya", { status: "running" }),
       child("a2", "marcus", { status: "needs_input", question: "Continue?" })];
     expect(view(stopped)).toMatchObject({ state: "failed", reason: "Room Lead's work ended because it was stopped", needsInput: [] });
@@ -119,19 +113,16 @@ describe("the job of a conversation", () => {
     expect(job.nodes.map((node) => node.id)).toEqual(["root"]);
     expect(job.nodes[0]!.result).toHaveLength(281);
     expect(view(rows, { full: true }).nodes[0]!.result).toBe(long);
-    // a running row's half-written result is not shown
     expect(view([root({ result: "half" })]).nodes[0]).not.toHaveProperty("result");
   });
 
   it("lists the newest 500 rows of a long conversation, so its latest job shows whole", () => {
-    // 600 earlier requests, then the latest one with its teammate
     const earlier = Array.from({ length: 600 }, (_, i) => root({ id: `old-${i}`, rootId: `old-${i}`, status: "completed", createdAt: 100 + i }));
     const latest = [root({ id: "root", status: "completed", createdAt: 5_000 }), child("a1", "priya", { status: "completed", createdAt: 5_001 })];
     const job = view([...earlier, ...latest], { since: 0 });
     expect(job.nodes).toHaveLength(500);
     expect(job.nodes.map((node) => node.id)).toEqual(expect.arrayContaining(["root", "a1"]));
     expect(job.nodes.map((node) => node.id)).not.toContain("old-0");
-    // starting rows first, each group in the order it began
     expect(job.nodes.at(-1)!.id).toBe("a1");
     expect(job.counts.completed).toBe(602);
   });

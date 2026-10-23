@@ -1,13 +1,5 @@
-// Which server a headless verb talks to, with which credential, and how its
-// answers become exit codes. JSON calls go through the MCP core's own client
-// (scripts/mcp-server.ts `request`) and its tools, so the CLI, MCP and
-// control-omb share one API client; only file downloads and the event stream
-// read raw responses here.
-//
-// The server: --url, --port, OPENMAUSBOT_URL or OMB_PORT, else the three
-// desktop ports (8799, 18799, 28799) as MCP finds them. A credential never
-// travels while a server is being looked for. The credential: OPENMAUSBOT_TOKEN
-// or --token-file; there is no --token flag, because a command line leaks.
+// Server: --url, --port, OPENMAUSBOT_URL or OMB_PORT, else the desktop ports. A credential never travels while a server
+// is being looked for; it comes from OPENMAUSBOT_TOKEN or --token-file only (a command line leaks).
 import { readFileSync } from "node:fs";
 
 import { EXIT, flag, HeadlessError, usageError, type Flags } from "./args.ts";
@@ -21,7 +13,6 @@ export interface ClientDeps {
   env: NodeJS.ProcessEnv;
   /** control-omb: a verb that changes something never runs on a server it merely found. */
   requireExplicitForMutations?: boolean;
-  /** Tests stand in for the MCP tools and the JSON client. */
   callTool?: ToolCaller;
   request?: Requester;
 }
@@ -30,8 +21,6 @@ const DISCOVERY_PORTS = [8799, 18799, 28799];
 
 let mcpModule: Promise<McpModule> | undefined;
 
-/** The MCP core, loaded on first use. Loading it reads OPENMAUSBOT_URL, so a
- * malformed value is a usage error here rather than a crash at startup. */
 export async function loadMcp(): Promise<McpModule> {
   mcpModule ??= import("../../scripts/mcp-server.ts");
   try {
@@ -44,17 +33,14 @@ export async function loadMcp(): Promise<McpModule> {
 
 export interface HeadlessClient {
   baseUrl: string;
-  /** Picked by --url, --port or the environment, not found by looking. */
   explicit: boolean;
-  /** A JSON call through the shared MCP client; refusals throw with their status. */
   json<T = any>(path: string, init?: RequestInit): Promise<T>;
-  /** A raw response (files, images, the event stream). `stream` lifts the request timeout. */
+  /** `stream` lifts the request timeout. */
   raw(path: string, init?: RequestInit & { stream?: boolean }): Promise<Response>;
-  /** One MCP tool, exactly as MCP clients call it. */
   tool(name: string, args: Record<string, unknown>, hooks?: ToolHooks, signal?: AbortSignal): Promise<any>;
 }
 
-/** The credential for this run, from the environment or a file. Never printed. */
+/** Never printed. */
 export function readToken(flags: Flags, env: NodeJS.ProcessEnv): string | undefined {
   const file = flag(flags, "token-file");
   if (file !== undefined) {
@@ -70,7 +56,6 @@ export function readToken(flags: Flags, env: NodeJS.ProcessEnv): string | undefi
   return env.OPENMAUSBOT_TOKEN?.trim() || undefined;
 }
 
-/** The server named by flags, then the environment, or undefined to look for one. */
 export function namedServer(flags: Flags, env: NodeJS.ProcessEnv): { url: string } | { port: string } | undefined {
   const url = flag(flags, "url")?.trim();
   if (url) return { url };
@@ -133,8 +118,6 @@ export async function openClient(flags: Flags, deps: ClientDeps, mutating: boole
   };
 }
 
-/** A refusal's own words: the server's `error`, not the raw body around it
- * ("OpenMausBot API error (409): {"error":"…"}" reads as "…"). */
 export function serverWords(message: string): string {
   const body = /^OpenMausBot API error \(\d+\): ([\s\S]*)$/.exec(message)?.[1];
   if (body === undefined) return message;
@@ -146,7 +129,6 @@ export function serverWords(message: string): string {
   }
 }
 
-/** Any failure as the error a verb reports: its words, what to do, and the exit code. */
 export async function explain(error: unknown, baseUrl?: string): Promise<HeadlessError> {
   if (error instanceof HeadlessError) return error;
   const mcp = await loadMcp().catch(() => undefined);
@@ -161,7 +143,6 @@ export async function explain(error: unknown, baseUrl?: string): Promise<Headles
     return new HeadlessError(`not allowed: ${message}`, EXIT.unreachable,
       "this needs a paired session with the right scope: `openmausbot connect` mints one on this computer");
   }
-  // An id that names nothing is the command line's mistake, as a name that matches nothing is.
   if (status === 404 && /^no such (bot|channel|conversation|task|message)\b/i.test(message)) {
     return usageError(message, "openmausbot bots and openmausbot channels list the ids");
   }
@@ -176,7 +157,6 @@ export async function explain(error: unknown, baseUrl?: string): Promise<Headles
   return new HeadlessError(message, EXIT.failed);
 }
 
-/** The job of a conversation now (no wait), or a clear refusal from a server that predates it. */
 export async function readJob(client: HeadlessClient, threadId: string, query: Record<string, string> = {}): Promise<Record<string, any>> {
   try {
     return await client.json(`/api/threads/${encodeURIComponent(threadId)}/job?${new URLSearchParams(query).toString()}`);

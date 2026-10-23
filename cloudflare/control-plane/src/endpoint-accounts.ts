@@ -1,9 +1,6 @@
-// Which Cloudflare account an endpoint lives in. Pure rules, no I/O.
-//
-// An endpoint row names its account by ID (`provider_account`) and keeps it
-// for life: renewal, re-provisioning after an idle reclaim, cleanup, and the
-// idle scan all act in that account. Only a new row chooses, and only a row
-// that never handed out an address may move.
+// Which Cloudflare account an endpoint lives in. Pure rules, no I/O. A row keeps
+// its account for life; only a new row chooses, and only a row that never
+// handed out an address may move.
 import type { ControlPlaneConfig, EndpointAccount } from "./config";
 
 /** After Cloudflare refuses an account a new tunnel or DNS record (its
@@ -22,7 +19,8 @@ export interface AccountSnapshot {
   checked_at: number | null;
   dns_record_count: number | null;
   /** Endpoints of active installations whose tunnel is gone (reclaimed or
-   * deleted): each needs a slot in this account when its owner returns. */
+   * deleted), for operators. They hold no tunnel or record, so they take no
+   * room: a returning owner competes for this account's free slots. */
   dormant_endpoints: number;
   provider_account: string;
   reclaim_pending: number;
@@ -74,11 +72,9 @@ export function opaqueHostnameSQL(hostname: string, suffix: string): string {
              AND substr(${hostname}, 35) = '.' || ${suffix})`;
 }
 
-/** `endpointAccountFor` over every account in SQL: true for an endpoint row
- * aliased `e` that some configured account acts on. Bind
- * `actedOnAccounts(config)` to its one parameter. The queries that pick rows
- * to act on, or count the rows nothing acts on, use it so that they agree
- * with the actions themselves. */
+/** `endpointAccountFor` over every account in SQL, for an endpoint row aliased
+ * `e`; bind `actedOnAccounts(config)` to its one parameter. Row-picking queries
+ * use it so they agree with the actions themselves. */
 export const ACTED_ON_ENDPOINT_SQL = `EXISTS (
           SELECT 1 FROM json_each(?) AS account
            WHERE json_extract(account.value, '$.id') = e.provider_account
@@ -129,15 +125,21 @@ export function snapshotFresh(snapshot: AccountSnapshot | null | undefined, now:
   return checkedAt !== null && checkedAt >= now - SNAPSHOT_STALE_MS;
 }
 
-/** Spare slots after setting aside one for each dormant endpoint, or null
- * when the tunnel count is not known. An unknown DNS count drops that term. */
+/** New endpoints the account can still hold by its last scan: free tunnels or
+ * free DNS records, whichever is fewer, and never below zero. An unknown DNS
+ * count drops that term; an unknown tunnel count makes the room unknown
+ * (null) unless the records already show the zone full. */
 export function accountRoom(account: EndpointAccount, snapshot: AccountSnapshot | null | undefined): number | null {
-  if (!snapshot || snapshot.tunnel_count === null) return null;
-  let room = account.tunnelLimit - snapshot.tunnel_count;
-  if (snapshot.dns_record_count !== null) {
-    room = Math.min(room, account.dnsRecordLimit - snapshot.dns_record_count);
-  }
-  return room - snapshot.dormant_endpoints;
+  if (!snapshot) return null;
+  const records = snapshot.dns_record_count === null ? null : account.dnsRecordLimit - snapshot.dns_record_count;
+  if (snapshot.tunnel_count === null) return records !== null && records <= 0 ? 0 : null;
+  const tunnels = account.tunnelLimit - snapshot.tunnel_count;
+  return Math.max(Math.min(tunnels, records ?? tunnels), 0);
+}
+
+/** Its last scan, still fresh, left no free tunnel or no free DNS record. */
+export function scannedFull(account: EndpointAccount, snapshot: AccountSnapshot | null | undefined, now: number): boolean {
+  return snapshotFresh(snapshot, now) && accountRoom(account, snapshot) === 0;
 }
 
 function eligible(
@@ -153,9 +155,9 @@ function eligible(
     && snapshotFresh(snapshot, now);
 }
 
-/** The eligible account with the most room (unknown room ranks last, ties go
- * to config order). Room only ranks: an account with none is still tried,
- * and only Cloudflare's refusal closes it. */
+/** The eligible account with the most room (unknown room ranks after any
+ * known room, ties go to config order), or null when every eligible account
+ * is full. */
 function bestAccount(
   accounts: readonly EndpointAccount[],
   snapshots: AccountSnapshots,
@@ -168,6 +170,7 @@ function bestAccount(
     const snapshot = snapshots.get(account.accountId);
     if (!eligible(account, snapshot, appVersion, now)) continue;
     const room = accountRoom(account, snapshot);
+    if (room === 0) continue;
     if (best === null || (room !== null && (bestRoom === null || room > bestRoom))) {
       best = account;
       bestRoom = room;
@@ -176,9 +179,10 @@ function bestAccount(
   return best;
 }
 
-/** Where a new endpoint row is created. When no account is eligible this is
- * the primary, which is exactly the single-account behaviour: it is tried, or
- * answered by its own refusal gate. */
+/** Where a new endpoint row is created. When no eligible account has room
+ * this is the primary, which is exactly the single-account behaviour: it is
+ * tried, or answered by its own refusal gate. Room never refuses on its own;
+ * only Cloudflare does. */
 export function chooseNewEndpointAccount(
   config: ControlPlaneConfig,
   snapshots: AccountSnapshots,
@@ -189,8 +193,8 @@ export function chooseNewEndpointAccount(
   return bestAccount(config.endpointAccounts, snapshots, appVersion, now) ?? config.cloudflare;
 }
 
-/** Where a never-provisioned row may move when `from` refuses new tunnels:
- * the best other eligible account, or null (no fallback). */
+/** Where a never-provisioned row may move when `from` refuses it or is full:
+ * the best other eligible account with room, or null (no fallback). */
 export function relocationTarget(
   config: ControlPlaneConfig,
   snapshots: AccountSnapshots,

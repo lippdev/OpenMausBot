@@ -1,4 +1,4 @@
-// Release gate (#2770): every tree Node runs from Resources/, outside
+// Release gate: every tree Node runs from Resources/, outside
 // app.asar, must declare its own module format. Without that, a package.json
 // above the install folder decides how its .js files are read (npm 11's
 // `npm init -y` writes "type": "commonjs"), and every `import` becomes a

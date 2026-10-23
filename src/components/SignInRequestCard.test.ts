@@ -1,6 +1,3 @@
-// The sign-in card: the site is the headline, the reason is the bot's own
-// words, Open goes to the place the bot works, and Done or Cancel resume it.
-// It never offers a field for the password: the page takes that.
 import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -24,8 +21,13 @@ const answerSignIn = vi.fn();
 const here = { value: true };
 vi.mock("@/lib/sign-in", () => ({ answerSignIn: (...args: unknown[]) => answerSignIn(...args), signInHostIsHere: () => here.value }));
 const saveLoginFromCard = vi.fn();
-vi.mock("@/lib/logins", () => ({ saveLoginFromCard: (...args: unknown[]) => saveLoginFromCard(...args) }));
+const cardSaveTarget = vi.fn();
+vi.mock("@/lib/logins", () => ({
+  saveLoginFromCard: (...args: unknown[]) => saveLoginFromCard(...args),
+  cardSaveTarget: (...args: unknown[]) => cardSaveTarget(...args),
+}));
 
+import { LoginForm } from "./LoginForm";
 import { SignInBanner, SignInRequestCard } from "./SignInRequestCard";
 
 const card = (signIn: Record<string, unknown> = {}): Message => ({
@@ -45,7 +47,6 @@ const elements = (node: ReactNode): Node[] => {
   const element = node as Node;
   return [element, ...Children.toArray(element.props.children).flatMap(elements)];
 };
-/** Every element the card renders, its AskCard footer included. */
 const tree = (signIn?: Record<string, unknown>) => {
   let root!: ReactNode;
   function Capture() { root = SignInRequestCard(props(signIn)); return root; }
@@ -59,6 +60,8 @@ const settle = async () => { for (let turn = 0; turn < 10; turn++) await Promise
 beforeEach(() => {
   vi.stubGlobal("window", {});
   dispatch.mockReset(); answerSignIn.mockReset().mockResolvedValue(undefined);
+  saveLoginFromCard.mockReset().mockResolvedValue(undefined);
+  cardSaveTarget.mockReset().mockResolvedValue({ site: "example.com" });
   fixture.setters = []; fixture.states = {}; here.value = true;
 });
 
@@ -72,13 +75,12 @@ describe("SignInRequestCard while it waits", () => {
     expect(html).toContain("Pepper’s built-in browser");
     for (const label of ["Open", "Done", "Cancel"]) expect(html).toContain(label);
     expect(html).toContain("OpenMausBot never sees it.");
-    // No field takes a password here: the page does.
     expect(html).not.toContain("<input");
   });
 
   it.each([
-    ["vm", "the Local VM Pepper works on"],
-    ["cloud", "the cloud computer Pepper works on"],
+    ["vm", "the private desktop Pepper works on"],
+    ["cloud", "the cloud desktop Pepper works on"],
     ["local", "on this computer, in the browser Pepper is using"],
   ])("names the place for %s", (place, words) => {
     expect(view({ place })).toContain(words);
@@ -113,12 +115,34 @@ describe("SignInRequestCard while it waits", () => {
     const html = view();
     expect(html).toContain("Save the username and password for example.com.");
     expect(html).toContain('type="password"');
-    // The browser is asked not to fill or keep it.
     expect(html).toMatch(/type="password" autocomplete="new-password"/iu);
     expect(html).toContain("Save and continue");
-    // The card's own answers wait until the form is closed.
     expect(html).not.toMatch(/>Done<|>Open</);
     expect(saveLoginFromCard).not.toHaveBeenCalled();
+  });
+
+  it("names a sign-in page on another site, open in the browser, as a choice left unticked, and saves it only when ticked", async () => {
+    const elsewhere = { site: "example.com", signInHost: "login.microsoftonline.com" };
+    cardSaveTarget.mockResolvedValue(elsewhere);
+    button(tree(), "Save a login").props.onClick!();
+    await settle();
+    expect(cardSaveTarget).toHaveBeenCalledExactlyOnceWith({ botId: "pepper", threadId: "thread-1", messageId: "card-1", place: "browser" });
+    // target and the tick are the fourth and fifth useState
+    expect(fixture.setters[3]).toHaveBeenCalledWith(elsewhere);
+    fixture.setters = []; fixture.states = { 2: true, 3: elsewhere };
+    const html = view();
+    expect(html).toContain("Also fill it on login.microsoftonline.com, the sign-in page open in the browser now");
+    const tick = /<input type="checkbox"[^>]*name="signInHost"[^>]*>/u.exec(html)?.[0];
+    expect(tick).toBeDefined();
+    expect(tick).not.toContain("checked");
+    const fields = { username: "alice", password: "fake-card-pass", totp: "" };
+    const form = (nodes: Node[]) => nodes.find((node) => node.type === LoginForm)!.props as unknown as { onSubmit: (value: typeof fields) => Promise<void> };
+    fixture.setters = [];
+    await form(tree()).onSubmit(fields);
+    expect(saveLoginFromCard).toHaveBeenLastCalledWith({ botId: "pepper", threadId: "thread-1", messageId: "card-1" }, fields, undefined);
+    fixture.setters = []; fixture.states = { 2: true, 3: elsewhere, 4: true };
+    await form(tree()).onSubmit(fields);
+    expect(saveLoginFromCard).toHaveBeenLastCalledWith({ botId: "pepper", threadId: "thread-1", messageId: "card-1" }, fields, "login.microsoftonline.com");
   });
 
   it.each(["vm", "cloud", "local"])("does not offer to save a login on %s, where fill_login cannot reach yet", (place) => {
@@ -146,9 +170,9 @@ describe("SignInRequestCard once settled", () => {
     expect(html).not.toMatch(/>Done<|>Open</);
   });
 
-  it("says a login was saved, for the host it was saved for", () => {
-    const html = view({ done: true, resumed: true, savedLogin: "accounts.example.com" });
-    expect(html).toContain("Login saved for accounts.example.com");
+  it("says a login was saved, for the site it was saved for", () => {
+    const html = view({ done: true, resumed: true, savedLogin: "example.com and login.microsoftonline.com" });
+    expect(html).toContain("Login saved for example.com and login.microsoftonline.com");
     expect(html).toContain("Pepper is continuing");
   });
 

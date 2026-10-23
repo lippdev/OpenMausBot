@@ -3,10 +3,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// Every clipboard write goes through copyText, which falls back to the
-// desktop bridge and reports a failure. A direct navigator.clipboard.writeText
-// is refused on pages Chromium does not let write (and on some it never
-// settles), so a copy button calling it fails silently.
+// A direct navigator.clipboard.writeText fails silently where Chromium refuses (or never settles) the write.
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HELPER = "lib/copy-text.ts";
 const DIRECT_WRITE = /navigator\s*\??\.\s*clipboard\s*\??\.\s*writeText/;

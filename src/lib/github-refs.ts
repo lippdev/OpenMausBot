@@ -1,18 +1,13 @@
-// GitHub pull request, issue and commit references in bot replies. Purely
-// local: a URL or an owner/repo#N run is recognised by its shape, never
-// fetched, so nothing leaves the app to render it.
+// Recognised by shape only, never fetched: nothing leaves the app to render a reference.
 
-/** "ref" is owner/repo#N: GitHub numbers issues and pull requests
- * together, so the text alone cannot say which it is. */
+/** owner/repo#N: GitHub numbers issues and pull requests together, so the text cannot say which. */
 export type GithubRefKind = "pull" | "issue" | "commit" | "ref";
 
 export type GithubRef = {
   kind: GithubRefKind;
   owner: string;
   repo: string;
-  /** the issue or pull request number */
   number?: number;
-  /** a commit's full or abbreviated sha */
   sha?: string;
   url: string;
 };
@@ -24,7 +19,6 @@ const URL_SHAPE = new RegExp(
   "i",
 );
 
-/** A github.com pull request, issue or commit URL, or null. */
 export function parseGithubUrl(href: string | undefined): GithubRef | null {
   if (!href) return null;
   const match = URL_SHAPE.exec(href.trim());
@@ -40,21 +34,17 @@ export function parseGithubUrl(href: string | undefined): GithubRef | null {
   return { kind, owner, repo, number: Number(id), url: href.trim() };
 }
 
-/** "owner/repo#123" in running text. Not preceded by a word, slash or dot,
- * so paths and URLs keep their own meaning. */
 const SHORT_REF = new RegExp(`(?<![\\w/.@-])(${OWNER})/(${REPO})#([0-9]{1,7})(?![\\w-])`, "g");
 
 export type TextSpan = { text: string; ref?: GithubRef };
 
-/** Split text into plain runs and owner/repo#N references. GitHub sends
- * /issues/N to the pull request when N is one, so the link always works. */
+/** GitHub redirects /issues/N to the pull request when N is one, so the link always works. */
 export function splitShortRefs(text: string): TextSpan[] {
   const spans: TextSpan[] = [];
   let last = 0;
   for (const match of text.matchAll(SHORT_REF)) {
     const [whole, owner, repo, number] = match as unknown as [string, string, string, string];
     const start = match.index ?? 0;
-    // a trailing dot belongs to the sentence, not the repo name
     if (repo.endsWith(".") || Number(number) < 1) continue;
     if (start > last) spans.push({ text: text.slice(last, start) });
     spans.push({
@@ -67,8 +57,6 @@ export function splitShortRefs(text: string): TextSpan[] {
   return spans.length ? spans : [{ text }];
 }
 
-/** The short label: "#123" or "abc1234" when every reference in the message
- * is to one repository, "repo#123" or "repo@abc1234" when they are mixed. */
 export function githubRefLabel(ref: GithubRef, qualify: boolean): string {
   const id = ref.kind === "commit" ? ref.sha!.slice(0, 7) : `#${ref.number}`;
   if (!qualify) return id;
@@ -97,9 +85,6 @@ function refProperties(ref: GithubRef, label: string): Record<string, string> {
   };
 }
 
-/** Remark plugin. A bare GitHub URL (its text is the URL itself) and an
- * owner/repo#N run become reference links the renderer draws as pills.
- * A link the bot gave its own words keeps them. */
 export function remarkGithubRefs() {
   return (tree: MdNode) => {
     const found: { node: MdNode; ref: GithubRef }[] = [];
@@ -138,7 +123,6 @@ export function remarkGithubRefs() {
   };
 }
 
-/** Read a reference back from the props react-markdown hands an <a>. */
 export function githubRefFromProps(props: Record<string, unknown>, href: string | undefined): GithubRef | null {
   const kind = props["data-github-ref"];
   if (kind !== "pull" && kind !== "issue" && kind !== "commit" && kind !== "ref") return null;

@@ -1,4 +1,3 @@
-// One-place setup for the isolated Local VM image and its shared/per-bot policy.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { t } from "@/lib/i18n";
 import { waitForLocalVmReady } from "@/lib/local-vm-readiness";
@@ -13,14 +12,15 @@ import {
   Moon,
   RefreshCw,
   RotateCcw,
-  Server,
   Square,
   Trash2,
 } from "lucide-react";
 import { Card, CommandLine } from "./SettingsPrimitives";
 import { MacLocalControl } from "./MacLocalControl";
+import { Select } from "./Select";
 import { cn } from "@/lib/cn";
 import { useStore } from "@/state/store";
+import { VpsComputersCard } from "./VpsComputersCard";
 
 type Action = "pull" | "run" | "start" | "stop" | "remove" | "recreate";
 
@@ -111,6 +111,8 @@ function waitForCloudDeleteRefresh(delayMs: number): Promise<void> {
 export interface VpsComputerInventoryInstance {
   name: string;
   state: "created" | "restarting" | "running" | "removing" | "paused" | "exited" | "dead" | "unknown";
+  /** The SSH alias whose host holds this computer. */
+  vpsAlias: string;
   ownerBotId: string | null;
   ownerName: string | null;
   orphaned: boolean;
@@ -120,7 +122,8 @@ export interface VpsComputerInventoryInstance {
 interface VpsComputerInventoryPayload {
   configured: boolean;
   available: boolean;
-  sshAlias: string | null;
+  /** The default alias first, then each bot's own. */
+  vpsAliases: string[];
   problem: string | null;
   instances: VpsComputerInventoryInstance[];
 }
@@ -134,8 +137,6 @@ const destinationLabelKeys: Record<LocalVmInventoryInstance["destination"], Loca
   off: "vm.dest.off",
 };
 
-/** The badge's colour is decided by the kind, never by the label: a
- * translated label would silently stop matching `=== "Running"`. */
 export type ComputerStateKind =
   | "unmanaged"
   | "in-use"
@@ -195,10 +196,7 @@ export function cloudComputerInventoryState(instance: CloudComputerInventoryInst
   return computerStateLabel(cloudComputerInventoryStateKind(instance));
 }
 
-/** Boat's account LIST is eventually consistent. Preserve the result of an
- * action the provider accepted instead of letting an older snapshot make a
- * confirmed deletion reappear, a pending deletion disappear, or a sleeping
- * computer look awake. */
+/** Boat's account LIST is eventually consistent: an older snapshot must not undo an action the provider accepted. */
 export function reconcileCloudInventorySnapshot(
   incoming: CloudComputerInventoryInstance[],
   previous: CloudComputerInventoryInstance[],
@@ -218,8 +216,7 @@ export function reconcileCloudInventorySnapshot(
     return [{ ...instance, state: "archived" }];
   });
 
-  // A transitioning Boat can briefly disappear from LIST. Keep the last safe
-  // row until LIST returns the terminal sleeping state.
+  // A transitioning Boat can briefly disappear from LIST.
   for (const instance of previous) {
     if (overrides[instance.boxId] !== "sleeping" || incomingIds.has(instance.boxId)) continue;
     instances.push({ ...instance, state: "archived" });
@@ -232,9 +229,7 @@ export function reconcileCloudInventorySnapshot(
   return { instances, overrides: nextOverrides };
 }
 
-/** An empty list proves deletion only when Boat says the inventory read was
- * authoritative. Provider outages and disconnected accounts must not erase
- * the last known row or settle a pending deletion as successful. */
+/** An empty list proves deletion only when Boat says the read was authoritative. */
 export function reconcileCloudInventoryPayload(
   payload: CloudComputerInventoryPayload,
   previous: CloudComputerInventoryInstance[],
@@ -289,8 +284,7 @@ const computerInventoryPaths: Record<ComputerInventoryRequest, string> = {
   vps: "/api/computers/vps",
 };
 
-/** Keep the observation-only Settings reads explicit and independently
- * testable: opening Computers must never provision or wake anything. */
+/** Observation only: opening Computers must never provision or wake anything. */
 export function computerInventoryRequest(
   inventory: ComputerInventoryRequest,
   signal?: AbortSignal,
@@ -342,6 +336,7 @@ export function vpsComputerRemovePlan(instance: VpsComputerInventoryInstance): C
     }),
     request: jsonPostRequest(`/api/computers/vps/${encodeURIComponent(instance.name)}/remove`, {
       confirmName: instance.name,
+      alias: instance.vpsAlias,
     }),
   };
 }
@@ -352,140 +347,6 @@ export function confirmComputerAction(
 ): ComputerApiRequest | null {
   if (plan.confirmation !== null && !confirm(plan.confirmation)) return null;
   return plan.request;
-}
-
-export function VpsComputersCard({
-  instances,
-  configured,
-  sshAlias,
-  loading,
-  removingName,
-  error,
-  unavailableReason,
-  onRefresh,
-  onRemove,
-}: {
-  instances: VpsComputerInventoryInstance[];
-  configured: boolean | null;
-  sshAlias: string | null;
-  loading: boolean;
-  removingName: string | null;
-  error: string | null;
-  unavailableReason: string | null;
-  onRefresh: () => void;
-  onRemove: (instance: VpsComputerInventoryInstance) => void;
-}) {
-  return (
-    <Card
-      title={t("vm.vps.title")}
-      subtitle={t("vm.vps.subtitle")}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-[12px] text-ink-secondary">
-          {configured === true
-            ? t("vm.vps.sshHost", { alias: sshAlias ?? t("vm.vps.configuredFallback") })
-            : configured === false
-              ? t("vm.vps.needsAlias")
-              : t("vm.vps.refreshHint")}
-        </div>
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={loading || removingName !== null}
-          aria-label={t("vm.vps.refreshAria")}
-          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
-        >
-          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> {t("vm.refresh")}
-        </button>
-      </div>
-
-      {error && <div role="alert" className="mt-3 rounded-lg bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
-
-      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
-        {loading
-          ? t("vm.vps.checking")
-          : unavailableReason
-            ? t("vm.vps.unavailable", { reason: unavailableReason })
-            : configured === false
-              ? t("vm.vps.notConfigured")
-              : instances.length === 1
-                ? t("vm.vps.foundOne")
-                : t("vm.vps.foundMany", { count: instances.length })}
-      </p>
-
-      <div
-        aria-busy={loading || removingName !== null}
-        className="mt-3 overflow-hidden rounded-xl border border-hairline/40"
-      >
-        {loading && instances.length === 0 ? (
-          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <Loader2 size={13} className="animate-spin" /> {t("vm.vps.checkingList")}
-          </div>
-        ) : unavailableReason ? (
-          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <AlertTriangle size={14} className="shrink-0 text-warning" /> {unavailableReason}
-          </div>
-        ) : configured === false ? (
-          <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <Server size={14} className="shrink-0" /> {t("vm.vps.notConfigured")}
-          </div>
-        ) : instances.length === 0 ? (
-          <div className="px-3 py-4 text-[13px] text-ink-secondary">{t("vm.vps.noneFound")}</div>
-        ) : instances.map((instance, index) => {
-          const kind = vpsComputerInventoryStateKind(instance);
-          const state = computerStateLabel(kind);
-          const removing = removingName === instance.name;
-          const shortId = vpsComputerShortId(instance.name);
-          return (
-            <div
-              key={instance.name}
-              className={cn(
-                "flex items-start justify-between gap-3 px-3 py-3",
-                index > 0 && "border-t border-hairline/35",
-              )}
-            >
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="truncate text-[13.5px] font-medium text-ink">
-                    {instance.orphaned ? t("vm.vps.orphan", { id: shortId }) : instance.ownerName}
-                  </span>
-                  <span
-                    className={cn(
-                      "rounded-full px-2 py-0.5 text-[11px]",
-                      instance.inUse || kind === "running"
-                        ? "bg-success/15 text-success"
-                        : kind === "stopped" || kind === "paused"
-                          ? "bg-control text-ink-secondary"
-                          : "bg-warning/15 text-warning",
-                    )}
-                  >
-                    {state}
-                  </span>
-                </div>
-                <div className="mt-1 text-[11.5px] text-ink-secondary">
-                  {instance.orphaned ? t("vm.owner.gone") : t("vm.owner.owned")}
-                </div>
-                {instance.inUse && (
-                  <div className="mt-1 text-[11.5px] text-ink-secondary">{t("vm.vps.stopFirst")}</div>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => onRemove(instance)}
-                disabled={loading || instance.inUse || removingName !== null}
-                aria-busy={removing || undefined}
-                title={t("vm.vps.removeTitle")}
-                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {removing ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                {t("vm.vps.remove")}
-              </button>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
 }
 
 export function CloudComputersCard({
@@ -821,13 +682,11 @@ function ActionButton({
   );
 }
 
-// Mirrors localVm.idleTimeoutMinutes in server/config.ts; the server is the
-// authority and rejects anything outside these bounds.
+// Mirrors localVm.idleTimeoutMinutes in server/config.ts; the server is the authority.
 const MIN_LOCAL_VM_IDLE_TIMEOUT_MINUTES = 5;
 const MAX_LOCAL_VM_IDLE_TIMEOUT_MINUTES = 1_440;
 const DEFAULT_LOCAL_VM_IDLE_TIMEOUT_MINUTES = 480;
 
-/** A whole number of minutes within the server's bounds, or null. */
 export function parseLocalVmIdleTimeoutMinutes(value: string): number | null {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) return null;
@@ -849,8 +708,6 @@ export function LocalVmIdleTimeoutSetting({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // The status poll keeps refreshing the confirmed value; never overwrite
-  // what the person is typing.
   useEffect(() => {
     if (!dirty) setValue(String(minutes));
   }, [minutes, dirty]);
@@ -923,8 +780,6 @@ export function LocalVmIdleTimeoutSetting({
 }
 
 export function LocalComputerSection() {
-  // An OMB Cloud home has no Local VM (shared/cloud-home.ts): it neither
-  // checks for one nor explains how to set one up.
   const cloudHome = useStore().state.config?.cloudHome === true;
   const [status, setStatus] = useState<Status | null>(null);
   const [loading, setLoading] = useState(true);
@@ -952,7 +807,7 @@ export function LocalComputerSection() {
   const cloudOverridesRef = useRef<CloudPostActionOverrides>({});
   const [vpsInventory, setVpsInventory] = useState<VpsComputerInventoryInstance[]>([]);
   const [vpsConfigured, setVpsConfigured] = useState<boolean | null>(null);
-  const [vpsSshAlias, setVpsSshAlias] = useState<string | null>(null);
+  const [vpsAliases, setVpsAliases] = useState<string[]>([]);
   const [vpsLoading, setVpsLoading] = useState(true);
   const [vpsError, setVpsError] = useState<string | null>(null);
   const [vpsUnavailableReason, setVpsUnavailableReason] = useState<string | null>(null);
@@ -963,8 +818,6 @@ export function LocalComputerSection() {
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(...computerInventoryRequest("status", signal));
     const body = await response.json().catch(() => ({}));
-    // The poll loop can be cleaned up mid-flight; a resolved-but-stale read
-    // must never overwrite the state of whoever unmounted us.
     if (signal?.aborted) return;
     if (!response.ok) throw new Error(body.error ?? t("vm.err.status", { code: response.status }));
     setStatus(body as Status);
@@ -1012,7 +865,7 @@ export function LocalComputerSection() {
     const payload = body as VpsComputerInventoryPayload;
     setVpsInventory(Array.isArray(payload.instances) ? payload.instances : []);
     setVpsConfigured(payload.configured === true);
-    setVpsSshAlias(typeof payload.sshAlias === "string" ? payload.sshAlias : null);
+    setVpsAliases(Array.isArray(payload.vpsAliases) ? payload.vpsAliases : []);
     setVpsUnavailableReason(
       payload.available || !payload.configured
         ? null
@@ -1072,9 +925,6 @@ export function LocalComputerSection() {
     return () => controller.abort();
   }, [inventoryRefreshKey, refreshInventory, status?.mode]);
 
-  // Boat account listing is deliberately not polled. It can be expensive and
-  // Settings must remain an observation-only surface until the person clicks
-  // Sleep or Delete.
   useEffect(() => {
     const controller = new AbortController();
     setCloudLoading(true);
@@ -1090,8 +940,6 @@ export function LocalComputerSection() {
     return () => controller.abort();
   }, [cloudRefreshKey, refreshCloudInventory]);
 
-  // Docker-over-SSH inventory is also manual/mount-only. A Settings view
-  // must never become a hidden remote poller or wake a stopped container.
   useEffect(() => {
     const controller = new AbortController();
     setVpsLoading(true);
@@ -1266,15 +1114,11 @@ export function LocalComputerSection() {
 
       if (deletionPending) {
         // Boat may accept a background operation before the computer is gone.
-        // Keep the row visible as Removing while we check, then drop the
-        // optimistic state if the provider still lists it so the person can
-        // refresh or retry instead of being shown a false success forever.
         for (const delayMs of PENDING_CLOUD_DELETE_REFRESH_DELAYS_MS) {
           await waitForCloudDeleteRefresh(delayMs);
           try {
             await refreshCloudInventory();
           } catch {
-            // A later bounded attempt can still establish the final state.
           }
           if (cloudOverridesRef.current[instance.boxId] !== "deleting") {
             setAnnouncement(t("vm.announce.cloudDeleted", { subject }));
@@ -1378,7 +1222,7 @@ export function LocalComputerSection() {
       <VpsComputersCard
         instances={vpsInventory}
         configured={vpsConfigured}
-        sshAlias={vpsSshAlias}
+        aliases={vpsAliases}
         loading={vpsLoading}
         removingName={vpsRemovingName}
         error={vpsError}
@@ -1463,22 +1307,20 @@ export function LocalComputerSection() {
             </button>
           ))}
         </div>
-        {/* The cap only applies to per-bot VMs; shared mode runs exactly one. */}
         {perBot && (
           <div className="mt-3 flex items-center justify-between gap-3">
             <div>
               <div className="text-[13px] text-ink">{t("vm.isolation.max")}</div>
               <div className="text-[11.5px] text-ink-secondary">{t("vm.isolation.maxDetail")}</div>
             </div>
-            <select
+            <Select size="sm"
               aria-label={t("vm.isolation.maxAria")}
               value={status?.max_instances ?? 2}
               disabled={!status || policyPending}
               onChange={(event) => void savePolicy(status?.mode ?? "shared", Number(event.target.value))}
-              className="rounded-lg border border-hairline/40 bg-control px-2.5 py-1.5 text-[13px] text-ink disabled:opacity-50"
             >
               {[1, 2, 3, 4, 5, 6, 7, 8].map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
+            </Select>
           </div>
         )}
         <LocalVmIdleTimeoutSetting
@@ -1621,7 +1463,7 @@ export function LocalComputerSection() {
         <div className="mt-3 break-all text-[11px] text-ink-secondary">
           {t("vm.safety.workspace", {
             path: status?.workspace_path ?? t("vm.safety.notCreated"),
-            driver: status?.driver_version ?? "0.20.0",
+            driver: status?.driver_version ?? "0.37.0",
             image: status?.image_ref ?? t("vm.safety.notPrepared"),
           })}
           {status?.base_image_ref ? <> · {t("vm.safety.baseImage", { image: status.base_image_ref })}</> : null}

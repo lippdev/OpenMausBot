@@ -1,15 +1,5 @@
-// Settings → Logins: the workspace's saved website logins.
-// GET /api/logins lists them (host, username, 2FA or not, source, who may use
-// it, last used) with 1Password's, and says whether 1Password is connected;
-// POST adds one, PATCH /api/logins/:id replaces its password or 2FA key or
-// changes who may use it, DELETE removes it. POST /api/logins/1password
-// {token} connects 1Password (checked before it is kept), POST
-// /api/logins/1password/refresh reads it again, DELETE /api/logins/1password
-// disconnects it; its logins are read-only here. No answer ever carries a
-// password, a 2FA key or the token: a saved secret is only ever replaced.
-// Admin-scoped by default in server/request-auth.ts, like every route that
-// is not listed for clients.
-import { LOGIN_FIELD_MAX, normalizeLoginHost, type LoginBots, type LoginSummary, type OnePasswordStatus } from "../../shared/logins.ts";
+// No answer ever carries a password, a 2FA key or the token: a saved secret is only ever replaced.
+import { LOGIN_FIELD_MAX, loginPlace, normalizeLoginHost, type LoginBots, type LoginSummary, type OnePasswordStatus } from "../../shared/logins.ts";
 import type { LoginPatch, NewLogin } from "../login-store.ts";
 import { parseTotpKey, type TotpKey } from "../totp.ts";
 import { PASS, type RouteHandler } from "./table.ts";
@@ -22,16 +12,17 @@ export interface LoginRouteDeps {
   botExists(id: string): boolean;
   onePassword: {
     status(): OnePasswordStatus;
-    /** Its logins, read-only; reads 1Password again in the background when stale. */
     list(): LoginSummary[];
-    /** Check the token reaches 1Password, then keep it. Throws the reason in words. */
     connect(token: string): Promise<OnePasswordStatus>;
     refresh(): Promise<OnePasswordStatus>;
     disconnect(): OnePasswordStatus;
+    /** Null for a vault the token does not read. */
+    grant(vaultId: string, bots: LoginBots): OnePasswordStatus | null;
   };
 }
 
 const ONE_PASSWORD = "/api/logins/1password";
+const VAULT = /^\/api\/logins\/1password\/vaults\/([\w-]{1,128})$/u;
 
 const ID = /^[\w-]{1,128}$/u;
 
@@ -42,12 +33,14 @@ export const LOGIN_ERRORS = {
   totp: "That 2FA key is not valid. Paste the setup key (letters A–Z and digits 2–7) or the otpauth:// address from the site's QR code.",
   bots: "Choose every bot, or bots that exist.",
   token: "Paste a 1Password service account token. It starts with ops_.",
+  notServiceAccount: "That is not a 1Password service account token: those start with ops_. Make one in 1Password under Developer → Service accounts. A Connect token, an account password or a Secret Key does not work here.",
+  exactHost: "exactHost must be true or false.",
   readOnly: "This login is in 1Password. Change or remove it there.",
 } as const;
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
-/** A 2FA key field: absent leaves it, "" or null clears it. */
+/** Absent leaves it; "" or null clears it. */
 export function parseTotpField(value: unknown): Parsed<TotpKey | null | undefined> {
   if (value === undefined) return { ok: true, value: undefined };
   if (value === null || (typeof value === "string" && !value.trim())) return { ok: true, value: null };
@@ -55,7 +48,6 @@ export function parseTotpField(value: unknown): Parsed<TotpKey | null | undefine
   return key ? { ok: true, value: key } : { ok: false, error: LOGIN_ERRORS.totp };
 }
 
-/** The username and password of a login form. */
 export function parseLoginFields(body: Record<string, unknown>, options: { passwordRequired: boolean }): Parsed<{ username?: string; password?: string }> {
   const username = body.username;
   const password = body.password;
@@ -94,11 +86,20 @@ export function createLoginRoutes(deps: LoginRouteDeps): RouteHandler {
       const body = await readBody(req, 16_384);
       const token = body && typeof body === "object" && typeof body.token === "string" ? body.token.trim() : "";
       if (!token || token.length > 8192 || /\s/u.test(token)) return json(res, 400, { error: LOGIN_ERRORS.token });
+      if (!token.startsWith("ops_")) return json(res, 400, { error: LOGIN_ERRORS.notServiceAccount });
       try { return json(res, 200, { onePassword: await deps.onePassword.connect(token) }); }
       catch (error) { return json(res, 400, { error: error instanceof Error && error.message ? error.message : LOGIN_ERRORS.token }); }
     }
     if (path === `${ONE_PASSWORD}/refresh` && method === "POST") return json(res, 200, { onePassword: await deps.onePassword.refresh() });
     if (path === ONE_PASSWORD && method === "DELETE") return json(res, 200, { onePassword: deps.onePassword.disconnect() });
+    const vault = VAULT.exec(path);
+    if (vault && method === "PATCH") {
+      const body = await readBody(req, 16_384);
+      const bots = parseBots(body && typeof body === "object" ? body.bots : undefined, deps.botExists);
+      if (!bots.ok || bots.value === undefined) return json(res, 400, { error: bots.ok ? LOGIN_ERRORS.bots : bots.error });
+      const status = deps.onePassword.grant(vault[1]!, bots.value);
+      return status ? json(res, 200, { onePassword: status }) : json(res, 404, { error: "no such vault" });
+    }
     if (path === ONE_PASSWORD || path.startsWith(`${ONE_PASSWORD}/`)) return json(res, 405, { error: "method not allowed" });
     if (path === "/api/logins" && method === "POST") {
       const body = await readBody(req, 16_384);
@@ -111,8 +112,9 @@ export function createLoginRoutes(deps: LoginRouteDeps): RouteHandler {
       if (!totp.ok) return json(res, 400, { error: totp.error });
       const bots = parseBots(body.bots ?? "all", deps.botExists);
       if (!bots.ok) return json(res, 400, { error: bots.error });
+      if (body.exactHost !== undefined && typeof body.exactHost !== "boolean") return json(res, 400, { error: LOGIN_ERRORS.exactHost });
       const login = deps.create({
-        host, username: fields.value.username ?? "", password: fields.value.password!,
+        ...loginPlace(host, [], body.exactHost === true), username: fields.value.username ?? "", password: fields.value.password!,
         totp: totp.value ?? null, source: "settings", bots: bots.value ?? "all",
       });
       return json(res, 201, { login });
@@ -132,10 +134,12 @@ export function createLoginRoutes(deps: LoginRouteDeps): RouteHandler {
     if (!totp.ok) return json(res, 400, { error: totp.error });
     const bots = parseBots(body.bots, deps.botExists);
     if (!bots.ok) return json(res, 400, { error: bots.error });
+    if (body.exactHost !== undefined && typeof body.exactHost !== "boolean") return json(res, 400, { error: LOGIN_ERRORS.exactHost });
     const login = deps.update(id, {
       ...fields.value,
       ...(totp.value === undefined ? {} : { totp: totp.value }),
       ...(bots.value === undefined ? {} : { bots: bots.value }),
+      ...(body.exactHost === undefined ? {} : { exactHost: body.exactHost }),
     });
     return login ? json(res, 200, { login }) : json(res, 404, { error: "no such login" });
   };

@@ -33,8 +33,6 @@ function harness(options) {
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-// The one way a download starts: a check finds an update. `manual`: the
-// person's own check (Check for updates, Try again); otherwise the hourly one.
 async function found(h, { manual = false, version = "2.0.0" } = {}) {
   h.updater.checkForUpdates = async () => {
     h.updater.emit("checking-for-update");
@@ -43,7 +41,6 @@ async function found(h, { manual = false, version = "2.0.0" } = {}) {
   await h.coordinator.check(manual);
 }
 
-// Drives a successful download so install() has staged paths to hand off.
 async function downloadInto(h, files = ["/tmp/OpenMausBot-2.0.0-amd64.deb"]) {
   h.updater.downloadUpdate = () => {
     h.updater.emit("update-downloaded", { version: "2.0.0" });
@@ -219,7 +216,6 @@ test("on a Mac, checking while an update downloads by itself makes its failure t
 
   await found(h);
   assert.equal(h.getState().status, "downloading");
-  // A Mac download cannot be overlapped by a check, but asking still counts.
   h.updater.checkForUpdates = () => assert.fail("a check cannot overlap a Mac download");
   await h.coordinator.check(true);
   transfer.reject(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }));
@@ -331,8 +327,6 @@ test("a background failure stays silent before a later download failure only the
   const h = harness();
   const downloadPending = deferred();
   const checkPending = deferred();
-  // The hourly check finds an update, which starts downloading, and then the
-  // check itself fails.
   h.updater.checkForUpdates = () => {
     h.updater.emit("checking-for-update");
     h.updater.emit("update-available", { version: "2.1.0" });
@@ -358,7 +352,6 @@ test("a background failure stays silent before a later download failure only the
 });
 
 test("an update a check finds downloads without a click; only the restart waits for the person", async () => {
-  // The hourly check and "Check for updates" alike: there is no Download step.
   for (const manual of [false, true]) {
     const found = harness();
     let downloads = 0;
@@ -411,8 +404,7 @@ test("a download the hourly check started fails quietly, and the next check trie
     transfer = deferred();
     return transfer.promise;
   };
-  // The transfer breaks after the check has finished: electron-updater emits
-  // "error", then rejects the download.
+  // electron-updater emits "error" for a broken transfer, then rejects the download.
   const breakTransfer = async () => {
     const error = new Error("ECONNRESET");
     h.updater.emit("error", error);
@@ -430,7 +422,6 @@ test("a download the hourly check started fails quietly, and the next check trie
   await breakTransfer();
   assert.equal(downloads, 2, "a quiet failure leaves the next check free to download again");
 
-  // A rejection with no "error" event of its own is just as quiet.
   await h.coordinator.check();
   transfer.reject(new Error("ETIMEDOUT"));
   await settle();
@@ -459,13 +450,11 @@ test("a failure only the person can fix is shown, and the hourly check stops dow
     assert.equal(h.getState().status, "error", failure.code);
     assert.match(h.getState().message, message);
 
-    // The next hourly check would fail the same way: it leaves the message up.
     await found(h);
     await settle();
     assert.equal(downloads, 1, `${failure.code}: no second download until the person tries again`);
     assert.equal(h.getState().status, "error");
 
-    // Try again is the person's own check: it downloads once more.
     await found(h, { manual: true });
     await settle();
     assert.equal(downloads, 2);
@@ -537,7 +526,6 @@ test("the hand-off install opens the staged package instead of quitting", async 
   const h = harness({
     handOffInstall: (files) => {
       received.push(files);
-      // what the user still has to do travels back with the state
       return Promise.resolve({ command: "sudo apt-get install -y '/tmp/x.deb'", terminalOpened: true });
     },
   });
@@ -551,7 +539,6 @@ test("the hand-off install opens the staged package instead of quitting", async 
 
   assert.deepEqual(received, [["/tmp/OpenMausBot-2.0.0-amd64.deb"]]);
   assert.equal(h.getState().status, "handed-off");
-  // the user watched something happen between the click and the result
   assert.ok(h.states.some((entry) => entry.status === "installing"));
   assert.equal(h.getState().command, "sudo apt-get install -y '/tmp/x.deb'");
   assert.equal(h.getState().terminalOpened, true);
@@ -564,7 +551,6 @@ test("a failed hand-off is reported instead of leaving the card spinning", async
   h.coordinator.install();
   await new Promise((resolve) => setImmediate(resolve));
 
-  // version survives the merge from the download — assert what the card reads
   assert.equal(h.getState().status, "error");
   assert.equal(h.getState().message, "no handler for .deb");
 });
@@ -613,7 +599,6 @@ test("a staged update survives hourly checks until the user explicitly checks ag
   assert.equal(checks, 0);
   assert.deepEqual(h.getState(), staged);
 
-  // Checking again finds the newer one, and it downloads by itself.
   h.updater.downloadUpdate = async () => {
     h.updater.emit("update-downloaded", { version: "2.1.0" });
     return ["/tmp/OpenMausBot-2.1.0-amd64.deb"];
@@ -628,7 +613,6 @@ test("a staged update survives hourly checks until the user explicitly checks ag
 test("a superseded check error event cannot invalidate a completed download", async () => {
   const h = harness();
   const pending = deferred();
-  // The check finds the update, which downloads, while the check itself hangs.
   h.updater.checkForUpdates = () => {
     h.updater.emit("update-available", { version: "2.0.0" });
     return pending.promise;

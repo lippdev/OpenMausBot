@@ -1,5 +1,3 @@
-// connect: a token for a workspace, against a stand-in server that answers
-// the three routes it uses, and the file the token goes to.
 import "../testing/scrub-ambient-omb-env.ts";
 
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";

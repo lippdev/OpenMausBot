@@ -1,13 +1,17 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { hostTimeout } from "./testing/host-timeout.ts";
 import {
   assertSafeCliArgv,
   describeSpawnFailure,
   estimatedWindowsCommandLineChars,
+  execCli,
+  killCliTree,
+  spawnCli,
   WINDOWS_SAFE_COMMAND_LINE_CHARS,
 } from "./procs.ts";
 
@@ -70,5 +74,31 @@ describe("spawn ENOENT", () => {
     });
     expect(error.code).toBe("ENOENT");
     expect(describeSpawnFailure(error, process.execPath, missing).setup).toBe(false);
+  });
+});
+
+describe("execCli timeout", () => {
+  it.skipIf(process.platform === "win32")("calls back when the CLI traps SIGTERM and outlives its timeout", async () => {
+    const started = Date.now();
+    const err = await new Promise<Error | null>((resolve) => {
+      execCli(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { timeout: hostTimeout(2_000) }, (error) => resolve(error));
+    });
+    // Without the escalation a child that trapped SIGTERM would hold this callback past the test's own timeout.
+    expect(err).toMatchObject({ killed: true });
+    expect(Date.now() - started).toBeLessThan(hostTimeout(15_000));
+  }, hostTimeout(20_000));
+});
+
+describe("out of memory", () => {
+  it.runIf(process.platform === "linux")("a bot's engine is the first the kernel stops, and anything else keeps its score", async () => {
+    const forever = ["-e", "setInterval(() => {}, 1000)"];
+    const engine = spawnCli(process.execPath, forever, { stdio: ["pipe", "pipe", "pipe"] }, "bot");
+    const other = spawnCli(process.execPath, forever, { stdio: ["pipe", "pipe", "pipe"] });
+    try {
+      expect(readFileSync(`/proc/${engine.pid}/oom_score_adj`, "utf8").trim()).toBe("1000");
+      expect(readFileSync(`/proc/${other.pid}/oom_score_adj`, "utf8").trim()).toBe(readFileSync("/proc/self/oom_score_adj", "utf8").trim());
+    } finally {
+      await Promise.all([killCliTree(engine), killCliTree(other)]);
+    }
   });
 });

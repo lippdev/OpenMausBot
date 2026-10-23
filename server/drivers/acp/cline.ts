@@ -1,5 +1,4 @@
-// Cline owns its saved provider/model configuration. Keep that selection
-// intact instead of pretending a static OMB catalog can switch providers.
+// Cline owns its saved provider/model configuration; no static OMB catalog switches providers.
 import { mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,9 +65,7 @@ const SUPPORT: AcpSupport = {
     docsUrl: "https://docs.cline.bot/usage/acp",
     signInCommand: "cline auth",
   },
-  // Never inherit Cline's terminal auto-approval default or a saved grant.
-  // The ACP broker answers permissions under this turn's OMB policy, including
-  // Full access; questions and product confirmations retain their own gates.
+  // Never inherit Cline's terminal auto-approval default or a saved grant: the ACP broker answers permissions.
   spawnArgs: () => ["--acp", "--auto-approve", "false"],
   restartOnMcpChange: true,
   credentialEnv: ["CLINE_API_KEY"],
@@ -77,16 +74,14 @@ const SUPPORT: AcpSupport = {
     if (!saved) return;
     env.CLINE_PROVIDER ||= saved.provider;
     env.CLINE_MODEL ||= saved.model;
-    // ACP restores OAuth accounts itself but requires CLINE_API_KEY for BYOK.
-    // Read the selected provider only; never borrow another account's key.
+    // ACP restores OAuth accounts itself but needs CLINE_API_KEY for BYOK; never another account's key.
     if (!OAUTH.has(saved.provider)) env.CLINE_API_KEY ||= saved.apiKey || saved.auth?.apiKey;
   },
   spawnFingerprint: (env, config) => savedProvider(env, config)?.fingerprint ?? "unconfigured",
   pickAuthMethod: (methods, env) => !env.CLINE_API_KEY && OAUTH.has(env.CLINE_PROVIDER ?? "")
     && methods.some((method) => method.id === env.CLINE_PROVIDER) ? env.CLINE_PROVIDER! : null,
   authFailure: "fail-request",
-  // Cline reuses its own terminal login. Missing credentials are rejected by
-  // session/new; don't launch an interactive sign-in during a chat turn.
+  // Missing credentials are rejected by session/new; never launch an interactive sign-in during a turn.
   isAuthenticated: (env, config) => {
     if (env.CLINE_API_KEY?.trim()) return true;
     const saved = savedProvider(env, config)?.settings;
@@ -101,8 +96,7 @@ const SUPPORT: AcpSupport = {
     return env.CLINE_MODEL?.trim();
   },
   async configureSession({ request, sessionId, env, currentModelId }) {
-    // Cline's session/new falls back when a saved custom model is absent
-    // from its built-in catalog. Pin the actual saved id before prompting.
+    // session/new falls back when a saved custom model is missing from Cline's built-in catalog.
     const model = env.CLINE_MODEL?.trim();
     if (model && model !== currentModelId) {
       await request("session/set_model", { sessionId, modelId: model });
@@ -113,24 +107,23 @@ const SUPPORT: AcpSupport = {
 export const ClineAgentDriver = {
   ...createAcpDriver(SUPPORT),
   async create(input: Parameters<ReturnType<typeof createAcpDriver>["create"]>[0]) {
-    // Cline 3.0.70 records ACP mcpServers without connecting them. Its native
-    // settings override connects the same scoped stdio servers instead. Keep
-    // these turn credentials private and never rewrite the user's MCP file.
+    // Cline 3.0.70 records ACP mcpServers without connecting them; its native settings override connects
+    // the scoped stdio servers instead, without rewriting the user's MCP file.
     const directory = mkdtempSync(join(tmpdir(), "omb-cline-mcp-"));
     const cleanup = () => {
-      try { rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* OS temp cleanup after a locked child exits */ }
+      try { rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
     };
     try {
       const driver = createAcpDriver({
         ...SUPPORT,
         applyTurnEnv(env, { threadId, mcpServers }) {
           const path = join(directory, `${createHash("sha256").update(threadId).digest("hex")}.json`);
-          const mcp = Object.fromEntries(mcpServers.map(({ name, command, args, env: serverEnv }) => [name, {
+          const mcp = Object.fromEntries(mcpServers.flatMap((server) => "command" in server ? [server] : []).map(({ name, command, args, env: serverEnv }) => [name, {
             transport: { type: "stdio", command, args, env: Object.fromEntries(serverEnv.map(({ name, value }) => [name, value])) },
           }]));
           const text = JSON.stringify({ mcpServers: mcp });
           let previous: string | undefined;
-          try { previous = readFileSync(path, "utf8"); } catch { /* first turn on this thread */ }
+          try { previous = readFileSync(path, "utf8"); } catch {}
           if (previous !== text) {
             writeFileSync(`${path}.next`, text, { mode: 0o600 });
             renameSync(`${path}.next`, path);

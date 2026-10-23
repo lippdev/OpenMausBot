@@ -8,7 +8,7 @@ import { handleToolCall, request } from "../scripts/mcp-server.ts";
 import { waitForExit } from "./testing/cleanup.ts";
 import { readHandoffs } from "./testing/handoff-rows.ts";
 
-it("boots and reports an interrupted routine back to its source room", async () => {
+it("boots, starts an interrupted routine once more, and reports it back to its source room", async () => {
   const fixture = await launchVerificationServer();
   const { url, dataDir, logPath } = fixture.info;
   let restarted: ChildProcess | undefined;
@@ -17,8 +17,7 @@ it("boots and reports an interrupted routine back to its source room", async () 
     const { channel } = await handleToolCall("create_channel", { name: "Recovery room", member_ids: [bot.id] },
       (path, options) => request(path, options, url)) as any;
     await waitForExit(fixture.child, { signal: "SIGTERM" });
-    // Reproduce the persisted state of an interrupted process, not a second
-    // live writer. Recovery must emit its group/card changes during startup.
+    // Reproduce the persisted state of an interrupted process, not a second live writer.
     writeFileSync(join(dataDir, "routines.json"), JSON.stringify({ version: 1, routines: [], runs: [{
       id: "interrupted-room-run", routineId: "interrupted-routine", routineName: "Room report",
       botId: bot.id, target: "bot", runOn: "maus", sourceThreadId: channel.activeTaskId,
@@ -46,28 +45,23 @@ it("boots and reports an interrupted routine back to its source room", async () 
       if (restarted?.exitCode !== null) throw new Error(readFileSync(logPath, "utf8"));
       return fetch(url + "/api/health").then(r => r.ok).catch(() => false);
     }, { timeout: 10_000, interval: 150 }).toBe(true);
-    const { runs } = await request("/api/routines", {}, url) as any;
-    expect(runs[0]).toMatchObject({ status: "failed", error: "OpenMausBot restarted while this routine was running" });
+    const runs = async () => (await request("/api/routines", {}, url) as any).runs as any[];
+    expect((await runs())[0]).toMatchObject({ status: "queued", retried: "restarted" });
+    await expect.poll(async () => (await runs())[0]?.status, { timeout: 30_000 }).toBe("completed");
+    expect(await runs()).toMatchObject([{ id: "interrupted-room-run", retried: "restarted" }]);
     const { messages } = await request(`/api/threads/${channel.activeTaskId}/messages`, {}, url) as any;
     expect(messages.filter((m: any) => m.routineRun?.runId === "interrupted-room-run"))
-      .toMatchObject([{ routineRun: { status: "failed" } }]);
+      .toMatchObject([{ routineRun: { status: "completed" } }]);
     const { groups } = await request("/api/bots", {}, url) as any;
     expect(groups.find((g: any) => g.id === channel.id).working).toBe(false);
-    // Store deliberately catches subscriber exceptions, so a healthy server
-    // alone does not prove that recovery broadcasts were safe.
+    // Store catches subscriber exceptions, so a healthy server alone does not prove recovery broadcasts were safe.
     expect(readFileSync(logPath, "utf8")).not.toMatch(/ReferenceError|store: change listener threw/);
   } finally {
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();
   }
-}, 30_000);
+}, 60_000);
 
-// A routine still running at a restart keeps its teammates' work when the
-// runtime still carries it (docs/runtime-contract.md §5): the cut teammate
-// turn runs again once, in place; the run stays waiting instead of failing;
-// its resume says what the restart did, and the run completes with it. The
-// tree here is one the server before the job runtime left behind, imported
-// once at boot (server/runtime/import-legacy.ts).
 it("keeps a routine waiting through a restart, reruns its cut teammate once, and completes it", async () => {
   const fixture = await launchVerificationServer();
   const { url, dataDir, logPath } = fixture.info;
@@ -102,15 +96,12 @@ it("keeps a routine waiting through a restart, reruns its cut teammate once, and
     const run = async () => ((await request("/api/routines", {}, url) as any).runs as any[]).find((r) => r.id === "cut-run");
     const nodes = () => readHandoffs(dataDir);
     expect(existsSync(join(dataDir, "room-handoffs.json.migrated"))).toBe(true);
-    // The run is not failed: the runtime carries its tree, so it waits.
     expect(await run()).toMatchObject({ status: "waiting" });
     expect((await run()).error).toBeUndefined();
-    // The cut teammate turn runs again once, told so, and settles.
     await expect.poll(() => nodes().find((n: any) => n.id === "cut-work")?.status, { timeout: 20_000 }).toBe("completed");
     expect(nodes().find((n: any) => n.id === "cut-work")).toMatchObject({ restarts: 1, executions: 1, result: expect.stringContaining("hello from fake claude") });
     const mates = (await request(`/api/threads/${mate.activeTaskId}/messages`, {}, url) as any).messages as any[];
     expect(mates.filter((m) => m.tool?.name === "Resuming after a restart")).toHaveLength(1);
-    // Its result resumes the run as a routine turn, and the run completes with it.
     await expect.poll(async () => (await run())?.status, { timeout: 30_000 }).toBe("completed");
     expect((await run()).output).toContain("hello from fake claude");
     await expect.poll(() => nodes().find((n: any) => n.id === "cut-root")?.status, { timeout: 15_000 }).toBe("completed");
@@ -118,7 +109,6 @@ it("keeps a routine waiting through a restart, reruns its cut teammate once, and
     expect(chiefs.some((m) => m.tool?.name === "Mira was cut off by a restart; resuming")).toBe(true);
     expect(chiefs.some((m) => m.tool?.name === "Mira replied")).toBe(true);
     expect(chiefs.some((m) => String(m.tool?.name ?? "").startsWith("Resumed with Mira results after a restart"))).toBe(true);
-    // The tree ran once more and no more.
     expect(nodes().map((n: any) => [n.id, n.status, n.executions])).toEqual([["cut-root", "completed", 2], ["cut-work", "completed", 1]]);
   } finally {
     await waitForExit(restarted, { signal: "SIGTERM" });

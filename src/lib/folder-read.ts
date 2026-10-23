@@ -2,7 +2,6 @@ import type { Bot, BotAnnouncement } from "@/state/store";
 
 type FolderBot = Pick<Bot, "id" | "threadId" | "unread" | "tasks">;
 
-/** Include unfiled and background conversations, not only the selected one. */
 export function botUnreadThreadIds(bot: FolderBot): string[] {
   if (!bot.tasks?.length) return bot.unread ? [bot.threadId] : [];
   return bot.tasks
@@ -16,8 +15,6 @@ export function folderUnreadThreadIds(bot: FolderBot, projectId: string): string
     .map((task) => task.threadId);
 }
 
-/** Reading changes only unread state; never navigate to, answer, or dismiss a
- * conversation. Keep each confirmed response in order, including partial success. */
 export async function markFolderRead(
   bot: FolderBot,
   projectId: string,
@@ -27,8 +24,6 @@ export async function markFolderRead(
   await markThreadsRead(bot.id, folderUnreadThreadIds(bot, projectId), request, onRead);
 }
 
-/** Snapshot the unread threads once. New conversations remain unread, and every
- * confirmed read is applied before the next request, even if a later one fails. */
 export async function markBotRead(
   bot: FolderBot,
   request: (path: string, init?: RequestInit) => Promise<{ bot: BotAnnouncement }>,

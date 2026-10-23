@@ -4,10 +4,6 @@
 // sessions over stdio. The person signs in once with `muse login` (or gives
 // the instance a META_API_KEY), and the models come from Muse itself, so a
 // new Muse model reaches the picker without an app release.
-//
-// One `muse serve` host per thread, like the ACP family's one process per
-// thread: the host carries that thread's MCP servers and sandbox posture,
-// and its native session resumes on a later turn through resumeCursor.
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -23,6 +19,7 @@ import { newEventId, newId } from "../contracts.ts";
 import { augmentedPath } from "../env-path.ts";
 import { execCli } from "../procs.ts";
 import { redactSecretsInText } from "../redact.ts";
+import { answersAlone } from "./permission-command.ts";
 import { commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
 import { parseProtocolAskQuestions, questionAnswersById, type ProtocolAskQuestion } from "../../shared/ask-question.ts";
@@ -34,15 +31,12 @@ const DRIVER_KIND = "museCode";
 const PROVIDER_ID = "meta";
 const CLIENT_INFO = { name: "openmausbot", title: "OpenMausBot", version: "1" };
 const MUSE_CONTEXT_WINDOW = 1_048_576;
-/** Re-send the bot's standing instructions after this many bare turns, as
- * the ACP family does (acp/core.ts ACP_PROMPT_RE_ANCHOR_TURNS). */
 const RE_ANCHOR_TURNS = 8;
 const STARTUP_TIMEOUT_MS = 30_000;
 const MODEL_LIST_TIMEOUT_MS = 20_000;
 const MAX_TOOL_OUTPUT = 4_000;
 
-// Muse's catalog for a signed-in account on Oct 12, 2026 (`model/list`).
-// The live list replaces it as soon as Muse answers.
+// Muse's catalog for a signed-in account (`model/list`), until the live list answers.
 const DEFAULT_MODELS: ModelCatalog = {
   default: "muse-wonder-1.0",
   options: [
@@ -52,8 +46,7 @@ const DEFAULT_MODELS: ModelCatalog = {
   ],
 };
 
-/** OpenMausBot's effort levels, in Muse's words. Muse has no "none" for its
- * reasoning models, so the lowest level asks for its shortest pass. */
+/** Muse has no "none" for its reasoning models, so the lowest level asks for its shortest pass. */
 const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
 const museEffort = (effort: EffortLevel | undefined) => effort === "none" ? "minimal" : effort;
 
@@ -70,15 +63,14 @@ export function museModelLabel(id: string, displayLabel?: string): string {
   return id.split("-").map(word => /^\d/.test(word) ? word : word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 }
 
-/** The account's chat models from `model/list`, the default first-class. */
 export function museCatalog(result: unknown, preferred?: string): ModelCatalog | null {
   const rows = (result as { models?: unknown } | null)?.models;
   if (!Array.isArray(rows)) return null;
   const options: ModelCatalog["options"] = [];
   let listedDefault: string | undefined;
   for (const row of rows) {
-    const entry = (row ?? {}) as { modelId?: unknown; displayLabel?: unknown; isActive?: unknown; isDefault?: unknown; contextLimit?: unknown };
-    if (typeof entry.modelId !== "string" || !entry.modelId.trim() || entry.isActive === false) continue;
+    const entry = (row ?? {}) as { modelId?: unknown; displayLabel?: unknown; isDefault?: unknown; contextLimit?: unknown };
+    if (typeof entry.modelId !== "string" || !entry.modelId.trim()) continue;
     if (options.some(option => option.id === entry.modelId)) continue;
     const id = entry.modelId;
     options.push({
@@ -94,9 +86,7 @@ export function museCatalog(result: unknown, preferred?: string): ModelCatalog |
   return { default: preferred ?? listedDefault ?? options[0].id, options };
 }
 
-/** How each approval level reaches Muse: Full runs without asking (and
- * without Muse's sandbox, as Full does on every engine); every other level
- * lets Muse's own policy ask, and the card answers. */
+/** Full runs without asking or Muse's sandbox; every other level lets Muse's own policy ask. */
 export function museApprovalMode(mode: ApprovalMode | undefined): "allowAll" | "promptUnmatched" {
   return mode === "full" ? "allowAll" : "promptUnmatched";
 }
@@ -150,7 +140,6 @@ interface MuseItem {
 }
 
 const TOOL_KINDS = new Set(["toolCall", "userShell", "webSearch", "subagent", "workflow"]);
-/** Still running: Muse's in-progress states, and any waiting state it adds. */
 const isRunning = (status: string) => /^(?:inProgress|pending|awaiting|queued|running)/i.test(status);
 
 function parseArgs(args: string | undefined): Record<string, unknown> | undefined {
@@ -163,7 +152,6 @@ function parseArgs(args: string | undefined): Record<string, unknown> | undefine
   }
 }
 
-/** A tool item's title, one-line command and bounded input preview. */
 export function museToolStart(item: MuseItem): { title: string; summary?: string; input?: string } {
   const args = parseArgs(item.args);
   const title = item.kind === "subagent" ? item.objective || item.role || "Muse agent"
@@ -184,7 +172,6 @@ export function museToolOutput(item: MuseItem): { ok: boolean; output?: string }
   return { ok, ...(output ? { output: redactSecretsInText(output.slice(0, MAX_TOOL_OUTPUT)) } : {}) };
 }
 
-/** Muse's question kinds as the card's protocol questions. */
 export function museQuestions(questions: unknown): ProtocolAskQuestion[] | null {
   if (!Array.isArray(questions)) return null;
   return parseProtocolAskQuestions(questions.map((question) => {
@@ -203,8 +190,7 @@ interface Pending {
 
 interface ActiveTurn {
   turnId: string;
-  /** Muse's own turn id: the turn/start command id, minted by the host that
-   * runs the turn. Unset until the turn is sent. */
+  /** Muse's turn id: the turn/start command id the host mints; unset until sent. */
   nativeTurnId?: string;
   items: Map<string, MuseItem>;
   streamed: Map<string, string>;
@@ -217,8 +203,7 @@ interface Host {
   close(): Promise<unknown>;
   exited: Promise<unknown>;
   grantedMcp: boolean;
-  /** What this host was launched with; a turn that needs another posture or
-   * other MCP servers gets a fresh host that resumes the same session. */
+  /** A turn needing another posture or other MCP servers gets a fresh host resuming the same session. */
   key: string;
   closed: boolean;
 }
@@ -263,8 +248,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
       for (const listener of listeners) listener(full);
     };
 
-    /** Muse uses the login saved by `muse login`; a META_API_KEY only when
-     * this instance was given one, never one riding in the app's own env. */
+    /** `muse login`'s saved sign-in; META_API_KEY only when this instance was given one. */
     const childEnv = (): NodeJS.ProcessEnv => {
       const env: Record<string, string | undefined> = { ...process.env, ...input.environment, PATH: augmentedPath(), MUSE_NO_AUTO_UPDATE: "1" };
       for (const key of [...PROVIDER_CREDENTIAL_ENV, ...WORKSPACE_CREDENTIAL_ENV]) delete env[key];
@@ -296,8 +280,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
           grantedMcp: Array.isArray(granted) && granted.includes("sessionMcp"),
           close: () => { host.closed = true; return spawned.close(); },
         };
-        // Approval and question requests are receipts only: the matching
-        // notifications open the cards, and answers travel as commands.
+        // Approval and question requests are receipts only: notifications open the cards, answers go as commands.
         spawned.connection.onServerRequest(async (request) => {
           if (request.method === "approval/request" || request.method === "userInput/request") return {};
           throw new Error(`Unsupported Muse request: ${request.method}`);
@@ -334,8 +317,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
       }
     };
 
-    /** Where `muse login` saved this instance's sign-in: the HOME its
-     * engine runs with, so an instance given its own HOME is its own account. */
+    /** `muse login` saves under the engine's HOME, so an instance with its own HOME is its own account. */
     const signedIn = () => {
       if (input.environment.META_API_KEY) return true;
       const env = childEnv();
@@ -449,8 +431,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
         case "approval/requested": {
           const approval = params as unknown as MuseApproval;
           if (!active || !Array.isArray(approval.availableChoices)) return;
-          if (state.approvalMode === "allowAll") {
-            // Full access answers what Muse still asks, as Full does everywhere.
+          if (state.approvalMode === "allowAll" && answersAlone(approval.subject?.command)) {
             const choice = museChoice(approval.availableChoices, "allow");
             if (choice) void decide(state, approval, choice).catch(() => {});
             return;
@@ -462,7 +443,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
             type: "request.opened", threadId, turnId: active.turnId, requestId: approval.approvalId, requestType: "permission",
             tool: approval.toolName || subject.toolName || subject.kind || "tool",
             summary: redactSecretsInText(command ?? subject.path ?? subject.host ?? subject.target ?? approval.toolName ?? "Muse Code asks to continue"),
-            ...(command ? { command: { command, cwd: subject.workspaceRoot ?? "" } } : {}),
+            ...(command ? { command: { command, cwd: subject.workspaceRoot ?? "" }, commandLine: command } : {}),
             allowSession: Boolean(museChoice(approval.availableChoices, "allow", true)?.decision.startsWith("approvedFor")
               || approval.availableChoices.some(choice => choice.scope === "session")),
           });
@@ -518,9 +499,6 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
       await host?.close().catch(() => {});
     };
 
-    /** A live host and native session for this turn: the pooled one when it
-     * still fits, else a fresh host that resumes the thread's session (or the
-     * turn's resumeCursor), else a new session. */
     const ensureSession = async (state: ThreadState, turn: SendTurnInput, turnId: string): Promise<{ text: string; rebuilt: boolean; started: boolean }> => {
       const cwd = turn.cwd ?? process.cwd();
       const servers = turnStdioMcpServers(turn);
@@ -571,7 +549,6 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
       state.sessionId = session.sessionId;
       state.model = typeof session.modelId === "string" ? session.modelId : model;
       state.approvalMode = approvalMode;
-      // A refused cursor rebuilds from the transcript instead of a blank session.
       const rebuilt = Boolean(resumeId && turn.recoveryText);
       return { text: rebuilt ? turn.recoveryText! : turn.text, rebuilt, started: true };
     };
@@ -589,8 +566,6 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
           await host.connection.command("session/setModel", { sessionId, model: { modelId: turn.model, providerId: PROVIDER_ID } });
           state.model = turn.model;
         }
-        // The bot's instructions ride the turn that establishes (or
-        // re-instructs) this native session; later turns go through bare.
         const halves = promptHalves(turn);
         let text = session.text;
         if (halves.stable !== null) {
@@ -628,6 +603,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
         composioMcp: true,
         browserMcp: true,
         dataMcp: true,
+        highlevelMcp: true,
         images: true,
         nativeImageInput: true,
         effortLevels: EFFORT_LEVELS,
@@ -652,9 +628,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
           try {
             await state.host.connection.command("turn/interrupt", { sessionId: state.sessionId, turnId: active.nativeTurnId });
             return; // turn/completed (cancelled) settles it
-          } catch {
-            /* the turn never started on Muse's side */
-          }
+          } catch {}
         }
         finishTurn(state, active, { ok: false, stopReason: "interrupted" });
       },
@@ -735,7 +709,7 @@ export const MuseCodeDriver: ProviderDriver<MuseConfig> = {
       async snapshot(): Promise<ProviderSnapshot> {
         version ??= await probeVersion();
         if (version === null) {
-          version = undefined; // look again next time: it may be installed by then
+          version = undefined;
           return { state: "unavailable", reason: "Muse Code isn't installed on this computer.", authenticated: false };
         }
         if (!signedIn()) {

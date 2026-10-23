@@ -1,11 +1,4 @@
-// The five Data tools as every engine sees them (data_load, data_describe,
-// data_sql, data_show, data_export), served at POST /api/internal/data/mcp
-// through harness-mcp-proxy, and the same operations the panel's routes run
-// for the person (showCard, runSql, exportData with connection "panel").
-// Everything DuckDB is reached through the injected BotDatabase; every SQL
-// string built here quotes its literals and identifiers, and every result is
-// bounded by rows and bytes before it leaves (the gate's trimming is only the
-// backstop). Failures are structured DataErrors the model can act on.
+// Every SQL string built here quotes its literals and identifiers; every result is bounded by rows and bytes before it leaves.
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -27,8 +20,6 @@ import {
 import { compileToolSchema, schemaProblems } from "../mcp-schema-validator.ts";
 import type { DataSheetStore } from "./sheet.ts";
 import { DataFailure, type BotDatabase, type ChartCompiler, type ChartRenderer, type DataConnection, type DataExtension, type RunOptions, type RunResult, type VegaLiteValidator } from "./types.ts";
-
-// ── the catalog ──
 
 const IDENT = "^[A-Za-z_][A-Za-z0-9_]{0,62}$";
 const tool = (name: string, description: string, properties: Record<string, unknown>, required: string[] = []) =>
@@ -127,7 +118,6 @@ export const DATA_TOOLS = [
 
 let validators: Map<string, ValidateFunction> | undefined;
 
-/** Why a call cannot run, or null: the advertised schema is the contract. */
 export function dataToolCallProblem(name: unknown, args: unknown): string | null {
   validators ??= new Map(DATA_TOOLS.map((entry) => [entry.name, compileToolSchema(entry.inputSchema, { allErrors: true })]));
   const validate = typeof name === "string" ? validators.get(name) : undefined;
@@ -138,27 +128,17 @@ export function dataToolCallProblem(name: unknown, args: unknown): string | null
   return null;
 }
 
-// ── SQL building blocks ──
-
 export const quoteIdent = (name: string) => `"${name.replace(/"/g, '""')}"`;
 export const quoteLiteral = (value: string) => `'${value.replace(/'/g, "''")}'`;
 
-/** A relation expression for a result table in DATA_RESULTS_SCHEMA. */
 export const resultRelation = (name: string) => `${DATA_RESULTS_SCHEMA}.${quoteIdent(name)}`;
 
 const fail = (code: DataErrorCode, message: string, extra: Partial<DataError> = {}): DataFailure =>
   new DataFailure({ code, message, ...extra });
 
-// ── the statement gate ──
-
-/** `text` is the uppercased word for matching; `raw` is what was written. */
 type Token = { kind: "word" | "ident" | "punct" | "block"; text: string; raw: string };
 
-/** Top-level tokens of one statement: words, quoted identifiers, `,`, and
- * every parenthesised group collapsed to one block. Strings, comments and
- * quoted identifiers never leak a keyword. Throws for an unterminated quote
- * or comment. Returns the number of statements (top-level `;` with content
- * after it) as well. */
+/** Top-level tokens, each parenthesised group one block; strings, comments and quoted identifiers never leak a keyword. */
 function topLevelTokens(sql: string): { tokens: Token[]; statements: number } {
   const tokens: Token[] = [];
   let statements = 1;
@@ -202,7 +182,6 @@ function topLevelTokens(sql: string): { tokens: Token[]; statements: number } {
     if (ch === "(") { push("block", "(…)"); depth++; i++; continue; }
     if (ch === ")") { depth = Math.max(0, depth - 1); i++; continue; }
     if (ch === ";") {
-      // A trailing semicolon is fine; content after one is a second statement.
       if (depth === 0 && /\S/.test(sql.slice(i + 1).replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").replace(/[;\s]+$/, ""))) statements++;
       i++; continue;
     }
@@ -213,15 +192,12 @@ function topLevelTokens(sql: string): { tokens: Token[]; statements: number } {
       i = j; continue;
     }
     if (ch === ",") { push("punct", ","); i++; continue; }
-    // whitespace, numbers, operators, dots, casts (::), named-argument arrows: never a verb
     i++;
   }
   return { tokens, statements };
 }
 
 const READ_VERBS = new Set(["SELECT", "WITH", "FROM", "PIVOT", "UNPIVOT", "VALUES", "SUMMARIZE", "DESCRIBE", "EXPLAIN", "SHOW"]);
-/** Statements whose result `CREATE TABLE … AS` can hold; the others are
- * metadata the model reads once. */
 const MATERIALISABLE = new Set(["SELECT", "WITH", "FROM", "PIVOT", "UNPIVOT", "VALUES"]);
 
 export type SqlClass =
@@ -229,9 +205,7 @@ export type SqlClass =
   | { kind: "create"; target: string }
   | { kind: "refused"; verb: string };
 
-/** What one statement is, judged by its verb (and the verb after a CTE
- * list), so a column called `comment` or `load` is never mistaken for a
- * write and a `WITH … DELETE` never passes as a read. */
+/** Judged by the verb (and the verb after a CTE list), so a `WITH … DELETE` never passes as a read. */
 export function classifySql(sql: string): SqlClass {
   const { tokens, statements } = topLevelTokens(sql);
   if (statements > 1) throw fail("invalid_input", "One statement per call.", { hint: "Send each statement in its own data_sql call." });
@@ -244,9 +218,9 @@ export function classifySql(sql: string): SqlClass {
     i = 1;
     if (tokens[i]?.text === "RECURSIVE") i++;
     for (;;) {
-      while (i < tokens.length && tokens[i]!.kind !== "block") i++; // name, AS, MATERIALIZED, or (cols)
+      while (i < tokens.length && tokens[i]!.kind !== "block") i++;
       i++;
-      if (tokens[i]?.text === "AS") { // a (cols) block came first: AS [NOT MATERIALIZED] (body) still follows
+      if (tokens[i]?.text === "AS") {
         while (i < tokens.length && tokens[i]!.kind !== "block") i++;
         i++;
       }
@@ -274,7 +248,7 @@ export function classifySql(sql: string): SqlClass {
     if (tokens[j]?.text === "IF" && tokens[j + 1]?.text === "NOT" && tokens[j + 2]?.text === "EXISTS") j += 3;
     const nameParts: string[] = [];
     while (j < tokens.length && tokens[j]!.kind !== "block" && tokens[j]!.text !== "AS") { nameParts.push(tokens[j]!.raw.replace(/\.$/, "")); j++; }
-    if (tokens[j]?.kind === "block") j++; // (col list) before AS
+    if (tokens[j]?.kind === "block") j++;
     if (tokens[j]?.text !== "AS" || !nameParts.length) {
       return { kind: "refused", verb: `CREATE ${object}` };
     }
@@ -283,8 +257,7 @@ export function classifySql(sql: string): SqlClass {
   return { kind: "refused", verb };
 }
 
-/** Throws write_refused for anything but a read (and, when allowed, a
- * CREATE … AS); returns the class for the caller to branch on. */
+/** Throws write_refused for anything but a read (and, when allowed, a CREATE … AS). */
 export function gateSql(sql: string, options: { allowCreate?: boolean } = {}): Exclude<SqlClass, { kind: "refused" }> {
   const kind = classifySql(sql);
   if (kind.kind === "refused") {
@@ -301,13 +274,8 @@ export function gateSql(sql: string, options: { allowCreate?: boolean } = {}): E
   return kind;
 }
 
-// ── bounding ──
-
 const CELL_CHARS_MAX = 2000;
 
-/** Rows for the model: at most `maxRows`, then whole rows dropped from the
- * end until the JSON fits `maxBytes`. A cell longer than CELL_CHARS_MAX is
- * cut so one wide row cannot empty the result. */
 export function boundRows(rows: RunResult["rows"], maxRows: number, maxBytes: number): { rows: RunResult["rows"]; truncated: boolean } {
   let truncated = rows.length > maxRows;
   let kept = rows.slice(0, maxRows).map((row) => row.map((cell) => (typeof cell === "string" && cell.length > CELL_CHARS_MAX ? `${cell.slice(0, CELL_CHARS_MAX)}…` : cell)));
@@ -321,9 +289,6 @@ export function boundRows(rows: RunResult["rows"], maxRows: number, maxBytes: nu
 const trimSample = (sample: string[] | undefined) =>
   sample?.slice(0, DATA_LIMITS.sampleValues).map((value) => (value.length > DATA_LIMITS.sampleChars ? `${value.slice(0, DATA_LIMITS.sampleChars)}…` : value));
 
-/** Columns for the model: samples trimmed, types only past the column cap,
- * then statistics shed in order (samples, min/max, the rest) until the JSON
- * fits `maxBytes`. */
 export function boundColumns(columns: DataColumn[], maxBytes: number, columnsMax: number = DATA_LIMITS.describeColumnsMax): { columns: DataColumn[]; truncated: boolean } {
   let truncated = columns.length > columnsMax;
   let kept: DataColumn[] = truncated
@@ -337,9 +302,6 @@ export function boundColumns(columns: DataColumn[], maxBytes: number, columnsMax
   return { columns: kept, truncated };
 }
 
-// ── errors ──
-
-/** A hint for the dialect mistakes a model makes most, never a reworded message. */
 function hintFor(message: string, sql: string | undefined): string | undefined {
   if (/Parser Error/.test(message) && sql && /"[^"]*\s[^"]*"/.test(sql) && /syntax error at or near/.test(message)) {
     return "Double quotes name identifiers; strings take single quotes.";
@@ -351,7 +313,6 @@ function hintFor(message: string, sql: string | undefined): string | undefined {
   return undefined;
 }
 
-/** Any thrown value as the structured error a tool or route returns. */
 export function toDataError(error: unknown, sql?: string, signal?: AbortSignal): DataError {
   if (error instanceof DataFailure) return { ...error.error, ...(sql && !error.error.sql ? { sql } : {}) };
   const message = error instanceof Error ? error.message : String(error);
@@ -364,27 +325,20 @@ export function toDataError(error: unknown, sql?: string, signal?: AbortSignal):
   return { code: "sql_error", message, ...(sql ? { sql } : {}), ...(line ? { line: Number(line[1]) } : {}), ...(hint ? { hint } : {}) };
 }
 
-// ── the context the operations run in ──
-
 export interface DataContext {
   database: BotDatabase;
   sheet: DataSheetStore;
   compileChart: ChartCompiler;
   validateVegaLite: VegaLiteValidator;
   renderer: ChartRenderer;
-  /** Folders an export may land in, most preferred first: the bot's working
-   * folder, then the person's Downloads. Both may be absent on a Cloud home. */
   exportRoots: () => string[];
   signal: AbortSignal;
-  /** The bot's connection for tool calls, the panel's for the person. */
   connection: DataConnection;
   by: DataCard["by"];
 }
 
 const runOptions = (ctx: DataContext, extra: Partial<RunOptions> = {}): RunOptions =>
   ({ connection: ctx.connection, signal: ctx.signal, timeoutMs: DATA_LIMITS.sqlTimeoutMs, ...extra });
-
-// ── data_load ──
 
 export type LoadKind = "auto" | "csv" | "tsv" | "parquet" | "json" | "xlsx" | "sqlite" | "folder" | "url" | "postgres" | "mysql" | "gsheet";
 export interface LoadInput {
@@ -396,17 +350,13 @@ export interface LoadInput {
   options?: { header?: boolean; delimiter?: string; union_by_name?: boolean; all_varchar?: boolean; ignore_errors?: boolean; sample_size?: number };
 }
 
-/** One table the load will create: the reader expression and its name. */
 export interface LoadPlan {
   kind: DataSource["kind"];
-  /** What the sheet records: the path or URL with credentials removed. */
+  /** The path or URL with credentials removed. */
   source: string;
-  /** Default table name before uniqueness. */
   stem: string;
-  /** A relation expression (`read_csv(…)`) for file-like sources. */
   reader?: string;
   extensions?: DataExtension[];
-  /** For databases: ATTACH options and which tables to snapshot. */
   attach?: { type: "postgres" | "mysql" | "sqlite"; connection: string; table?: string };
   warnings: string[];
 }
@@ -414,7 +364,6 @@ export interface LoadPlan {
 const GLOB_CHARS = /[*?[\]]/;
 const COMPRESSION = /\.(gz|zst|zstd|bz2)$/i;
 
-/** The DuckDB reader for an extension, or null for one no reader handles. */
 function readerFor(ext: string, kind: LoadKind | undefined): "csv" | "tsv" | "json" | "parquet" | "xlsx" | "sqlite" | null {
   if (kind && kind !== "auto" && kind !== "folder" && kind !== "url" && kind !== "gsheet" && kind !== "postgres" && kind !== "mysql") return kind;
   switch (ext.toLowerCase()) {
@@ -444,7 +393,6 @@ function csvOptions(options: LoadInput["options"], extra: Record<string, string>
   return parts.length ? `, ${parts.join(", ")}` : "";
 }
 
-/** One path, or a list of globs, as DuckDB's readers take them. */
 function readerExpression(reader: "csv" | "tsv" | "json" | "parquet" | "xlsx", target: string | string[], input: LoadInput, many: boolean): string {
   const path = Array.isArray(target) ? `[${target.map(quoteLiteral).join(", ")}]` : quoteLiteral(target);
   const multi: Record<string, string> = many ? { union_by_name: "true", filename: "true" } : {};
@@ -463,9 +411,7 @@ function readerExpression(reader: "csv" | "tsv" | "json" | "parquet" | "xlsx", t
   }
 }
 
-/** The source with every credential removed, as the sheet records it and
- * as any error text repeats it. Userinfo passwords, `password=` in a DSN,
- * and query parameters that carry tokens or signatures all go. */
+/** Removes userinfo passwords, `password=` in a DSN, and query parameters that carry tokens or signatures. */
 export function stripCredentials(source: string): string {
   const dsn = source.replace(/\b(password|passwd|pwd|sslpassword)\s*=\s*('[^']*'|\S+)/gi, "$1=***");
   try {
@@ -481,8 +427,6 @@ export function stripCredentials(source: string): string {
   }
 }
 
-/** A table name from a file or sheet name: lowercase letters, digits and
- * underscores, starting with a letter, at most 63 characters. */
 export function tableNameFrom(stem: string): string {
   let name = stem.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 63);
   if (!name) name = "data";
@@ -490,8 +434,6 @@ export function tableNameFrom(stem: string): string {
   return name;
 }
 
-/** Where `source` leads and how DuckDB reads it. Local paths are checked
- * here so a missing file is `source_not_found` before any SQL runs. */
 export function planLoad(input: LoadInput): LoadPlan[] {
   const { source } = input;
   const kind = input.kind ?? "auto";
@@ -526,7 +468,6 @@ export function planLoad(input: LoadInput): LoadPlan[] {
   let stat;
   try { stat = statSync(local); } catch { throw fail("source_not_found", `${local} does not exist.`); }
   if (stat.isDirectory()) {
-    // One table per file family found: every csv together, every parquet together, …
     const families = new Map<"csv" | "tsv" | "json" | "parquet", Set<string>>();
     for (const entry of readdirSync(local, { recursive: true, withFileTypes: true })) {
       if (!entry.isFile()) continue;
@@ -556,13 +497,11 @@ const DATABASE_TABLES_MAX = 25;
 export interface LoadedTable { name: string; rowCount: number; columns: DataColumn[]; source: string }
 export interface LoadOutput { tables: LoadedTable[]; warnings: string[]; elapsedMs: number }
 
-/** Loads every table the plan names, describes each, records each source. */
 export async function loadData(ctx: DataContext, input: LoadInput): Promise<LoadOutput> {
   const started = Date.now();
   const plans = planLoad(input);
   const replace = input.replace !== false;
   const existing = new Set((await ctx.database.listTables()).map((table) => table.name.toLowerCase()));
-  // The plan already applied `name`; here the stem becomes a valid, unused identifier.
   const unique = (base: string): string => {
     const stem = tableNameFrom(base);
     let name = stem;
@@ -592,8 +531,7 @@ export async function loadData(ctx: DataContext, input: LoadInput): Promise<Load
       continue;
     }
     const attach = plan.attach!;
-    // A foreign database is attached read-only for the snapshot and detached
-    // again whatever happens: the connection string never persists.
+    // Attached read-only and always detached: the connection string never persists.
     const alias = `omb_src_${Date.now().toString(36)}`;
     await ctx.database.run(`ATTACH ${quoteLiteral(attach.connection)} AS ${quoteIdent(alias)} (TYPE ${attach.type}, READ_ONLY)`, runOptions(ctx, { extensions: [attach.type] }));
     try {
@@ -612,7 +550,6 @@ export async function loadData(ctx: DataContext, input: LoadInput): Promise<Load
         }
         if (!chosen.length) throw fail("source_unsupported", `${plan.source} has no tables to load.`);
       }
-      // One table keeps the bot's name (or the source table's); several keep their own names.
       for (const entry of chosen) {
         const relation = entry.schema ? `${quoteIdent(alias)}.${quoteIdent(entry.schema)}.${quoteIdent(entry.table)}` : `${quoteIdent(alias)}.${quoteIdent(entry.table)}`;
         const name = unique(chosen.length > 1 ? entry.table : input.name ?? entry.table);
@@ -625,14 +562,10 @@ export async function loadData(ctx: DataContext, input: LoadInput): Promise<Load
   return { tables, warnings, elapsedMs: Date.now() - started };
 }
 
-// ── data_describe ──
-
 const IDENTIFIER_LIKE = /^\s*("[^"]+"|[A-Za-z_][\w$]*)(\.("[^"]+"|[A-Za-z_][\w$]*)){0,2}\s*$/;
 
 export interface DescribeOutput { name?: string; sql?: string; rowCount: number; columns: DataColumn[]; truncated?: boolean; elapsedMs: number }
 
-/** A table by name, or a SELECT's result as `(sql)`: the one relation form
- * the engine's describe takes for both. */
 export async function describeTarget(ctx: DataContext, target: string): Promise<DescribeOutput> {
   const started = Date.now();
   let relation: string;
@@ -652,9 +585,6 @@ export async function describeTarget(ctx: DataContext, target: string): Promise<
   return { ...(name ? { name } : {}), ...(sql ? { sql } : {}), rowCount: described.rowCount, columns, ...(truncated ? { truncated } : {}), elapsedMs: Date.now() - started };
 }
 
-/** Read saved state, not a rerun: a person's SQL edits are visible to the
- * next bot turn. The table list is DuckDB's own catalog (a catalog read,
- * not a query), so a table derived with SQL is listed exactly once. */
 async function describeSavedResult(ctx: DataContext, id?: string): Promise<Record<string, unknown>> {
   const sheet = ctx.sheet.sheet();
   const cards = [...sheet.cards].reverse().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -683,11 +613,8 @@ async function describeSavedResult(ctx: DataContext, id?: string): Promise<Recor
   return result;
 }
 
-// ── data_sql ──
-
 export interface SqlInput { sql: string; limit?: number; name?: string }
 export interface SqlOutput {
-  /** The result table (omb_results.q_<n>), the created table, or null for metadata statements. */
   table: string | null;
   columns: DataColumn[];
   rowCount: number;
@@ -724,8 +651,6 @@ export async function runSql(ctx: DataContext, input: SqlInput): Promise<SqlOutp
   };
 }
 
-// ── data_show ──
-
 export interface ShowInput {
   id?: string;
   title?: string;
@@ -735,7 +660,6 @@ export interface ShowInput {
   chart?: OmbChartSpec;
   vegaLite?: Record<string, unknown>;
   limit?: number;
-  /** Live panel edits keep the last successful card unchanged until a replacement is ready. */
   live?: boolean;
 }
 export interface ShowOutput {
@@ -751,14 +675,10 @@ export interface ShowOutput {
 const OUTPUT_TOO_LARGE_HINT = "Aggregate or filter in SQL (GROUP BY, date_trunc, LIMIT) so the chart draws fewer marks.";
 const cardRuns = new WeakMap<DataSheetStore, Map<string, { controller: AbortController; previous?: DataCard }>>();
 
-/** Cancel this card's exact invocation, including work queued behind another query. */
 export function cancelCardRun(sheet: DataSheetStore, id: string): void {
   cardRuns.get(sheet)?.get(id)?.controller.abort();
 }
 
-/** One tool call = one card. A new card appears "running" at once so the
- * person sees the work; an existing id changes in place and keeps its last
- * good result when the new query fails. Throws DataFailure. */
 export async function showCard(context: DataContext, input: ShowInput, onCardReady?: (card: DataCard) => void): Promise<ShowOutput> {
   const started = Date.now();
   const controller = new AbortController();
@@ -822,7 +742,6 @@ export async function showCard(context: DataContext, input: ShowInput, onCardRea
     if (kind === "table") {
       const limit = Math.min(Math.max(1, Math.trunc(input.limit ?? DATA_LIMITS.showTableRowsMax)), DATA_LIMITS.showTableRowsMax);
       const materialised = await ctx.database.materialise(`SELECT * FROM ${from} LIMIT ${limit}`, resultName, runOptions(ctx));
-      // Exactly `limit` rows kept means the source may hold more.
       const truncated = materialised.rowCount >= limit;
       if (truncated) warnings.push(`The card keeps the first ${limit.toLocaleString("en-US")} rows.`);
       patch = { result: resultName, columns: materialised.columns, rowCount: materialised.rowCount, truncated, chart: undefined, vegaLite: undefined, reduction: undefined };
@@ -835,7 +754,6 @@ export async function showCard(context: DataContext, input: ShowInput, onCardRea
       }
       const counted = await ctx.database.run(`SELECT count(*) FROM ${from}`, runOptions(ctx, { maxRows: 1 }));
       const inputRows = Number(counted.rows[0]?.[0] ?? 0);
-      // The compiler never sees counts: a top-N or sample that kept every row reduced nothing.
       const method = inputRows === materialised.rowCount ? "none" : compiled.reduction.method;
       const reduction: DataReduction = { ...compiled.reduction, method, inputRows, outputRows: materialised.rowCount };
       patch = { result: resultName, columns: materialised.columns, rowCount: materialised.rowCount, truncated: false, chart: input.chart, vegaLite: compiled.vegaLite, reduction };
@@ -855,8 +773,7 @@ export async function showCard(context: DataContext, input: ShowInput, onCardRea
     const ready = ctx.sheet.updateCard(card.id, { ...patch, kind, title: input.title ?? ctx.sheet.card(card.id)?.title ?? title, sql: cardSql, by: ctx.by, status: "ready", error: undefined, elapsedMs: Date.now() - started })!;
     committed = true;
     onCardReady?.(ready);
-    // On the caller's own connection: the bot's lane may be mid-query, and
-    // a panel edit's response must not wait behind it.
+    // On the caller's own connection: the bot's lane may be mid-query.
     if (previousResult && previousResult !== resultName) await ctx.database.dropResult(previousResult, ctx.connection).catch(() => undefined);
     return {
       id: ready.id,
@@ -877,16 +794,13 @@ export async function showCard(context: DataContext, input: ShowInput, onCardRea
   }
 }
 
-// ── data_export ──
-
 export interface ExportInput { id?: string; table?: string; sql?: string; format: DataExportFormat; path?: string; theme?: "light" | "dark"; width?: number; scale?: number }
 export interface ExportOutput { path: string; bytes: number; rowCount?: number }
 
 const same = (a: string, b: string) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
 const isUnder = (child: string, root: string) => same(child, root) || (process.platform === "win32" ? child.toLowerCase().startsWith(`${root.toLowerCase()}${sep}`) : child.startsWith(`${root}${sep}`));
 
-/** The deepest existing ancestor's real path joined with the rest, so a
- * symlink inside an allowed folder cannot lead the file out of it. */
+/** Resolves symlinks, so a link inside an allowed folder cannot lead the file out of it. */
 function realIntent(path: string): string {
   let dir = path;
   const rest: string[] = [];
@@ -899,9 +813,7 @@ function realIntent(path: string): string {
   return join(realpathSync.native(dir), ...rest);
 }
 
-/** Where an export lands: `requested` (absolute, `~/…`, or relative to the
- * first root) or `<first root>/<stem>.<ext>`, confined to `roots`. Makes
- * the folder. Throws invalid_input for a path outside every root. */
+/** Confined to `roots`: throws invalid_input for a path outside every root. */
 export function resolveExportPath(roots: string[], requested: string | undefined, stem: string, ext: string): string {
   const allowed = roots.filter((root) => root && isAbsolute(root)).map((root) => resolve(root));
   if (!allowed.length) throw fail("invalid_input", "There is no folder to export into on this computer.");
@@ -918,20 +830,17 @@ export function resolveExportPath(roots: string[], requested: string | undefined
   if (!allowed.some((root) => isUnder(intent, realIntent(root)))) {
     throw fail("invalid_input", `${requested ?? target} is outside the folders an export may use.`, { hint: `Export into ${allowed.join(" or ")}.` });
   }
-  // The same file again gets a numbered name rather than a silent overwrite.
   let unique = target;
   for (let n = 2; existsSync(unique); n++) unique = join(dirname(target), `${basename(target, extname(target))}-${n}${extname(target)}`);
   mkdirSync(dirname(unique), { recursive: true });
   return unique;
 }
 
-/** A card's rows as its chart binds them (the reduced result). */
 async function chartRows(ctx: DataContext, card: DataCard): Promise<RunResult> {
   if (card.kind !== "chart" || !card.vegaLite || !card.result) throw fail("invalid_input", `${card.id} is not a rendered chart card.`, { hint: "png and svg export a chart card; export data as csv, parquet or xlsx." });
   return ctx.database.run(`SELECT * FROM ${resultRelation(card.result)} LIMIT ${DATA_LIMITS.chartMaxMarks}`, runOptions(ctx, { maxRows: DATA_LIMITS.chartMaxMarks }));
 }
 
-/** The image of a chart card, for export, the panel's image route, phones and Slack. */
 export async function renderCard(ctx: DataContext, card: DataCard, format: "png" | "svg", options: { theme?: "light" | "dark"; width?: number; scale?: number } = {}): Promise<string | Buffer> {
   const rows = await chartRows(ctx, card);
   const theme = options.theme ?? "light";
@@ -975,8 +884,6 @@ export async function exportData(ctx: DataContext, input: ExportInput): Promise<
   return { path, bytes: statSync(path).size, ...(Number.isFinite(count) ? { rowCount: count } : {}) };
 }
 
-// ── the MCP face ──
-
 export type DataToolResult = {
   content: Array<{ type: "text"; text: string }>;
   structuredContent?: Record<string, unknown>;
@@ -991,8 +898,6 @@ export function dataErrorResult(error: DataError): DataToolResult {
 const ok = (structured: Record<string, unknown>): DataToolResult =>
   ({ content: [{ type: "text", text: JSON.stringify(structured) }], structuredContent: structured });
 
-/** One tool call. Arguments are checked against the advertised schema first;
- * every failure after that is a structured DataError the model can act on. */
 export async function runDataTool(ctx: DataContext, name: string, args: Record<string, unknown>, onCardReady?: (card: DataCard) => void): Promise<DataToolResult> {
   const problem = dataToolCallProblem(name, args);
   if (problem) return dataErrorResult({ code: "invalid_input", message: problem });

@@ -1,10 +1,3 @@
-// Teammate coordination on the job runtime (docs/runtime-contract.md), end
-// to end: the real server, the scripted fake Claude
-// (server/testing/room-handoff-agent.ts) as every engine. Clive is the Chief
-// (Leadership, managing Engineering); Mira is the teammate. Graded on
-// runtime state (DATA_DIR/runtime.db read with node:sqlite), the stored
-// chats and what each fake turn was told, never on model judgment. Each
-// scenario runs on its own isolated server.
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -19,13 +12,9 @@ import { hostTimeout } from "./testing/host-timeout.ts";
 import { ownTurnText } from "./testing/room-handoff-agent.ts";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-/** Every resume of a requester opens with this. */
 const SETTLED = "Your downstream room requests have settled.";
-/** The report envelope's opening (composeReport). */
 const REPORT_FROM_MIRA = "[OpenMausBot report from @Mira";
-/** The first line of a turn a restart cut and ran again (restartNote). */
 const RERUN_NOTE = "OpenMausBot restarted while your previous turn here was running";
-/** What a requester hears about teammates a restart cut. */
 const TEAMMATES_CUT = "A restart cut these teammates' turns";
 
 const jsonl = (path: string): any[] => existsSync(path)
@@ -37,8 +26,6 @@ interface RuntimeDb {
   events: Array<{ assignmentId: string; kind: string; detail?: string }>;
 }
 
-/** One read-only snapshot of DATA_DIR/runtime.db: every assignment record
- * (the json column, as the runtime stores it) and every event. */
 function readRuntimeDb(dataDir: string): RuntimeDb {
   const path = join(dataDir, "runtime.db");
   if (!existsSync(path)) return { assignments: [], events: [] };
@@ -54,12 +41,9 @@ function readRuntimeDb(dataDir: string): RuntimeDb {
   }
 }
 
-/** Every text a chat row carries: its label, its output, its words. */
 const chipText = (message: any): string => [message.tool?.name, message.tool?.output, message.text].filter(Boolean).join("\n");
 
 async function scenario(test: (f: any) => Promise<void>) {
-  // The runtime path, through launchVerificationServer's passthrough; the
-  // same env restarts the fixture server on the same data.
   const parentEnv: NodeJS.ProcessEnv = { ...process.env };
   const session = await launchVerificationServer(parentEnv, undefined, undefined, undefined, undefined, { scripted: true });
   const url = session.info.url;
@@ -72,7 +56,7 @@ async function scenario(test: (f: any) => Promise<void>) {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000) });
       const raw = await response.text();
       let parsed: any = raw;
-      try { parsed = JSON.parse(raw); } catch { /* text */ }
+      try { parsed = JSON.parse(raw); } catch {}
       return { status: response.status, body: parsed };
     };
     const cli = (...args: string[]) => runControlOmb([...args, "--url", url]) as Promise<any>;
@@ -88,34 +72,24 @@ async function scenario(test: (f: any) => Promise<void>) {
     };
     writeFileSync(planPath, JSON.stringify(plan));
 
-    /** The person's own line, from the app, into a bot's conversation. */
     const say = async (botId: string, threadId: string, text: string) => {
       const sent = await api("POST", `/api/bots/${botId}/messages`, { text, threadId });
       expect(sent.status, JSON.stringify(sent.body)).toBeLessThan(300);
       return sent.body;
     };
     const db = () => readRuntimeDb(dataDir);
-    // The Chief's own roots: every person's turn is a root now, a teammate's
-    // standing turn (S4's hold) included.
     const roots = () => db().assignments.filter((row) => !row.parentId && row.assignee?.botId === clive.id);
     const children = () => db().assignments.filter((row) => row.parentId);
     const eventsOf = (id: string) => db().events.filter((event) => event.assignmentId === id);
-    /** Every scripted turn a fake Claude bot ran, in order. */
     const turns = (botId?: string): any[] => jsonl(`${planPath}.evidence.jsonl`).filter((turn) => !botId || turn.botId === botId);
     const turn = (key: string) => turns().find((candidate) => candidate.planKey === key);
-    /** What a turn itself was asked, after any replayed history. */
     const own = (record: any): string => ownTurnText(record?.prompt);
-    /** The same, after the harness's own time line that opens every turn:
-     * what the coordinator composed, from its first line. */
     const body = (record: any): string => own(record).replace(/^\s*Current time when this message was sent:[^\n]*\n+/, "");
-    /** Everything the turn's process could read: its instructions and its prompt. */
     const told = (record: any): string => `${record?.system ?? ""}\n${JSON.stringify(record?.prompt ?? "")}`;
     const messages = async (threadId: string): Promise<any[]> => (await api("GET", `/api/threads/${threadId}/messages?limit=300`)).body.messages ?? [];
     const chips = async (threadId: string, text: string) => (await messages(threadId)).filter((message) => chipText(message).includes(text));
     const said = async (threadId: string, text: string) => (await messages(threadId))
       .filter((message) => message.role === "bot" && message.kind === "text" && String(message.text).includes(text)).length;
-    /** The Chief's one final reply landed; a root that ends any other way
-     * fails this at once, with its outcome, instead of after the poll. */
     const final = async (threadId: string, text: string, timeout = 30_000) => {
       const ended = () => roots().find((row) => row.status === "failed" || row.status === "cancelled");
       await expect.poll(async () => (await said(threadId, text)) === 1 || ended() !== undefined, { timeout }).toBe(true);
@@ -126,8 +100,6 @@ async function scenario(test: (f: any) => Promise<void>) {
     const open = (name: string) => writeFileSync(gate(name), "open");
     const ready = (name: string) => join(dataDir, `${name}.ready`);
     const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    /** Stop this server as a quit or update would (SIGTERM) and start it
-     * again on the same data and port. */
     const restart = async (signal: NodeJS.Signals) => {
       await waitForExit(server, { signal });
       const env = verificationServerEnvironment(parentEnv, dataDir, Number(new URL(url).port));
@@ -143,8 +115,7 @@ async function scenario(test: (f: any) => Promise<void>) {
       await test({ api, clive, mira, dataDir, script, say, db, roots, children, eventsOf, turns, turn, own, body, told, messages, chips, said, final,
         gate, open, ready, settle, restart });
     } catch (error) {
-      // What the fakes were told and what the chats hold, for a failure
-      // that only says a poll never matched.
+      // What the fakes were told and what the chats hold, for a failure that only says a poll never matched.
       const names: Record<string, string> = { [clive.id]: "Clive", [mira.id]: "Mira" };
       const summary = {
         turns: turns().map((record) => ({ bot: names[record.botId] ?? record.botId, planKey: record.planKey, unplanned: record.unplanned,
@@ -157,8 +128,6 @@ async function scenario(test: (f: any) => Promise<void>) {
       console.error(`runtime coordination fixture state:\n${JSON.stringify(summary, null, 1)}`);
       throw error;
     }
-    // No bot ever ran a turn its script did not plan: no duplicate
-    // dispatch, no resume nobody expected.
     expect(turns().filter((record) => record.unplanned).map((record) => own(record).slice(0, 300))).toEqual([]);
   } finally {
     if (restarted) await waitForExit(server, { signal: "SIGTERM" });
@@ -166,9 +135,6 @@ async function scenario(test: (f: any) => Promise<void>) {
   }
 }
 
-// S1. The person asks Clive for a small job; Clive hands it to Mira; Mira's
-// turn opens with the harness-written assignment envelope; her reply comes
-// back as one report in one resume of Clive, and the record says so.
 it("S1 assigns a teammate under the envelope and resumes the Chief once with the report", () => scenario(async (f) => {
   const request = "S1-JOB: have Mira export the invoices to CSV and own the result.";
   const brief = "S1-BRIEF: export the invoices to CSV and report the row count.";
@@ -179,26 +145,21 @@ it("S1 assigns a teammate under the envelope and resumes the Chief once with the
   const job = f.clive.activeTaskId;
   await f.say(f.clive.id, job, request);
 
-  // Mira's turn opened with the envelope: the mark, who asked, the brief.
   await expect.poll(() => f.turns(f.mira.id).map((record: any) => record.planKey), { timeout: 30_000 }).toEqual(["M1"]);
   const assignment = f.own(f.turn("M1"));
   expect(assignment).toContain(ENVELOPE_MARK);
   expect(assignment).toContain("Clive");
   expect(assignment).toContain(brief);
-  // The person's chat shows the result chip once, and Clive gives one final answer.
   await expect.poll(async () => (await f.messages(job)).filter((message: any) => message.tool?.name === "Mira replied").length, { timeout: 30_000 }).toBe(1);
   await f.final(job, "S1-FINAL", 45_000);
   await expect.poll(() => f.roots()[0]?.status, { timeout: 15_000 }).toBe("completed");
   expect(f.turns(f.mira.id).map((record: any) => record.planKey)).toEqual(["M1"]);
-  // Clive ran exactly twice: the assignment, then one resume with the report.
   expect(f.turns(f.clive.id).map((record: any) => [record.planKey, record.resumed])).toEqual([["C0", false], ["C1", true]]);
   const resume = f.told(f.turn("C1"));
   expect(resume).toContain(SETTLED);
   expect(resume).toContain(REPORT_FROM_MIRA);
   expect(resume).toContain("S1-RESULT: exported 42 rows");
-  // The person's chat shows the result chip once.
   expect((await f.messages(job)).filter((message: any) => message.tool?.name === "Mira replied")).toHaveLength(1);
-  // The record: one root, one child, both completed, both with events.
   expect(existsSync(join(f.dataDir, "runtime.db"))).toBe(true);
   const { assignments } = f.db();
   expect(assignments).toHaveLength(2);
@@ -212,14 +173,11 @@ it("S1 assigns a teammate under the envelope and resumes the Chief once with the
   expect(f.eventsOf(child.id).map((event: any) => event.kind)).toEqual(expect.arrayContaining(["enqueued", "started", "settled", "reported"]));
 }), hostTimeout(60_000));
 
-// S2. Mira ends on a question. The person sees it where the work was asked
-// for, Mira's record parks on it, and the answer typed into her work thread
-// is carried into her next turn as a harness-written quote, never as an
-// ordinary turn of its own. Her finished reply then resumes Clive once.
-it("S2 parks a teammate on NEEDS INPUT, carries the person's answer into her next turn, and resumes the Chief once", () => scenario(async (f) => {
+it("S2 parks a teammate on NEEDS INPUT, passes her question to the Chief once, carries the person's answer into her next turn, and resumes the Chief with the result", () => scenario(async (f) => {
   const brief = "S2-BRIEF: tag the release in the repository and report the tag.";
   f.script(f.clive.id,
     { key: "C0", match: ["S2-JOB"], steps: [{ arguments: { bot_ids: [f.mira.id], message: brief } }], reply: "C0: Mira is tagging it." },
+    { key: "C-ASKED", match: ["stopped on a question for", "[OpenMausBot question from @Mira", "which repository?"], reply: "C-ASKED: Mira needs the repository." },
     { key: "C1", match: [SETTLED, REPORT_FROM_MIRA], reply: "S2-FINAL: the release is tagged." });
   f.script(f.mira.id,
     { key: "M2", match: ["S2-BRIEF", "The person answered"], reply: "S2-RESULT: tagged v1.2.0 in the main repository." },
@@ -227,7 +185,6 @@ it("S2 parks a teammate on NEEDS INPUT, carries the person's answer into her nex
   const job = f.clive.activeTaskId;
   await f.say(f.clive.id, job, "S2-JOB: have Mira tag the release and own the result.");
 
-  // Mira's record parks; the person's chat says what she needs.
   await expect.poll(() => f.children()[0]?.status, { timeout: 30_000 }).toBe("needs_input");
   const parked = f.children()[0];
   expect(parked).toMatchObject({ status: "needs_input", question: expect.stringContaining("which repository?") });
@@ -236,12 +193,10 @@ it("S2 parks a teammate on NEEDS INPUT, carries the person's answer into her nex
   expect(work).not.toBe(f.mira.activeTaskId);
   await expect.poll(async () => (await f.chips(job, "needs your input")).length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
   expect((await f.chips(job, "needs your input")).some((message: any) => chipText(message).includes("which repository?"))).toBe(true);
-  // Nothing resumed Clive on the question.
-  expect(f.turns(f.clive.id).map((record: any) => record.planKey)).toEqual(["C0"]);
-  expect(f.roots()[0].status).toBe("waiting");
+  await expect.poll(async () => await f.said(job, "C-ASKED: Mira needs the repository.") === 1 && f.roots()[0]?.status === "waiting", { timeout: 30_000 }).toBe(true);
+  const chiefTurns = () => (f.turns(f.clive.id) as Array<{ planKey?: string; resumed?: boolean }>).map((record) => [record.planKey, record.resumed]);
+  expect(chiefTurns()).toEqual([["C0", false], ["C-ASKED", false]]);
 
-  // The person answers in Mira's work thread, the route a person uses to
-  // message a thread. The answer rides her next assignment turn.
   await f.say(f.mira.id, work, "the main one");
   await expect.poll(() => f.turns(f.mira.id).map((record: any) => record.planKey), { timeout: 30_000 }).toEqual(["M1", "M2"]);
   expect(f.turns(f.mira.id).map((record: any) => record.threadId)).toEqual([work, work]);
@@ -250,13 +205,11 @@ it("S2 parks a teammate on NEEDS INPUT, carries the person's answer into her nex
   expect(answered).toContain('The person answered: "the main one"');
   await f.final(job, "S2-FINAL", 45_000);
   await expect.poll(() => f.roots()[0]?.status, { timeout: 15_000 }).toBe("completed");
-  // No ordinary turn ran on her thread for the person's words: two turns, both assignment turns.
   expect(f.turns(f.mira.id).map((record: any) => record.planKey)).toEqual(["M1", "M2"]);
-  // Clive resumed once, with the report; the record settled.
-  expect(f.turns(f.clive.id).map((record: any) => [record.planKey, record.resumed])).toEqual([["C0", false], ["C1", true]]);
+  expect(chiefTurns()).toEqual([["C0", false], ["C-ASKED", false], ["C1", true]]);
+  expect(f.told(f.turn("C1"))).not.toContain("[OpenMausBot question from @Mira");
   expect(f.told(f.turn("C1"))).toContain(REPORT_FROM_MIRA);
   expect(f.told(f.turn("C1"))).toContain("S2-RESULT: tagged v1.2.0");
-  // The answer travelled in that turn and is cleared with it; the events keep the record.
   expect(f.children()[0]).toMatchObject({ status: "completed", outcome: "done", executions: 2 });
   expect(f.children()[0].answer).toBeUndefined();
   expect(f.children()[0].question).toBeUndefined();
@@ -264,14 +217,11 @@ it("S2 parks a teammate on NEEDS INPUT, carries the person's answer into her nex
   expect((await f.messages(job)).filter((message: any) => message.tool?.name === "Mira replied")).toHaveLength(1);
 }), hostTimeout(60_000));
 
-// S2b. A question parked across a restart is shown once: the restart parks
-// it again (contract §5) but posts no second chip and marks nothing unread
-// the person already read. While it waits, list_threads and close_thread
-// say the thread waits on the person, not that it is queued or running.
-it("S2b keeps one question chip across a restart and names the parked thread as waiting on the person", () => scenario(async (f) => {
+it("S2b resumes the Chief once with a parked question, keeps one question chip across a restart and names the parked thread as waiting on the person", () => scenario(async (f) => {
   const brief = "S2B-BRIEF: tag the release in the repository and report the tag.";
   f.script(f.clive.id,
-    { key: "C0", match: ["S2B-JOB"], steps: [{ arguments: { bot_ids: [f.mira.id], message: brief } }], reply: "C0: Mira is tagging it." });
+    { key: "C0", match: ["S2B-JOB"], steps: [{ arguments: { bot_ids: [f.mira.id], message: brief } }], reply: "C0: Mira is tagging it." },
+    { key: "C-ASKED", match: ["stopped on a question for", "[OpenMausBot question from @Mira", "which repository?"], reply: "C-ASKED: Mira needs the repository." });
   f.script(f.mira.id, { key: "M1", match: ["S2B-BRIEF"], reply: "I can tag it once I know where.\nNEEDS INPUT: which repository?" });
   const job = f.clive.activeTaskId;
   await f.say(f.clive.id, job, "S2B-JOB: have Mira tag the release and own the result.");
@@ -279,8 +229,8 @@ it("S2b keeps one question chip across a restart and names the parked thread as 
   const parked = f.children()[0];
   const work = parked.assignee.destination.threadId as string;
   await expect.poll(async () => (await f.chips(job, "needs your input")).length, { timeout: 15_000 }).toBe(1);
+  await expect.poll(async () => await f.said(job, "C-ASKED: Mira needs the repository.") === 1 && f.roots()[0]?.status === "waiting", { timeout: 30_000 }).toBe(true);
 
-  // The person reads both conversations, then the app restarts.
   const unread = async (botId: string, threadId: string) => ((await f.api("GET", "/api/bots?messages=0")).body.bots as any[])
     .find((bot) => bot.id === botId)?.tasks.find((task: any) => task.threadId === threadId)?.unread === true;
   expect((await f.api("POST", `/api/bots/${f.clive.id}/read`, { threadId: job })).status).toBe(200);
@@ -289,11 +239,13 @@ it("S2b keeps one question chip across a restart and names the parked thread as 
   await expect.poll(() => f.eventsOf(parked.id).some((event: any) => event.kind === "restart_reconciled"), { timeout: 15_000 }).toBe(true);
   await f.settle(500);
   expect(f.children()[0]).toMatchObject({ status: "needs_input", question: expect.stringContaining("which repository?") });
+  expect((f.turns(f.clive.id) as Array<{ planKey?: string }>).filter((record) => record.planKey === "C-ASKED")).toHaveLength(1);
+  const resumes = (f.eventsOf(f.roots()[0].id) as Array<{ kind: string; detail?: string }>).filter((event) => event.kind === "resume_due");
+  expect(resumes.map((event) => event.detail)).toEqual(["resume: a teammate asks"]);
   expect(await f.chips(job, "needs your input")).toHaveLength(1);
   expect(await unread(f.clive.id, job)).toBe(false);
   expect(await unread(f.mira.id, work)).toBe(false);
 
-  // Clive, asked in a conversation of its own, reads the parked thread's state.
   const check = (await f.api("POST", `/api/bots/${f.clive.id}/tasks`, { title: "Check on Mira" })).body.task.threadId as string;
   f.script(f.clive.id, { key: "C1", match: ["S2B-CHECK"], reply: "C1: checked.", steps: [
     { tool: "list_threads", arguments: {} },
@@ -306,16 +258,12 @@ it("S2b keeps one question chip across a restart and names the parked thread as 
   expect(refused).toContain("waiting on the person's answer");
 }), hostTimeout(90_000));
 
-// S3. A quit or update (SIGTERM) cuts Mira's turn. After the restart she
-// runs again exactly once, told to check what she already did; her record
-// counts the restart; Clive is resumed once, told which teammate was cut.
 it("S3 runs a cut teammate turn again once after a restart and resumes the Chief with the report", () => scenario(async (f) => {
   const brief = "S3-BRIEF: run the migration and report.";
   f.script(f.clive.id,
     { key: "C0", match: ["S3-JOB"], steps: [{ arguments: { bot_ids: [f.mira.id], message: brief } }], reply: "C0: Mira is migrating." },
     { key: "C1", match: [SETTLED, REPORT_FROM_MIRA], reply: "S3-FINAL: migrated after the restart." });
-  // The rerun is the more specific entry and sits first, so the cut turn
-  // (which may leave no evidence) can never swallow it.
+  // The rerun is the more specific entry and sits first, so the cut turn (which may leave no evidence) never swallows it.
   f.script(f.mira.id,
     { key: "M-RERUN", match: ["S3-BRIEF", RERUN_NOTE], reply: "S3-RESULT: migration applied once." },
     { key: "M-CUT", match: ["S3-BRIEF"], readyFile: f.ready("mira"), gateFile: f.gate("mira"), reply: "never" });
@@ -329,7 +277,6 @@ it("S3 runs a cut teammate turn again once after a restart and resumes the Chief
   await f.restart("SIGTERM");
   f.open("mira");
 
-  // Mira ran again exactly once, opening on the restart note.
   await expect.poll(() => f.turns(f.mira.id).map((record: any) => record.planKey), { timeout: 30_000 }).toEqual(["M-RERUN"]);
   const rerun = f.body(f.turn("M-RERUN")).trimStart();
   expect(rerun.startsWith(RERUN_NOTE), rerun.slice(0, 300)).toBe(true);
@@ -343,7 +290,6 @@ it("S3 runs a cut teammate turn again once after a restart and resumes the Chief
   await expect.poll(() => f.roots()[0]?.status, { timeout: 15_000 }).toBe("completed");
   await f.settle(500);
   expect(f.turns(f.mira.id).map((record: any) => record.planKey)).toEqual(["M-RERUN"]);
-  // Clive resumed once, with the report, and heard what the restart did.
   expect(f.turns(f.clive.id).map((record: any) => [record.planKey, record.resumed])).toEqual([["C0", false], ["C1", true]]);
   const resume = f.told(f.turn("C1"));
   expect(resume).toContain(REPORT_FROM_MIRA);
@@ -356,9 +302,6 @@ it("S3 runs a cut teammate turn again once after a restart and resumes the Chief
   expect((await f.messages(job)).filter((message: any) => message.tool?.name === "Mira replied")).toHaveLength(1);
 }), hostTimeout(90_000));
 
-// S4. Mira's one slot is busy, so Clive's assignment to her queues. The
-// person stops Clive's conversation: the queued work is cancelled as
-// stopped, Clive's own record is cancelled, and nothing resumes him.
 it("S4 cancels queued work and the Chief's record when the person stops the conversation, and resumes nothing", () => scenario(async (f) => {
   expect((await f.api("PATCH", "/api/config", { threads: { maxConcurrentPerBot: 1 } })).status).toBe(200);
   f.script(f.clive.id,
@@ -378,7 +321,6 @@ it("S4 cancels queued work and the Chief's record when the person stops the conv
     await f.settle(500);
     expect(f.children()[0]).toMatchObject({ status: "queued", executions: 0 });
 
-    // The person stops Clive's conversation.
     expect((await f.api("POST", `/api/bots/${f.clive.id}/interrupt`, { threadId: job })).status).toBe(200);
     await expect.poll(() => f.children()[0]?.status, { timeout: 15_000 }).toBe("cancelled");
     expect(f.children()[0]).toMatchObject({ status: "cancelled", outcome: "stopped", executions: 0 });
@@ -386,7 +328,6 @@ it("S4 cancels queued work and the Chief's record when the person stops the conv
     expect(f.roots()[0]).toMatchObject({ status: "cancelled", outcome: "stopped" });
     expect(f.eventsOf(f.children()[0].id).map((event: any) => event.kind)).toContain("cancelled");
 
-    // Mira's slot frees; the cancelled work never runs and nothing resumes Clive.
     f.open("hold");
     await expect.poll(() => f.turns(f.mira.id).map((record: any) => record.planKey), { timeout: 30_000 }).toEqual(["M-HOLD"]);
     await f.settle(1_500);

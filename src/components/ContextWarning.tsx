@@ -1,10 +1,3 @@
-// The nearly-full-context warning and its "Compact now", for a bot's 1:1
-// header and for a room's roster (lib/context-warning.ts says where the
-// readings come from). Both buttons call the compaction the server already
-// has: a 1:1 thread's POST /api/bots/:id/compact (a summary of older
-// exchanges, history kept), and a room member's
-// POST /api/groups/:id/members/:botId/compact (its next turn in the room
-// starts on a fresh session with the room's recent messages).
 import { useState } from "react";
 import { Gauge } from "lucide-react";
 
@@ -16,7 +9,6 @@ import { api, useStore, type Bot, type Group, type Message } from "@/state/store
 const pill = "flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-1 text-[12.5px] text-ink";
 const action = "rounded-full px-1.5 font-medium text-accent hover:underline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline";
 
-/** One request at a time per control; a failure lands in the chat's error banner. */
 function useCompact() {
   const { dispatch } = useStore();
   const [pending, setPending] = useState(false);
@@ -30,7 +22,6 @@ function useCompact() {
   return { pending, run };
 }
 
-/** Pure markup for the 1:1 header, for tests. */
 export function ThreadContextWarningView({ name, percent, busy, pending, onCompact }: {
   name: string; percent: number; busy: boolean; pending: boolean; onCompact: () => void;
 }) {
@@ -47,7 +38,6 @@ export function ThreadContextWarningView({ name, percent, busy, pending, onCompa
   );
 }
 
-/** Beside the 1:1 header's controls while the thread's context is at 80% or more. */
 export function ThreadContextWarning({ bot, messages }: { bot: Bot; messages: readonly Message[] }) {
   const usage = bot.tasks?.find((task) => task.threadId === bot.threadId)?.usage;
   const warning = threadContextWarning(usage, messages);
@@ -59,7 +49,6 @@ export function ThreadContextWarning({ bot, messages }: { bot: Bot; messages: re
   );
 }
 
-/** The roster avatar's mark for a member at 80% or more in this room. */
 export function RoomContextBadge({ percent }: { percent: number }) {
   return (
     <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border border-app bg-warning"
@@ -67,7 +56,6 @@ export function RoomContextBadge({ percent }: { percent: number }) {
   );
 }
 
-/** Pure markup for the room strip, for tests. */
 export function RoomContextWarningsView({ warnings, pendingBotId, onCompact }: {
   warnings: ReturnType<typeof roomContextWarnings>;
   pendingBotId: string | null;
@@ -92,7 +80,6 @@ export function RoomContextWarningsView({ warnings, pendingBotId, onCompact }: {
   );
 }
 
-/** Under a room's header: each member at 80% or more of its context here. */
 export function RoomContextWarnings({ group, members }: { group: Group; members: readonly Bot[] }) {
   const warnings = roomContextWarnings(group, members);
   const { pending, run } = useCompact();

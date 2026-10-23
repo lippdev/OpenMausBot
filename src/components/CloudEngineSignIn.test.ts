@@ -63,10 +63,8 @@ it("offers the three ways in and says plainly whose plan limits apply", () => {
   expect(html).toContain("data-cloud-sign-in");
   for (const label of ["Claude", "Use your Claude subscription.", "ChatGPT", "Use your ChatGPT plan with Codex.", "Use an API key"]) expect(html).toContain(label);
   expect(html).toContain("plan&#x27;s limits apply to bots that work around the clock");
-  // OpenMausBot Cloud sells a plan called Max too: the recommendation names Anthropic's.
   expect(html).toContain("Anthropic&#x27;s Claude Max plan or an API key works best");
   expect(html).not.toMatch(/included/i);
-  // nothing is opened on the person's behalf
   expect(html).not.toContain("data-engine-setup");
 });
 
@@ -92,7 +90,7 @@ it("picks the person's own engine, never a local-model or read-only one, and say
   expect(cloudEngine([local, company], "claudeAgent")).toBeUndefined();
   store.instances = [codex];
   choose("claude");
-  expect(render().html).toContain("not available on My Cloud yet");
+  expect(render().html).toContain("isn&#x27;t available in the Cloud yet");
 });
 
 it("offers Grok as a third choice when this Cloud computer has the Grok CLI, and opens its code sign-in", () => {
@@ -100,7 +98,6 @@ it("offers Grok as a third choice when this Cloud computer has the Grok CLI, and
   store.instances = [claude, codex, grok];
   const { html } = render();
   for (const label of ["Claude", "ChatGPT", "Grok", "Use your grok.com subscription with Grok Build.", "Use an API key"]) expect(html).toContain(label);
-  // The third tile, after ChatGPT and before the API key, in a row of three.
   expect(html.indexOf('data-cloud-choice="grok"')).toBeGreaterThan(html.indexOf('data-cloud-choice="codex"'));
   expect(html.indexOf('data-cloud-choice="grok"')).toBeLessThan(html.indexOf('data-cloud-choice="api-key"'));
   expect(html).toContain("grid-cols-3");
@@ -114,4 +111,14 @@ it("leaves Grok out where this Cloud computer has no Grok CLI (an older image)",
   expect(html).not.toContain('data-cloud-choice="grok"');
   expect(html).toContain("grid-cols-2");
   expect(html).toContain("Use an API key");
+});
+
+it("says a Claude connected through an API key runs on that key, not on a subscription", () => {
+  store.instances = [engine("claude", "claudeAgent", "paste-code", { snapshot: { state: "available", authenticated: true, account: { method: "api-key" } } }), codex];
+  const keyed = render().html;
+  expect(keyed).toContain("Runs on your API key.");
+  expect(keyed).not.toContain("Use your Claude subscription.");
+  store.instances = [engine("claude", "claudeAgent", "paste-code", { snapshot: { state: "available", authenticated: true, account: { method: "login", email: "a@example.test" } } }), codex];
+  f.values = [];
+  expect(render().html).toContain("Use your Claude subscription.");
 });

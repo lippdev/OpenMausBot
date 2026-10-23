@@ -1,6 +1,5 @@
 import { track } from "@/lib/analytics";
 import { OrganizationIdentity } from "./OrganizationIdentity";
-import { approvalCardOutcome } from "./ApprovalCard";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -14,7 +13,6 @@ import {
   ClipboardCopy,
   Copy,
   Crown,
-  FolderMinus,
   FolderOpen,
   FolderPlus,
   Library,
@@ -31,28 +29,31 @@ import {
   Search,
   Share2,
   SlidersHorizontal,
+  TextQuote,
   Trash2,
   Users,
   X,
 } from "lucide-react";
 import { api, useStore, formatTime, visibleMessages, currentTaskBot, botOpensTo, openBot, openThread, type Action, type AppState, type Bot, type BotProject, type Group, type InstanceInfo, type Message } from "@/state/store";
 import { approvalModeFor } from "../../shared/approval-mode";
-import { avatarCropRadius, botAvatarProfile } from "../../shared/bot-avatar";
-import { peerLine } from "@/lib/peer-message";
 import { liveActivityLabel } from "@/lib/live-activity";
 import { llmThreadTitlesEnabled } from "@/lib/feature-flags";
 
 import { BotAvatar } from "./Avatar";
+import { BotModelBadge, BotModelMark } from "./BotModelBadge"; import { SidebarBotRole } from "./BotRole";
 import { stateForBot } from "@/lib/mascot";
 import { cn } from "@/lib/cn";
 import { searchMatchesThreads, useSearchDisclosure } from "@/lib/search-disclosure";
 import { useHeldMenuMotion, useMenuMotion } from "./MenuMotion";
 import { lastNonReceipt } from "@/lib/receipts";
-import { activityPreview, botEngine } from "@/lib/failed-turn";
+import { botPreview, groupPreview } from "./sidebar-preview";
 import { activeLocale, t } from "@/lib/i18n";
 import { copyText } from "@/lib/copy-text";
 import type { LocaleKey } from "@/locales";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { BulkSelectFilters, ThreadListFooter, deleteThreadsInBulk, useBulkSelect } from "./BulkSelectBar";
+import { BotDeleteMenuItem, useDeleteAllThreads } from "./BotMenuDelete"; import { HideDefaultBotItem } from "./DefaultBotControls";
+import { StackedMauses } from "./StackedMauses";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import { WorkingDots } from "./WorkingIndicator";
 import { nextRename } from "@/lib/rename";
@@ -65,23 +66,19 @@ import { ShareTeamDialog } from "./ShareTeamDialog";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
 import { TeamDialog } from "./TeamDialog";
 import { RenameTitle } from "./RenameTitle";
-import { BotPickerList } from "./BotPickerList";
 import { BotProjectDialog, FolderActions, FolderIcon, navigateThreadMenu } from "./BotProjects";
 import { NewTaskFolderDialog } from "./NewTaskFolderDialog";
 import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
 import { draggedFolder, FOLDER_DRAG_TYPE, moveFolder, placeFolder } from "@/lib/folder-order";
 import { botUnreadThreadIds, folderUnreadThreadIds, markBotRead, markFolderRead } from "@/lib/folder-read";
-import { orderedThreadList, SidebarThreadRow, stampClock, threadRecency, useRelativeNow, useSnoozeExpiry, visibleSidebarThreads } from "./SidebarThreadRow";
+import { HelperThreadGroup, orderedThreadList, partitionHelperThreads, SidebarThreadRow, stampClock, threadRecency, threadRowActions, useRelativeNow, useRevealedThreadRow, useSnoozeExpiry, visibleSidebarThreads } from "./SidebarThreadRow";
 import {
   loadCollapsedSections,
   loadSectionOrder,
   loadSidebarAttentionPinned,
-  loadSidebarWidth,
-  clampSidebarWidth,
   saveCollapsedSections,
   saveSectionOrder,
   saveSidebarAttentionPinned,
-  saveSidebarWidth,
   setSidebarDensity,
   toggleCollapsedSection,
   useSidebarDensity,
@@ -96,7 +93,9 @@ import {
   CHANNELS_SECTION_ID,
   PINNED_SECTION_ID,
   PINNED_THREADS_SECTION_ID,
+  SIMPLE_FIXED_SECTION_IDS,
   TOOLS_SECTION_ID,
+  keepFixedSectionSlots,
   mergeSectionOrder,
   moveSection,
   orderedSidebarSections,
@@ -105,11 +104,10 @@ import {
   placeSection,
   pinnedCircleThreadListVisible,
   sameSectionOrder,
-  sidebarConnectorPreview,
-  sidebarGoalRunPreview,
   sidebarLayoutInteractive,
   sidebarSectionCollapsed,
   sidebarSectionLabel,
+  simpleSidebarSections,
   userSectionId,
   userSectionName,
   type SectionDropPlace,
@@ -117,13 +115,16 @@ import {
 import { sidebarSectionAttention } from "@/lib/sidebar-attention";
 import { botListItemPointerIntent } from "@/lib/sidebar-selection";
 import { phoneSettingsAction, SidebarPhoneButton } from "./SidebarPhoneButton";
-import { SidebarAppsButton, SidebarFooterNav } from "./SidebarFooterNav";
+import { SidebarBottomButtons, SidebarFooterNav } from "./SidebarFooterNav";
 import { GlassBar, GlassScrollFrame, GlassScroller } from "./GlassScrollFrame";
 import { DesktopWorkspaceSwitcher } from "./DesktopWorkspaceSwitcher";
 import { useCloudOwner } from "./CloudOwner";
 import { SidebarProfileMenu } from "./SidebarProfileMenu";
 import { UpdateIndicator } from "./UpdateIndicator";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
+import { SidebarResizeHandle, useSidebarWidth } from "./SidebarResizeHandle";
+import { SIMPLE_RAIL_BUTTON, SIMPLE_TOP_BUTTON, SidebarEdgeToggle, SidebarSearchPill, SidebarSearchToggle } from "./SidebarSimpleTop";
+import { SidebarRailSeparator, SimpleRailFooter } from "./SidebarSimpleRail";
 import { useShowThreads } from "@/lib/thread-preferences";
 import { botShowsUnread } from "@/lib/bot-unread";
 import { attentionHasRunningWork, attentionJumpAction, attentionTriggerLabel, attentionUnpinAction, AttentionThreadRows, crossBotAttentionThreads, crossBotPinnedThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
@@ -132,17 +133,20 @@ import { SidebarPinnedThreadsPanel } from "./SidebarPinnedThreadsPanel";
 import { useLiveMedia } from "@/lib/live-call-media";
 import { LiveCallPill, liveBadgeFor } from "./LiveCallPill";
 import { ShortcutHint } from "./ShortcutHint";
-import { citationPreviewText } from "@/lib/citations";
-import { plainPreviewText } from "@/lib/plain-preview";
-import { isClientCancellation } from "../../shared/client-cancel";
-import { roomSpeakerIds, roomThreadSpeakerId, roomThreadWorking } from "@/lib/room-threads";
+import { roomThreadSpeakerId, roomThreadWorking } from "@/lib/room-threads";
 import { usePopoverDismiss } from "@/hooks/use-popover-dismiss";
 import { useAdvancedMode } from "@/lib/interface-mode";
+import { addBot } from "@/lib/add-bot"; import { useViewerEmail, useWelcomingBot } from "@/lib/default-bot";
+import { PinnedBotRoster, PinnedCircleThreadSection } from "./PinnedCircleThreads";
+import { archiveBotWithNotice, onArchiveNotice } from "./bot-archive";
+import { ArchivedBotsPanel, botConfirmCopy, type BotConfirmKind } from "./ArchivedBotsPanel"; import { MovedBotRows, useMoveToTeam } from "./MoveToTeam";
+import { NewRoomPanel } from "./SidebarNewRoomPanel";
+import { SectionPicker } from "./SidebarSectionPicker";
 
-/** Vertical centre of the macOS traffic lights, in CSS px from the window
- * top: electron/window-chrome.mjs sets trafficLightPosition.y = 16 and the
- * buttons are 14px tall. The sidebar's top row is twice this tall so its
- * centred controls sit on the lights' line. */
+export { PinnedBotCircle, PinnedCircleThreadPanel, PinnedCircleThreadSection } from "./PinnedCircleThreads";
+export { ArchivedBotRow, ArchivedBotsPanel, archivedDeleteAllCopy, botConfirmCopy, type BotConfirmKind } from "./ArchivedBotsPanel";
+
+/** Coupled to electron/window-chrome.mjs: trafficLightPosition.y = 16 and 14px-tall buttons. */
 export const MAC_TRAFFIC_LIGHT_CENTER_Y = 23;
 
 const SECTION_LABEL_KEYS: Record<string, LocaleKey> = {
@@ -152,39 +156,9 @@ const SECTION_LABEL_KEYS: Record<string, LocaleKey> = {
   [BOTS_SECTION_ID]: "sidebar.section.bots",
 };
 
-/** The four built-in section names come from the catalog; a section someone
- * named themselves is their text and stays exactly as typed. */
 function sectionLabel(id: string): string {
   const key = SECTION_LABEL_KEYS[id];
   return key ? t(key) : sidebarSectionLabel(id);
-}
-
-/** `visible` is the bot's visible branch (visibleMessages), which the row
- * already works out once per transcript. */
-function preview(bot: Bot, visible: Message[], instances: InstanceInfo[]): string {
-  if (bot.activity === "waiting-on-you") return t("sidebar.preview.waiting");
-  if (bot.waitingForTeammates) return t("sidebar.preview.waitingOnTeammate");
-  if (bot.busy) return t("sidebar.preview.working");
-  // the visible branch's tail — bot.messages holds every fork, so its last
-  // entry can belong to a version the user switched away from — read past
-  // the harness's receipts (digest, compaction) to the reply a person reads
-  const last = lastNonReceipt(visible);
-  if (!last) return "";
-  // a settled approval card says what happened, as the card itself does;
-  // its title is the question it asked, which nobody is waiting on now
-  if (last.kind === "options" && last.card) {
-    return (last.card.requestId && last.card.tool && !last.card.questionRequest && approvalCardOutcome(last.card)) || last.card.title;
-  }
-  // a failed turn reads as the chat row says it, never "error: …"
-  if (last.kind === "activity" && last.tool) return activityPreview(last.tool, botEngine(bot, instances), last.dataResult);
-  if (last.kind === "screen") return t("sidebar.preview.screenFrame");
-  if (last.kind === "connector" && last.connector) return sidebarConnectorPreview(last.connector, t);
-  // one line of what the reply says, never the Markdown that draws it
-  // (`**[repo](https://…)**` reads as "repo")
-  const peer = peerLine(last);
-  if (peer) return `${peer.name}: ${plainPreviewText(peer.body)}`;
-  if (last.role !== "user" && isClientCancellation(last.text ?? "")) return t("chat.turnStopped");
-  return plainPreviewText(citationPreviewText(last.text ?? ""));
 }
 
 interface MenuState {
@@ -193,68 +167,9 @@ interface MenuState {
   y: number;
 }
 
-/** The same point the bot row's context menu and "more" button already use. */
 function openBotContextMenu(onMenu: (menu: MenuState) => void, botId: string, event: React.MouseEvent) {
   event.preventDefault();
   onMenu({ botId, x: event.clientX, y: event.clientY });
-}
-
-function groupPreview(group: Group, bots: Bot[], instances: InstanceInfo[]): string {
-  // the open thread's speaker first, else one working in another thread
-  const speakerId = group.busyBotId ?? roomSpeakerIds(group)[0];
-  if (speakerId) {
-    return t("sidebar.preview.botWorking", {
-      name: bots.find((b) => b.id === speakerId)?.name ?? t("sidebar.preview.aBot"),
-    });
-  }
-  if (group.working) return t("sidebar.preview.teamWorking");
-  const last = lastNonReceipt(group.messages);
-  if (!last) return t("sidebar.preview.noMessages");
-  if (last.kind === "text" && last.role !== "user" && isClientCancellation(last.text ?? "")) {
-    const stopped = t("chat.turnStopped");
-    return last.from ? `${last.from.name}: ${stopped}` : stopped;
-  }
-  const text = last.kind === "activity" && last.tool
-    ? activityPreview(last.tool, botEngine(bots.find((bot) => bot.id === last.from?.botId), instances), last.dataResult)
-    : last.kind === "goal.run" && last.goalRun
-      ? sidebarGoalRunPreview(last.goalRun)
-      : last.kind === "connector" && last.connector
-        ? sidebarConnectorPreview(last.connector, t)
-        : (last.text ?? "");
-  const readable = plainPreviewText(citationPreviewText(text));
-  if (last.role === "user") return t("sidebar.preview.you", { text: readable });
-  return last.from ? `${last.from.name}: ${readable}` : readable;
-}
-
-/** A small member stack identifies a group without turning it into a card. */
-function StackedMauses({ members, density }: { members: Bot[]; density: SidebarDensity }) {
-  const iconOnly = density === "icons";
-  const slotSize = iconOnly ? "size-12" : density === "compact" ? "size-7" : "size-8";
-  const singleSize = iconOnly ? 44 : density === "compact" ? 26 : 32;
-  if (members.length <= 1) {
-    const b = members[0];
-    return (
-      <div className={cn("flex shrink-0 items-center justify-center", slotSize)}>
-        {b ? <BotAvatar bot={b} state="happy" size={singleSize} animated={false} /> : <Users size={24} className="text-ink-secondary" />}
-      </div>
-    );
-  }
-  const shown = members.slice(0, 2);
-  const extra = members.length - shown.length;
-  return (
-    <div className={cn("flex shrink-0 items-center justify-center", slotSize)}>
-      <div className="flex items-center -space-x-2.5">
-        {shown.map((b) => (
-          <BotAvatar key={b.id} bot={b} state="happy" size={iconOnly ? 30 : 20} animated={false} />
-        ))}
-        {extra > 0 && (
-          <span className="z-10 flex size-4 items-center justify-center rounded-full border border-hairline/40 bg-raised text-[9px] font-medium text-ink-secondary">
-            +{extra}
-          </span>
-        )}
-      </div>
-    </div>
-  );
 }
 
 export function GroupListItem({
@@ -266,28 +181,23 @@ export function GroupListItem({
 }: {
   group: Group;
   density: SidebarDensity;
-  /** Quiet rows: name and status only (see sidebar-preferences). */
   quiet?: boolean;
   query?: string;
   onMenu: (menu: { groupId: string; x: number; y: number }) => void;
 }) {
   const { state, dispatch } = useStore();
+  const advanced = useAdvancedMode();
   const selected = state.activeView === "chat" && state.selectedId === group.id;
-  // a search opens this room only when it has a matching thread to show,
-  // and clearing it puts the room back as it was (MOCA-293)
   const [threadsOpen, setThreadsOpen] = useSearchDisclosure(`group:${group.id}`, query ?? "", searchMatchesThreads(query ?? "", group.tasks), selected);
   const wasSelected = useRef(selected);
   useEffect(() => {
-    // Search can unmount the selected room. Only a new selection opens it;
-    // remounting must preserve the person's remembered disclosure choice.
     if (selected && !wasSelected.current) setThreadsOpen(true);
     wasSelected.current = selected;
   }, [selected]);
-  // one thread is the room itself; the disclosure and the list only earn
-  // their place once there is a second thread to show
   const hasThreadList = (group.tasks?.length ?? 1) > 1 || Boolean(query);
   const expanded = !group.dm && threadsOpen && density !== "icons" && hasThreadList;
-  // quiet rows keep the line only while the room reports work in progress
+  const simpleRow = !advanced && density === "comfortable";
+  const railTile = !advanced && density === "icons";
   const groupStatus = Boolean(group.busyBotId) || Boolean(group.working);
   const roomBusy = groupStatus;
   const members = group.memberIds
@@ -296,19 +206,16 @@ export function GroupListItem({
   const last = group.messages.at(-1);
   return (
     <>
-    <div className="group relative">
+    <div className={cn("group relative", railTile && "mx-auto w-[52px]")}>
     <button
       data-sidebar-group-row={group.id}
-      // with no thread list open, the row is the conversation being looked at
       aria-current={selected && !expanded ? "page" : undefined}
       onClick={() => dispatch({ type: "select", id: group.id })}
       onContextMenu={(e) => {
         e.preventDefault();
         onMenu({ groupId: group.id, x: e.clientX, y: e.clientY });
       }}
-      // the menu must be reachable without a pointer: Shift+F10, and the
-      // dedicated ContextMenu key (whose native event carries no useful
-      // coordinates) both open it centered on the row
+      // The ContextMenu key's native event carries no useful coordinates.
       onKeyDown={(e) => {
         if (e.key !== "ContextMenu" && !(e.shiftKey && e.key === "F10")) return;
         e.preventDefault();
@@ -317,26 +224,27 @@ export function GroupListItem({
       }}
       className={cn(
         "relative flex w-full items-center rounded-md text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/60",
-        density === "icons" ? "justify-center px-1 py-1.5" : density === "compact" ? "gap-1.5 py-1 pl-6 pr-9" : "gap-2 py-1.5 pl-6 pr-9",
+        density === "icons" ? (railTile ? "h-[52px] justify-center" : "justify-center px-1 py-1.5") : density === "compact" ? "gap-1.5 py-1 pl-6 pr-9" : simpleRow
+          ? cn("gap-2.5 py-2 pr-3 group-hover:pr-9 group-focus-within:pr-9 max-md:pr-9 touch:pr-9", !group.dm && hasThreadList ? "pl-6" : "pl-2") : "gap-2 py-1.5 pl-6 pr-9",
         selected && !expanded ? "bg-raised/70" : "hover:bg-raised/40",
       )}
       title={density === "icons" ? group.name : undefined}
       aria-label={density === "icons" ? group.name : undefined}
     >
-      <StackedMauses members={members} density={density} />
+      <StackedMauses members={members} density={railTile ? "comfortable" : density} large={simpleRow || railTile} />
       <div className={cn("min-w-0 flex-1", density === "icons" && "hidden")}>
         <div className="flex items-baseline justify-between gap-2">
-          <span className="truncate text-[14px] font-semibold text-ink">{group.name}</span>
+          <span className={cn("truncate text-[14px] text-ink", simpleRow ? "font-normal leading-[19px]" : "font-semibold")}>{group.name}</span>
           {selected && last && !expanded && <span className="shrink-0 text-[10px] text-ink-secondary">{formatTime(last.at)}</span>}
           {(expanded || (quiet && !groupStatus)) && group.unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {!expanded && (!quiet || groupStatus) && <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-[11px] text-ink-secondary">{groupPreview(group, state.bots, state.instances)}</span>
+          <span className={cn("truncate text-ink-secondary", simpleRow ? "text-[13px] leading-[18px]" : "text-[11px]")}>{group.description || groupPreview(group, state.bots, state.instances, advanced)}</span>
           {group.unread && <span className="size-2 shrink-0 rounded-full bg-accent" />}
         </div>}
       </div>
       {density === "icons" && group.unread && (
-        <span className="absolute bottom-1.5 right-1.5 size-2 rounded-full border border-panel bg-accent" />
+        <span className={cn("absolute size-2 rounded-full border border-panel bg-accent", railTile ? "right-1 top-1" : "bottom-1.5 right-1.5")} />
       )}
     </button>
     {!group.dm && density !== "icons" && hasThreadList && <button type="button" aria-label={t(expanded ? "task.collapseNamed" : "task.expandNamed", { name: group.name })} aria-expanded={expanded}
@@ -352,22 +260,10 @@ export function GroupListItem({
   );
 }
 
-/** Scroll the row of a thread the person asked to open into view, once the
- * switch has landed and that thread is the one on screen. `block: nearest`
- * keeps an already-visible row still. */
-function useRevealedThreadRow(reveal: AppState["revealThread"], currentThreadId: string | null) {
-  useEffect(() => {
-    if (!reveal || reveal.threadId !== currentThreadId) return;
-    const row = document.querySelector<HTMLElement>(`[data-sidebar-thread-row="${CSS.escape(reveal.threadId)}"]`);
-    row?.scrollIntoView({ block: "nearest" });
-  }, [reveal, currentThreadId]);
-}
-
 export function GroupThreadList({ group, selected, density = "comfortable", query = "" }: { group: Group; selected: boolean; density?: SidebarDensity; query?: string }) {
   const { state, dispatch } = useStore();
   const now = useRelativeNow();
   const [showAll, setShowAll] = useState(false);
-  // Each thread reports its own work and speaker: threads run side by side.
   const tasks = (group.tasks ?? [{ threadId: group.threadId, title: group.name, createdAt: group.createdAt }]).map((task) => {
     const speakerId = roomThreadSpeakerId(group, task.threadId);
     const waiting = Boolean(speakerId) && state.bots.find((bot) => bot.id === speakerId)?.activity === "waiting-on-you";
@@ -376,9 +272,10 @@ export function GroupThreadList({ group, selected, density = "comfortable", quer
       activity: waiting ? "waiting-on-you" as const : undefined,
     };
   });
-  const visible = orderedThreadList(visibleSidebarThreads(tasks, group.threadId, query, [], showAll));
+  const bulk = useBulkSelect();
+  const visible = orderedThreadList(visibleSidebarThreads(tasks, group.threadId, query, [], showAll || bulk.active));
+  const selection = bulk.forRows(visible);
   useRevealedThreadRow(state.revealThread, selected ? group.threadId : null);
-  // One set of row actions per room; they read the room as it is when used.
   const latest = useRef(group);
   latest.current = group;
   const groupId = group.id;
@@ -393,15 +290,14 @@ export function GroupThreadList({ group, selected, density = "comfortable", quer
   }), [groupId, dispatch]);
   const locale = activeLocale();
   return <div className="mb-2 space-y-0.5" role="group" aria-label={t("task.namedList", { name: group.name })}>
+    {bulk.active && <BulkSelectFilters rows={visible} selected={selection} now={now} onChange={bulk.setSelected} onDone={bulk.finish} />}
     {visible.map((task) => <SidebarThreadRow key={task.threadId} task={task} ownerId={group.id} current={selected && task.threadId === group.threadId} compact={density === "compact"}
-      now={stampClock(threadRecency(task), now)} locale={locale} {...actions} />)}
-    {!query && !showAll && tasks.length > visible.length && <button type="button" onClick={() => setShowAll(true)} className="inline-flex h-7 items-center self-start pl-6 pr-3 text-[13px] font-medium leading-4 text-ink-secondary hover:text-ink">{t("task.showAll", { count: tasks.length })}</button>}
+      now={stampClock(threadRecency(task), now)} locale={locale} {...actions} selectMode={bulk.active} checked={selection.has(task.threadId)} onToggleSelect={bulk.toggle} />)}
+    <ThreadListFooter bulk={bulk} rows={visible} selected={selection} total={tasks.length} canShowAll={!query && !showAll && tasks.length > visible.length} canSelect={tasks.length > 1 && !group.dm}
+      onShowAll={() => setShowAll(true)} maxDeletable={tasks.length - 1} freshConversation={false} onDelete={(threadIds) => deleteThreadsInBulk({ groupId }, threadIds, dispatch)} />
   </div>;
 }
 
-/** Copy for the room delete confirmation. Deleting a room drops its messages
- * and every thread in it and turns off the routines that run there; the bots
- * in it are untouched. Bot⇄bot rooms are labelled threads in the menu. */
 export function roomDeleteCopy(group: Pick<Group, "name" | "dm">) {
   const isBotChat = Boolean(group.dm);
   return {
@@ -431,12 +327,16 @@ function RoomContextMenu({
   const remoteClient = window.ogb?.remoteClient?.active === true;
   const group = shown ? state.groups.find((g) => g.id === shown.groupId) : undefined;
   const [renaming, setRenaming] = useState(false);
+  const [describing, setDescribing] = useState(false);
   const [draft, setDraft] = useState(group?.name ?? "");
+  const [descriptionDraft, setDescriptionDraft] = useState(group?.description ?? "");
 
   useEffect(() => {
     if (!menu) return;
     setDraft(state.groups.find((g) => g.id === menu.groupId)?.name ?? "");
+    setDescriptionDraft(state.groups.find((g) => g.id === menu.groupId)?.description ?? "");
     setRenaming(false);
+    setDescribing(false);
   }, [menu]);
   useEffect(() => {
     if (!menu) return;
@@ -461,6 +361,13 @@ function RoomContextMenu({
     if (name) dispatch({ type: "patchGroup", groupId: group.id, patch: { name } });
     onClose();
   };
+  const saveDescription = () => {
+    const trimmed = descriptionDraft.trim();
+    if (trimmed !== (group.description ?? "")) {
+      dispatch({ type: "patchGroup", groupId: group.id, patch: { description: trimmed } });
+    }
+    onClose();
+  };
   const top = Math.min(shown.y, window.innerHeight - 204);
   const left = Math.min(shown.x, window.innerWidth - 240);
   return createPortal(
@@ -470,7 +377,48 @@ function RoomContextMenu({
       style={{ top, left }}
       className={cn("fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60", motion.className)} {...motion.exitProps}
     >
-      {!remoteClient && (renaming ? (
+      {!remoteClient && describing ? (
+        <div className="flex items-center gap-1 px-2 py-1">
+          <input
+            autoFocus
+            value={descriptionDraft}
+            maxLength={120}
+            placeholder={t("sidebar.room.descriptionPlaceholder")}
+            aria-label={t("sidebar.room.descriptionAria", { name: group.name })}
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setDescriptionDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                saveDescription();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                onClose();
+              }
+            }}
+            className="min-w-0 flex-1 rounded-lg bg-raised px-2 py-1.5 text-[14px] text-ink focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          <button
+            type="button"
+            onClick={saveDescription}
+            aria-label={t("sidebar.room.saveDescription")}
+            title={t("common.save")}
+            className="flex size-8 shrink-0 items-center justify-center rounded-lg text-ink-secondary hover:bg-raised hover:text-ink"
+          >
+            <Check size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("common.cancel")}
+            title={t("common.cancel")}
+            className="flex size-8 shrink-0 items-center justify-center rounded-lg text-ink-secondary hover:bg-raised hover:text-ink"
+          >
+            <X size={15} />
+          </button>
+        </div>
+      ) : !remoteClient && (renaming ? (
         <div className="flex items-center gap-1 px-2 py-1">
           <input
             autoFocus
@@ -522,6 +470,18 @@ function RoomContextMenu({
           {isBotChat ? t("sidebar.room.renameChat") : t("sidebar.room.renameChannel")}
         </button>
       ))}
+      {!remoteClient && !renaming && !isBotChat && (
+        <button
+          onClick={() => {
+            setDescriptionDraft(group.description ?? "");
+            setDescribing(true);
+          }}
+          className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
+        >
+          <TextQuote size={16} className="text-ink-secondary" />
+          {t("sidebar.room.setDescription")}
+        </button>
+      )}
       {!remoteClient && !isBotChat && (
         <button
           onClick={() => {
@@ -559,215 +519,6 @@ function RoomContextMenu({
   );
 }
 
-/** Pick members and an optional Work/Personal/project context, then create. */
-function NewRoomPanel({ onClose }: { onClose: () => void }) {
-  const { state, dispatch } = useStore();
-  const [name, setName] = useState("");
-  const [section, setSection] = useState("");
-  const [picked, setPicked] = useState<Set<string>>(new Set());
-  const bots = state.bots.filter((b) => !b.hidden);
-  const toggle = (id: string) =>
-    setPicked((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  const create = () => {
-    if (!picked.size) return;
-    dispatch({
-      type: "createGroup",
-      memberIds: [...picked],
-      name: name.trim() || undefined,
-      section: section.trim() || undefined,
-    });
-    track("room_created", { members: picked.size, context: Boolean(section.trim()) });
-    onClose();
-  };
-  return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="w-[340px] rounded-2xl border border-hairline/50 bg-card p-4 shadow-2xl">
-        <div className="mb-3 text-[15px] font-semibold text-ink">{t("sidebar.newChannel.title")}</div>
-        <input
-          autoFocus
-          maxLength={100}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") create();
-            if (e.key === "Escape") onClose();
-          }}
-          placeholder={t("sidebar.newChannel.name")}
-          className="mb-3 w-full rounded-lg bg-raised/70 px-3 py-2 text-[14px] text-ink placeholder:text-ink-secondary focus:outline-none"
-        />
-        <input
-          value={section}
-          maxLength={60}
-          onChange={(e) => setSection(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") create();
-            if (e.key === "Escape") onClose();
-          }}
-          placeholder={t("sidebar.newChannel.context")}
-          aria-label={t("sidebar.newChannel.contextAria")}
-          className="mb-3 w-full rounded-lg bg-raised/70 px-3 py-2 text-[14px] text-ink placeholder:text-ink-secondary focus:outline-none"
-        />
-        <BotPickerList
-          bots={bots}
-          picked={picked}
-          onToggle={toggle}
-          emptyHint={t("sidebar.newChannel.emptyHint")}
-        />
-        <button
-          onClick={create}
-          disabled={!picked.size}
-          className="mt-3 w-full rounded-lg bg-accent py-2 text-[14px] font-medium text-white hover:brightness-110 disabled:opacity-40"
-        >
-          {picked.size === 0
-            ? t("sidebar.newChannel.create")
-            : picked.size === 1
-              ? t("sidebar.newChannel.createOne")
-              : t("sidebar.newChannel.createMany", { count: picked.size })}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** Move-to-section popover: existing sections as chips (checkmark on the
- * target's current one), a create field, and a remove action. Serves bots
- * and channels alike — the caller supplies the assignment. Mirrors the
- * context menu's fixed positioning + dismiss-on-outside-click contract. */
-function SectionPicker({
-  current,
-  anchor,
-  onClose,
-  onAssign,
-}: {
-  /** the target's current section; undefined = none */
-  current: string | undefined;
-  anchor: { x: number; y: number } | null;
-  onClose: () => void;
-  /** "" clears — the server drops an empty section */
-  onAssign: (section: string) => void;
-}) {
-  const { state } = useStore();
-  const [name, setName] = useState("");
-  const motion = useHeldMenuMotion(anchor);
-  const shown = motion.value;
-  const heldCurrent = useRef(current);
-  if (anchor) heldCurrent.current = current;
-  const trimmed = name.trim();
-
-  useEffect(() => {
-    if (!anchor) return;
-    const onDown = (e: MouseEvent) => {
-      if (!(e.target instanceof Element) || !e.target.closest("[data-section-picker]")) onClose();
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("blur", onClose);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("blur", onClose);
-    };
-  }, [anchor, onClose]);
-
-  // Hidden bots can carry a stale assignment; don't offer it as a context.
-  // Channels and bots share one namespace, so Work or Personal can hold both.
-  const sections = [
-    ...new Set([
-      ...(state.sections ?? []),
-      ...state.bots.filter((b) => !b.hidden && b.section).map((b) => b.section!),
-      ...state.groups.filter((g) => g.section).map((g) => g.section!),
-    ]),
-  ];
-
-  const assign = (section: string) => {
-    onAssign(section);
-    onClose();
-  };
-
-  if (!motion.shown || !shown) return null;
-  const sectionCurrent = heldCurrent.current;
-  const top = Math.max(8, Math.min(shown.y, window.innerHeight - 300));
-  const left = Math.min(shown.x, window.innerWidth - 260);
-
-  return (
-    <div
-      data-section-picker
-      style={{ top, left }}
-      className={cn("fixed z-40 w-[236px] overflow-hidden rounded-xl border border-hairline/50 bg-menu py-2 shadow-2xl shadow-black/60", motion.className)} {...motion.exitProps}
-    >
-      <div className="px-3.5 pb-1 text-[10px] font-medium uppercase tracking-[0.08em] text-ink-secondary">
-        {t("sidebar.section.moveToContext")}
-      </div>
-      {sections.length > 0 && (
-        <div className="flex flex-col gap-0.5 px-1.5 py-1">
-          {sections.map((section) => (
-            <button
-              key={section}
-              onClick={() => assign(section)}
-              className={cn(
-                "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px]",
-                section === sectionCurrent ? "bg-raised text-ink" : "text-ink hover:bg-raised/70",
-              )}
-            >
-              <span className="truncate">{section}</span>
-              {section === sectionCurrent && <Check size={14} className="shrink-0 text-accent" />}
-            </button>
-          ))}
-        </div>
-      )}
-      <form
-        className="flex items-center gap-1.5 px-2.5 py-1"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!trimmed || trimmed.length > 60) return;
-          assign(trimmed);
-        }}
-      >
-        <input
-          autoFocus
-          maxLength={60}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder={t("sidebar.section.newContext")}
-          aria-label={t("sidebar.section.newContextAria")}
-          className="w-full rounded-lg bg-raised/70 px-2.5 py-1.5 text-[13px] text-ink placeholder:text-ink-secondary focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={!trimmed || trimmed.length > 60}
-          className={cn(
-            "shrink-0 rounded-lg px-2.5 py-1.5 text-[12px] font-medium",
-            trimmed ? "bg-accent text-panel" : "bg-raised/70 text-ink-secondary",
-          )}
-        >
-          {t("common.add")}
-        </button>
-      </form>
-      {sectionCurrent && (
-        <>
-          <div className="mx-2 my-1 border-t border-hairline/40" />
-          <button
-            onClick={() => assign("")}
-            className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[13px] text-danger hover:bg-raised/70"
-          >
-            <FolderMinus size={15} />
-            {t("sidebar.section.removeFromContext")}
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
-
 export function BotContextMenu({
   menu,
   onClose,
@@ -790,6 +541,7 @@ export function BotContextMenu({
   const { state, dispatch } = useStore();
   const showThreads = useShowThreads();
   const canChooseFolder = useOwnerOrAdmin();
+  const clearThreads = useDeleteAllThreads(), moveToTeam = useMoveToTeam({ blocked: (bot) => (bot.defaultBot ? t("teamMove.blockedDefault", { name: bot.name }) : bot.chiefOfStaff ? t("teamMove.blockedChief") : state.bots.filter((candidate) => !candidate.hidden).length <= 1 ? t("teamMove.blockedLast") : undefined) });
   const remoteClient = window.ogb?.remoteClient?.active === true;
   const bot = shown ? state.bots.find((b) => b.id === shown.botId) : undefined;
   const menuRef = useRef<HTMLDivElement>(null);
@@ -824,15 +576,12 @@ export function BotContextMenu({
       element.style.top = `${Math.max(8, Math.min(shown.y, window.innerHeight - height - 8))}px`;
       element.style.left = `${Math.max(8, Math.min(shown.x, window.innerWidth - width - 8))}px`;
     };
-    // Menu length changes with thread settings, permissions, and locale.
-    // Measure after every render; the viewport cap handles short windows.
     place();
     window.addEventListener("resize", place);
     return () => window.removeEventListener("resize", place);
   });
-  // Focus moves in once per open and back out on close. It stays apart from
-  // the listeners below: Sidebar passes a fresh onClose every render, and
-  // re-running this with them would pull focus back to the first item.
+  // Kept apart from the listeners: onClose is fresh every render, and re-running this would pull focus back to the
+  // first item.
   useEffect(() => {
     if (!menu) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -855,7 +604,7 @@ export function BotContextMenu({
     };
   }, [menu, onClose]);
 
-  if (!motion.shown || !bot || !shown) return null;
+  if (!motion.shown || !bot || !shown) return <>{clearThreads.dialog}{moveToTeam.dialog}</>;
   const deleting = state.deletingBots[bot.id] === true;
   const engine = state.instances.find((instance) => instance.instanceId === bot.modelSelection.instanceId);
   const canCoordinate = engine?.capabilities?.agentsMcp === true;
@@ -866,8 +615,6 @@ export function BotContextMenu({
     : visibleBotCount <= 1
       ? t("sidebar.bot.archiveBlockedLast")
       : undefined;
-  // Another bot opens behind its settings as its row would (openBot); the
-  // bot on screen stays on the thread it shows.
   const openForSettings = () => {
     if (state.selectedId === bot.id) dispatch({ type: "select", id: bot.id });
     else openBot(dispatch, bot, showThreads);
@@ -900,7 +647,7 @@ export function BotContextMenu({
   );
   const divider = (key: string) => <div key={key} className="mx-2 my-1 border-t border-hairline/40" />;
 
-  return createPortal(
+  return <>{clearThreads.dialog}{moveToTeam.dialog}{createPortal(
     <div
       ref={menuRef}
       data-bot-menu
@@ -915,8 +662,9 @@ export function BotContextMenu({
         {item(<Plus size={16} className="text-ink-secondary" />, t("task.newShort"), () => dispatch({ type: "newTask", botId: bot.id }))}
         {canChooseFolder && item(<FolderOpen size={16} className="shrink-0 text-ink-secondary" />, t("task.folder.new"), () => onNewTaskFolder(bot.id))}
         {item(<FolderPlus size={16} className="text-ink-secondary" />, t("folder.new"), () => onNewFolder(bot.id))}
-        {divider("threads")}
       </>}
+      {item(<Trash2 size={16} />, t("task.deleteAll"), () => clearThreads.ask(bot.id), { danger: true })}
+      {divider("threads")}
       {remoteClient ? [
         item(<FolderPlus size={16} className="text-ink-secondary" />, t("sidebar.bot.moveToSection"), () => {
           onClose();
@@ -969,99 +717,28 @@ export function BotContextMenu({
         item(<ClipboardCopy size={16} className="text-ink-secondary" />, t("sidebar.copyConversationId"), () => {
           void copyText(bot.threadId);
         }),
-        divider("d3"),
-        item(
-          <Archive size={16} className="text-ink-secondary" />,
-          t("sidebar.bot.archive"),
-          () => onArchive(bot),
-          {
-            disabled: archiveBlocked,
-            hint: archiveHint,
-          },
-        ),
-        <BotDeleteMenuItem
-          key="delete"
-          deleting={deleting}
-          onClick={() => {
-            onClose();
-            onDelete(bot);
-          }}
-        />,
+        divider("d3"), ...moveToTeam.items(bot, item),
+        ...(bot.defaultBot ? [<HideDefaultBotItem key="hide" bot={bot} onDone={onClose} />] : [
+          item(<Archive size={16} className="text-ink-secondary" />, t("sidebar.bot.archive"), () => onArchive(bot), { disabled: archiveBlocked, hint: archiveHint }),
+          <BotDeleteMenuItem key="delete" deleting={deleting} onClick={() => { onClose(); onDelete(bot); }} />,
+        ]),
       ]}
       {readError?.botId === bot.id && <p role="alert" className="px-3.5 py-2 text-[12px] text-danger">{readError.message}</p>}
     </div>,
     document.body,
-  );
+  )}</>;
 }
-
-export type BotConfirmKind = "archive" | "delete";
 
 /** A confirmation may span live fleet updates; never authorize from its snapshot. */
 export function currentArchivableBot(bots: readonly Bot[], id: string): Bot | undefined {
   const active = bots.filter((candidate) => !candidate.hidden);
   if (active.length <= 1) return undefined;
-  return active.find((candidate) => candidate.id === id && !candidate.chiefOfStaff);
+  return active.find((candidate) => candidate.id === id && !candidate.chiefOfStaff && !candidate.defaultBot);
 }
 
-/** Copy for the archive / delete confirmation dialogs. Archiving keeps
- * everything and is reversible from Archived bots; deleting is not — the
- * server drops every task transcript, the workspace (files + memory), staged
- * skill state, and any private computer the bot owns. Shared team computers
- * remain. */
-export function botConfirmCopy(kind: BotConfirmKind, name: string) {
-  return kind === "archive"
-    ? {
-        title: t("sidebar.confirm.archiveTitle", { name }),
-        body: t("sidebar.confirm.archiveBody", { name }),
-        confirmLabel: t("sidebar.bot.archive"),
-        tone: "neutral" as const,
-      }
-    : {
-        title: t("sidebar.confirm.deleteTitle", { name }),
-        body: t("sidebar.confirm.deleteBody", { name }),
-        confirmLabel: t("common.delete"),
-        tone: "danger" as const,
-      };
-}
-
-export function archivedDeleteAllCopy() {
-  return {
-    title: t("sidebar.archived.deleteAllTitle"),
-    body: t("sidebar.archived.deleteAllBody"),
-    confirmLabel: t("sidebar.archived.deleteAll"),
-    tone: "danger" as const,
-  };
-}
-
-export function BotDeleteMenuItem({ deleting, onClick }: { deleting: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      disabled={deleting}
-      aria-busy={deleting || undefined}
-      onClick={onClick}
-      title={deleting ? t("sidebar.bot.deleteCheckingTitle") : undefined}
-      className={cn(
-        "flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-danger",
-        deleting ? "cursor-default opacity-40" : "hover:bg-raised/70",
-      )}
-    >
-      {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-      {deleting ? t("sidebar.bot.deleteChecking") : t("common.delete")}
-    </button>
-  );
-}
-
-// one empty list, so a bot without folders hands its rows the same array
 const NO_FOLDERS: BotProject[] = [];
 
-/** The thread tree under one bot row: project folders, then ungrouped rows.
- * Visibility folds old threads away. Pins stay, then the newest update.
- * Waiting and working stay visible as status, not as a sort key. It takes
- * its bot row's props and renders with that row. */
 export function BotThreadList({ bot, selected, density, query, pendingQueued, reveal, locale, generatedTitles, dispatch, activityLabel, hidden = false }: BotRowProps & {
-  /** The live verb for the open thread's row ("Reading a file"), from the
-   * bot's visible tail; without it the row says Working. */
   activityLabel?: string;
   hidden?: boolean;
 }) {
@@ -1093,11 +770,9 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
     });
   }, [selected, currentProjectId]);
   useSnoozeExpiry(tasks);
-  // Pin, then newest update. Search keeps the same order among matches.
-  const visibleTasks = orderedThreadList(visibleSidebarThreads(tasks, bot.threadId, query, projects, showAll));
-  // A folder rises with the thread of its that sits highest in that order.
-  // An empty index sorts last. Saved order breaks ties, and still governs
-  // move up and down.
+  const bulk = useBulkSelect();
+  const { own: ownTasks, helpers } = bulk.active ? { own: tasks, helpers: [] } : partitionHelperThreads(tasks, bot.threadId, query, projects);
+  const visibleTasks = orderedThreadList(visibleSidebarThreads(ownTasks, bot.threadId, query, projects, showAll || bulk.active));
   const visibleProjectIndex = (projectId: string) => visibleTasks.findIndex((task) => task.projectId === projectId);
   const folderRank = (projectId: string) => {
     const index = visibleProjectIndex(projectId);
@@ -1105,7 +780,6 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
   };
   const orderedProjects = query ? projects : [...projects].sort((a, b) => folderRank(a.id) - folderRank(b.id) || projects.indexOf(a) - projects.indexOf(b));
   useRevealedThreadRow(reveal, selected ? bot.threadId : null);
-  // One set of row actions per bot; they read the bot as it is when used.
   const latest = useRef(bot);
   latest.current = bot;
   const botId = bot.id;
@@ -1114,19 +788,11 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
       if (task.threadId !== latest.current.threadId) dispatch({ type: "switchTask", botId, threadId: task.threadId });
       else dispatch({ type: "select", id: botId });
     },
-    onRename: (task: { threadId: string }, title: string) => dispatch({ type: "renameTask", botId, threadId: task.threadId, title }),
-    onRegenerateTitle: generatedTitles ? (task: { threadId: string }, onSettled: (ok: boolean) => void) => dispatch({ type: "regenerateTaskTitle", botId, threadId: task.threadId, onSettled }) : undefined,
-    onDelete: (task: { threadId: string }) => dispatch({ type: "deleteTask", botId, threadId: task.threadId }),
-    onMove: (task: { threadId: string }, projectId: string | null) => dispatch({ type: "updateTask", botId, threadId: task.threadId, patch: { projectId } }),
-    onArchive: (task: { threadId: string }, archivedAt: number | null) => dispatch({ type: "updateTask", botId, threadId: task.threadId, patch: { archivedAt } }),
-    onPin: (task: { threadId: string }, pinned: boolean) => dispatch({ type: "updateTask", botId, threadId: task.threadId, patch: { pinned } }),
-    onSnooze: (task: { threadId: string }, snoozedUntil: number | null) => dispatch({ type: "updateTask", botId, threadId: task.threadId, patch: { snoozedUntil } }),
-    onLink: (task: { threadId: string }, link: string | null) => dispatch({ type: "updateTask", botId, threadId: task.threadId, patch: { link } }),
+    ...threadRowActions(botId, dispatch, generatedTitles),
     onRefreshPermissions: (task: { threadId: string }) => {
       const current = latest.current;
       const mode = approvalModeFor(current);
       const threadMode = approvalModeFor(currentTaskBot(current, task.threadId));
-      // Full copies at once, with no confirmation (owner decision, Oct 12).
       if (mode === "auto" && current.computer === "local" && threadMode !== "auto") {
         setPermissionRefresh({ threadId: task.threadId, kind: "local-auto" });
         return;
@@ -1137,9 +803,13 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
   const renderThread = (task: (typeof tasks)[number]) => {
     const thread = currentTaskBot(bot, task.threadId);
     return <SidebarThreadRow key={task.threadId} task={{ ...task, busy: thread.busy, activity: thread.activity, waitingForTeammates: thread.waitingForTeammates }} ownerId={bot.id} current={selected && task.threadId === bot.threadId} compact={density === "compact"} folders={projects}
-      activityLabel={task.threadId === bot.threadId ? activityLabel : undefined} now={stampClock(threadRecency(task), now)} locale={locale} {...actions} />;
+      activityLabel={task.threadId === bot.threadId ? activityLabel : undefined} now={stampClock(threadRecency(task), now)} locale={locale} {...actions}
+      selectMode={bulk.active} checked={selection.has(task.threadId)} onToggleSelect={bulk.toggle} />;
   };
   const ungrouped = visibleTasks.filter((task) => !projects.some((project) => project.id === task.projectId));
+  const shownRows = [...orderedProjects.filter((project) => query || bulk.active || !collapsed.has(project.id)).flatMap((project) => visibleTasks.filter((task) => task.projectId === project.id)), ...ungrouped]
+    .map((task) => { const thread = currentTaskBot(bot, task.threadId); return { ...task, busy: thread.busy, activity: thread.activity }; });
+  const selection = bulk.forRows(shownRows);
   const projectToEdit = projects.find((project) => project.id === editingProject);
   const projectIds = projects.map((project) => project.id);
   const saveOrder = (ids: string[], onSaved?: () => void) => {
@@ -1167,12 +837,13 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
       onDragOver={(event) => { if (event.dataTransfer.types.includes(FOLDER_DRAG_TYPE)) event.stopPropagation(); }}
       onDrop={(event) => { if (event.dataTransfer.types.includes(FOLDER_DRAG_TYPE)) { event.preventDefault(); event.stopPropagation(); resetFolderDrag(); } }}>
       {!hidden && <>
+      {bulk.active && <BulkSelectFilters rows={shownRows} selected={selection} now={now} onChange={bulk.setSelected} onDone={bulk.finish} />}
       {orderedProjects.map((project) => {
         const index = projects.indexOf(project);
         const projectTasks = tasks.filter((task) => task.projectId === project.id);
         const visible = visibleTasks.filter((task) => task.projectId === project.id);
         if (query && visible.length === 0 && !project.name.toLowerCase().includes(query.toLowerCase())) return null;
-        const open = Boolean(query) || !collapsed.has(project.id);
+        const open = Boolean(query) || bulk.active || !collapsed.has(project.id);
         const waiting = projectTasks.some((task) => task.activity === "waiting-on-you");
         const working = projectTasks.some((task) => task.busy);
         return <div key={project.id} data-sidebar-project={project.id}>
@@ -1240,7 +911,9 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
       <span role="status" className="sr-only">{readStatus}</span>
       {projects.length > 0 && ungrouped.length > 0 && <div className="pl-6 pr-3 pb-1 pt-2 text-[10.5px] text-ink-tertiary">{t("task.list")}</div>}
       {ungrouped.map(renderThread)}
-      {!query && !showAll && tasks.length > visibleTasks.length && <button type="button" onClick={() => setShowAll(true)} className="inline-flex h-7 items-center self-start pl-6 pr-3 text-[13px] font-medium leading-4 text-ink-secondary hover:text-ink">{t("task.showAll", { count: tasks.length })}</button>}
+      <HelperThreadGroup tasks={orderedThreadList(helpers)} busy={helpers.some((task) => currentTaskBot(bot, task.threadId).busy)} renderThread={renderThread} />
+      <ThreadListFooter bulk={bulk} rows={shownRows} selected={selection} total={ownTasks.length} canShowAll={!query && !showAll && ownTasks.length > visibleTasks.length} canSelect={tasks.length > 1}
+        onShowAll={() => setShowAll(true)} freshConversation onDelete={(threadIds) => deleteThreadsInBulk({ botId: bot.id }, threadIds, dispatch)} />
       <LocalComputerAutoWarning
         open={permissionRefresh?.kind === "local-auto"}
         onCancel={() => setPermissionRefresh(null)}
@@ -1256,33 +929,24 @@ export function BotThreadList({ bot, selected, density, query, pendingQueued, re
   );
 }
 
-/** What a bot row shows besides its bot. The sidebar works these out once
- * per store event (botRowProps) and the row is memoized on them, so an event
- * re-renders only the rows whose bot, or whose part of these, changed. */
 export interface BotRowProps {
   bot: Bot;
   selected: boolean;
   deleting: boolean;
-  /** The selected bot's mascot nudge; null on every other row. */
   mascotMotion: AppState["mascotMotion"];
-  /** A thread being opened from a chip or #Title link, when it is one of
-   * this bot's; null otherwise. */
   reveal: AppState["revealThread"];
   pendingQueued: AppState["pendingQueued"];
   instances: InstanceInfo[];
   liveCall: AppState["liveCall"];
-  /** The app language. Rows show catalog strings, so a change re-renders them. */
   locale: string;
   generatedTitles: boolean;
   density: SidebarDensity;
-  /** Quiet rows: name and status only (see sidebar-preferences). */
   quiet: boolean;
   query: string;
   dispatch: Dispatch<Action>;
   onMenu: (menu: MenuState) => void;
 }
 
-/** One bot row's props from the store state and the sidebar's layout. */
 export function botRowProps(
   state: AppState,
   dispatch: Dispatch<Action>,
@@ -1307,191 +971,52 @@ export function botRowProps(
   };
 }
 
-/** The bot's visible branch, worked out again only when its transcript or
- * active leaf changes, not on every change to the bot. */
 function useVisibleMessages(bot: Bot): Message[] {
   const { messages, activeLeafId } = bot;
   return useMemo(() => visibleMessages({ messages, activeLeafId }), [messages, activeLeafId]);
 }
 
-export const PinnedBotCircle = memo(function PinnedBotCircle({ bot, selected, mascotMotion, pendingQueued, dispatch, onMenu }: BotRowProps) {
-  const showThreads = useShowThreads();
-  const visible = useVisibleMessages(bot);
-  const activityTasks = sidebarBotActivityTasks(bot, pendingQueued);
-  const waiting = bot.activity === "waiting-on-you" || activityTasks.some((task) => task.activity === "waiting-on-you");
-  const working = !waiting && (Boolean(bot.busy) || activityTasks.some((task) => task.busy || task.activity === "working"));
-  const unread = bot.unread || activityTasks.some((task) => task.unread);
-  const radius = avatarCropRadius(botAvatarProfile(bot).avatarCrop);
-  return (
-    <button
-      type="button"
-      data-sidebar-bot-row={bot.id}
-      aria-current={selected ? "page" : undefined}
-      aria-label={`${bot.name}${waiting ? ` · ${t("sidebar.preview.waiting")}` : working ? ` · ${t("chat.activity.working")}` : ""}${unread ? ` · ${t("task.unread")}` : ""}`}
-      title={bot.name}
-      onClick={() => openBot(dispatch, bot, showThreads)}
-      onContextMenu={(event) => openBotContextMenu(onMenu, bot.id, event)}
-      className="flex min-w-0 flex-col items-center gap-1 rounded-lg px-1 py-1 text-center outline-none focus-visible:ring-1 focus-visible:ring-accent/60"
-    >
-      <span className="relative">
-        <span
-          className={cn(
-            "flex size-16 items-center justify-center overflow-hidden",
-            selected && "ring-2 ring-accent ring-offset-2 ring-offset-panel",
-          )}
-          style={{ borderRadius: radius }}
-        >
-          <BotAvatar
-            bot={bot}
-            state={stateForBot({ ...bot, messages: visible })}
-            size={64}
-            motion={mascotMotion?.kind ?? "none"}
-            motionKey={mascotMotion?.nonce ?? 0}
-            animated={working || Boolean(bot.unread) || (mascotMotion?.kind ?? "none") !== "none"}
-          />
-        </span>
-        {unread && (
-          <span className="absolute top-0.5 right-0.5 size-2.5 rounded-full border-2 border-panel bg-accent" aria-label={t("task.unreadMany")} />
-        )}
-        {working && (
-          <span
-            data-testid="working-dot"
-            className="absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-panel bg-success"
-          />
-        )}
-        {waiting && (
-          <span
-            data-testid="waiting-dot"
-            role="status"
-            aria-label={t("sidebar.preview.waiting")}
-            title={t("sidebar.preview.waiting")}
-            className="absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-panel bg-warning"
-          />
-        )}
-      </span>
-      <span className="w-full truncate text-center text-[11px] leading-4 text-ink">{bot.name}</span>
-    </button>
-  );
-});
-
-/** The same pinned bots as the circle grid, as normal rows, so their threads
- * and thread menu stay reachable. Not a reorderable section. */
-export function PinnedCircleThreadSection({
-  bots,
-  collapsed,
-  onToggle,
-  row,
-}: {
-  bots: Bot[];
-  collapsed: boolean;
-  onToggle: () => void;
-  row: (bot: Bot) => BotRowProps;
-}) {
-  const name = t("sidebar.section.pinned");
-  return (
-    <div data-sidebar-pinned-circle-threads="" className="flex flex-col gap-0.5 pt-3">
-      <SidebarSectionHeader
-        name={name}
-        collapsed={collapsed}
-        attention={collapsed ? sidebarSectionAttention(bots, []) : undefined}
-        onToggle={onToggle}
-        reorderable={false}
-        dragging={false}
-      />
-      {!collapsed && bots.map((bot) => <BotListItem key={bot.id} {...row(bot)} />)}
-    </div>
-  );
-}
-
-function PinnedBotRoster({
-  bots,
-  density,
-  circles,
-  row,
-}: {
-  bots: Bot[];
-  density: SidebarDensity;
-  circles: boolean;
-  row: (bot: Bot) => BotRowProps;
-}) {
-  if (circles && density !== "icons") {
-    return (
-      <div
-        data-sidebar-pinned-circles=""
-        className="grid gap-1 px-1 pb-1"
-        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(84px, 1fr))" }}
-      >
-        {bots.map((bot) => <PinnedBotCircle key={bot.id} {...row(bot)} />)}
-      </div>
-    );
-  }
-  return (
-    <>
-      {bots.map((bot) => <BotListItem key={bot.id} {...row(bot)} />)}
-    </>
-  );
-}
-
 export const BotListItem = memo(function BotListItem(props: BotRowProps) {
+  const advanced = useAdvancedMode();
   const { bot, selected, deleting, mascotMotion, reveal, pendingQueued, instances, liveCall, density, quiet, query, dispatch, onMenu } = props;
   const showThreads = useShowThreads();
   const liveMedia = useLiveMedia();
   const remoteClient = typeof window !== "undefined" && window.ogb?.remoteClient?.active === true;
   const [renaming, setRenaming] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
-  // a search opens this bot only when it has a matching thread or folder to
-  // show, and clearing it puts the bot back as it was (MOCA-293)
   const [threadsOpen, setThreadsOpen] = useSearchDisclosure(`bot:${bot.id}`, showThreads ? query : "", searchMatchesThreads(query, bot.tasks, bot.projects));
-  // a thread opened from a chip or #Title link: unfold this bot so the row
-  // it lands on is on screen (BotThreadList scrolls it into view)
   useEffect(() => { if (reveal && showThreads) setThreadsOpen(true); }, [reveal, showThreads]);
-  // one thread is the bot itself; the disclosure only earns its place once
-  // there is a list (a second thread or a folder) to open
   const hasThreadList = (bot.tasks?.filter((task) => !task.routineRunId).length ?? 1) > 1 || (bot.projects?.length ?? 0) > 0 || Boolean(query);
   const iconOnly = density === "icons";
   const expanded = showThreads && !iconOnly && threadsOpen && hasThreadList;
-  useEffect(() => {
-    if (iconOnly) setRenaming(false);
-  }, [iconOnly]);
-  // one medium portrait for every bot, the Chief of Staff included: the
-  // name and the line under it carry the row, not the mascot's size
-  const avatarSize = iconOnly ? 44 : density === "compact" ? (showThreads ? 26 : 36) : (showThreads ? 32 : 44);
-  // the visible branch, so a version switch changes the row with the chat
+  useEffect(() => { if (iconOnly) setRenaming(false); }, [iconOnly]);
+  const simpleRow = !advanced && !showThreads && density === "comfortable";
+  const railTile = iconOnly && !advanced;
+  const avatarSize = iconOnly ? (railTile ? 36 : 44) : density === "compact" ? (showThreads ? 26 : 36) : (showThreads ? 32 : simpleRow ? 36 : 44);
   const visible = useVisibleMessages(bot);
   const last = lastNonReceipt(visible);
-  // the role from Bot Settings → Title is not drawn in the row: a row is the
-  // name and what was last said. The role and the Chief of Staff mark stay
-  // in the avatar's tooltip and are read out with the name.
   const title = bot.title.trim();
   const details = [title, bot.chiefOfStaff ? t("sidebar.bot.chiefOfStaff") : ""].filter(Boolean);
   const rowClass = cn(
     "flex w-full items-center rounded-xl text-left outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-accent/60",
     iconOnly
-      ? "justify-center px-1 py-1.5"
+      ? railTile ? "h-[52px] justify-center" : "justify-center px-1 py-1.5"
       : density === "compact"
         ? cn(showThreads ? "gap-1.5 py-1" : "gap-2.5 py-1.5", showThreads ? "pl-6 pr-9 group-hover:pr-[5.75rem] group-focus-within:pr-[5.75rem] max-md:pr-[5.75rem] touch:pr-[5.75rem]" : "pl-2 pr-9")
+        : simpleRow ? "gap-2.5 py-2 pl-2 pr-3 group-hover:pr-9 group-focus-within:pr-9 max-md:pr-9 touch:pr-9"
         : cn(showThreads ? "gap-2 py-2" : "gap-3 py-2", showThreads ? "pl-6 pr-9 group-hover:pr-[5.75rem] group-focus-within:pr-[5.75rem] max-md:pr-[5.75rem] touch:pr-[5.75rem]" : "pl-2.5 pr-9"),
-    // Chief of Staff is called out by the crown on its avatar, not by tinting
-    // the whole row — an accent border + fill read as "selected" even when
-    // another bot was active. The selected row is one soft raised surface.
     selected ? "bg-raised shadow-[0_1px_2px_rgb(0_0_0/0.10)]" : "hover:bg-raised/50",
   );
   const activityTasks = sidebarBotActivityTasks(bot, pendingQueued);
   const waiting = bot.activity === "waiting-on-you" || activityTasks.some((task) => task.activity === "waiting-on-you");
-  // Real work in a sibling still outranks an idle coordination wait.
   const working = !waiting && (Boolean(bot.busy) || activityTasks.some((task) => task.busy || task.activity === "working"));
   const teammateWait = !waiting && !working && (Boolean(bot.waitingForTeammates) || activityTasks.some((task) => Boolean(task.waitingForTeammates)));
   const queued = activityTasks.some((task) => task.queued);
   const unread = botShowsUnread(bot);
-  // this window, a phone or another window is on a Live call with the bot
   const onLiveCall = liveBadgeFor(bot.id, liveMedia, liveCall);
-  // quiet rows drop the last-message preview but keep a line that reports
-  // something happening now; an idle bot is just its name
   const statusLine = deleting || working || waiting || teammateWait || queued;
   const body = (
     <>
-      {/* flex, not inline: an inline wrapper adds a baseline gap under the
-          avatar and makes the row taller than before the presence dot */}
       <span className="relative flex shrink-0" title={iconOnly ? undefined : [bot.name, ...details].join(" · ")}>
         <BotAvatar
           bot={bot}
@@ -1499,16 +1024,10 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
           size={avatarSize}
           motion={mascotMotion?.kind ?? "none"}
           motionKey={mascotMotion?.nonce ?? 0}
-          // Motion means something is happening. A resting bot holds a resting
-          // pose — N idle rows bobbing at display rate was most of the app's
-          // visible-idle CPU (states are keyword-derived, so "working" can be
-          // decorative; working/unread/motion are the real signals).
           animated={working || unread || (mascotMotion?.kind ?? "none") !== "none"}
         />
+        {iconOnly && <BotModelBadge bot={bot} instances={instances} avatarSize={avatarSize} />}
         {working && (
-          // presence dot: green while the bot is working, ringed in the row's
-          // ground so it reads on both a photo and the mascot. Also the only
-          // activity signal in icons-only density, where the text is hidden.
           <span
             data-testid="working-dot"
             className={cn(
@@ -1518,14 +1037,12 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
           />
         )}
         {waiting && <span data-testid="waiting-dot" role="status" aria-label={t("sidebar.preview.waiting")} title={t("sidebar.preview.waiting")}
-          className={cn("absolute -right-0.5 -bottom-0.5 rounded-full border-2 border-panel bg-warning", iconOnly ? "size-3" : "size-2.5")} />}
+          className={cn("absolute -right-0.5 -bottom-0.5 flex items-center justify-center overflow-hidden rounded-full border-2 border-panel bg-warning font-black text-panel", iconOnly ? "size-5 text-[14px]" : "size-4 text-[12px]")}><span aria-hidden="true">!</span></span>}
         {teammateWait && <span data-testid="teammate-wait-dot" role="status" aria-label={t("sidebar.preview.waitingOnTeammate")} title={t("sidebar.preview.waitingOnTeammate")}
           className={cn("absolute -right-0.5 -bottom-0.5 rounded-full border-2 border-panel bg-accent", iconOnly ? "size-3" : "size-2.5")} />}
         {!teammateWait && !waiting && !working && queued && <span data-testid="queued-dot" role="status" aria-label={t("task.queued")} title={t("task.queued")}
           className={cn("absolute -right-0.5 -bottom-0.5 rounded-full border-2 border-panel bg-ink-secondary", iconOnly ? "size-3" : "size-2.5")} />}
         {bot.chiefOfStaff && iconOnly && (
-          // icons-only rows have no name line: the crown sits on the
-          // portrait's top corner, opposite the presence dot
           <span className="absolute -left-1 -top-1 flex rounded-full bg-raised p-[3px]">
             <Crown size={11} strokeWidth={2.25} className="shrink-0 text-accent" role="img" aria-label={t("sidebar.bot.chiefOfStaff")} data-testid="chief-crown">
               <title>{t("sidebar.bot.chiefOfStaff")}</title>
@@ -1533,8 +1050,6 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
           </span>
         )}
         {onLiveCall && iconOnly && (
-          // icons-only rows have no name line: the badge sits on the avatar,
-          // opposite the presence dot
           <span className="absolute -right-1 -top-1 flex rounded-full bg-panel p-0.5">
             <Phone className="size-3 shrink-0 text-success" role="img" aria-label={t("call.live.badge")} data-testid="live-call-badge">
               <title>{t("call.live.badge")}</title>
@@ -1544,7 +1059,7 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
       </span>
       <div className={cn("min-w-0 flex-1", iconOnly && "hidden")}>
         <div className="flex items-baseline justify-between gap-2">
-          <span className="flex min-w-0 grow items-center gap-1.5 truncate text-[15px] font-semibold leading-5 text-ink">
+          <span className={cn("flex min-w-0 grow items-center gap-1.5 truncate text-ink", simpleRow ? "text-[14px] font-normal leading-[19px]" : "text-[15px] font-semibold leading-5")}>
             {bot.pinned && <Pin size={12} className="shrink-0 text-ink-secondary" />}
             <RenameTitle
               key={iconOnly ? "icons" : "expanded"}
@@ -1560,28 +1075,26 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
               }}
               onEditingChange={setRenaming}
               className="truncate"
-              inputClassName="w-full rounded bg-inset px-1 py-0.5 text-[15px] font-semibold"
+              inputClassName={cn("w-full rounded bg-inset px-1 py-0.5", simpleRow ? "text-[14px] font-normal" : "text-[15px] font-semibold")}
             />
             {bot.chiefOfStaff && !renaming && (
-              // one small crown after the name marks the Chief of Staff in
-              // every density; the words live in the tooltip and are read out
               <Crown size={13} strokeWidth={2.25} className="shrink-0 text-accent" role="img" aria-label={t("sidebar.bot.chiefOfStaff")} data-testid="chief-crown">
                 <title>{t("sidebar.bot.chiefOfStaff")}</title>
               </Crown>
             )}
-            {/* the role is read out with the name, not drawn */}
-            {title && !renaming && <span className="sr-only">{`, ${title}`}</span>}
             {onLiveCall && !iconOnly && !renaming && (
               <Phone className="size-3 shrink-0 text-success" role="img" aria-label={t("call.live.badge")} data-testid="live-call-badge">
                 <title>{t("call.live.badge")}</title>
               </Phone>
             )}
+            {title && !renaming && <SidebarBotRole role={title} />}
           </span>
           {selected && last && !renaming && !expanded && (
             <span className="shrink-0 text-[12px] tabular-nums text-ink-secondary transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 touch:opacity-0">
               {formatTime(last.at)}
             </span>
           )}
+          {density === "compact" && <BotModelMark bot={bot} instances={instances} />}
           {(expanded || (quiet && !statusLine)) && unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {(!expanded || deleting) && (!quiet || statusLine) && <div className="flex items-center justify-between gap-2">
@@ -1591,22 +1104,19 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
               {t("sidebar.bot.deletingRow")}
             </span>
           ) : (
-            <span className="flex min-w-0 items-center gap-1.5 truncate text-[13px] leading-[18px] text-ink-secondary">
+            <span className={cn("flex min-w-0 items-center gap-1.5 truncate text-[13px] leading-[18px]", waiting ? "font-semibold text-warning" : "text-ink-secondary")}>
               {working ? (
-                // the same typing dots as the chat header; sized to the text's
-                // line box so the row does not jump when work starts or ends
                 <span className="flex h-[1.5em] items-center" role="status">
                   <WorkingDots size={3.5} />
                   <span className="sr-only">{t("sidebar.preview.working")}</span>
                 </span>
               ) : (
-                <span dir="auto" className="truncate">{waiting ? t("sidebar.preview.waiting") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot, visible, instances)}</span>
+                <span dir="auto" className="truncate">{waiting ? t("sidebar.preview.waiting") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : botPreview(bot, visible, instances, advanced)}</span>
               )}
             </span>
           )}
-          {unread && (
-            <span className="size-2 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />
-          )}
+          {density === "comfortable" && <BotModelMark bot={bot} instances={instances} />}
+          {unread && <span className="size-2 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>}
       </div>
     </>
@@ -1624,11 +1134,8 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
 
   return (
     <>
-    <div className="group relative" title={iconOnly ? [bot.name, bot.title?.trim()].filter(Boolean).join(" · ") : undefined}>
-      {/* Keep this wrapper mounted while RenameTitle swaps its label for an
-          input. Replacing the wrapper tree remounts RenameTitle, loses its
-          editing state, and leaves the row stuck in rename mode. Omitting
-          role=button also keeps the input visible to assistive technology. */}
+    <div className={cn("group relative", railTile && "mx-auto w-[52px]")} title={iconOnly ? [bot.name, bot.title?.trim()].filter(Boolean).join(" · ") : undefined}>
+      {/* Keep this wrapper mounted: replacing it remounts RenameTitle and leaves the row stuck in rename mode. */}
       <div
         role={renaming ? undefined : "button"}
         tabIndex={renaming ? undefined : 0}
@@ -1640,7 +1147,6 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
             : undefined
         }
         aria-busy={deleting || undefined}
-        // with no thread list open, the row is the conversation being looked at
         aria-current={selected && !expanded && !renaming ? "page" : undefined}
         data-sidebar-bot-row={bot.id}
         onClick={onSelect}
@@ -1664,7 +1170,7 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
         className="absolute left-0.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-ink-secondary outline-none hover:text-ink focus-visible:ring-1 focus-visible:ring-accent/60"
       ><ChevronRight aria-hidden="true" size={13} className={cn("transition-transform", threadsOpen && "rotate-90")} /></button>}
       {!renaming && iconOnly && unread && (
-        <span className="pointer-events-none absolute bottom-1.5 right-1.5 size-2 rounded-full border border-panel bg-accent" />
+        <span className={cn("pointer-events-none absolute size-2 rounded-full border border-panel bg-accent", railTile ? "right-1 top-1" : "bottom-1.5 right-1.5")} />
       )}
       {!renaming && !deleting && !iconOnly && <>
         {showThreads && <button type="button" aria-label={t("task.newShort")} title={t("task.newShort")} onClick={() => { setThreadsOpen(true); dispatch({ type: "newTask", botId: bot.id }); }}
@@ -1680,243 +1186,20 @@ export const BotListItem = memo(function BotListItem(props: BotRowProps) {
         </span>
       )}
     </div>
-    {/* Keep folder expansion state mounted while the preference is off. The
-        hidden list omits its children, including any thread-menu portals. */}
-    {!iconOnly && threadsOpen && hasThreadList && <BotThreadList {...props} hidden={!showThreads}
-      // the same live verb the chat pane derives from the visible tail
-      // ("Reading a file"), for the open thread's row while it works
+    {advanced && !iconOnly && threadsOpen && hasThreadList && <BotThreadList {...props} hidden={!showThreads}
       activityLabel={liveActivityLabel(last)}
       query={bot.name.toLowerCase().includes(query.toLowerCase()) || bot.title.toLowerCase().includes(query.toLowerCase()) ? "" : query} />}
-    {!expanded && <SidebarBotActivity bot={bot} rowThreadId={selected ? bot.threadId : botOpensTo(bot, showThreads)} density={density} pendingQueued={pendingQueued} dispatch={dispatch} />}
+    {advanced && !expanded && <SidebarBotActivity bot={bot} rowThreadId={selected ? bot.threadId : botOpensTo(bot, showThreads)} density={density} pendingQueued={pendingQueued} dispatch={dispatch} />}
     {showThreads && creatingProject && <BotProjectDialog bot={bot} onClose={() => setCreatingProject(false)} />}
     </>
   );
 });
 
-export function ArchivedBotRow({
-  bot,
-  restoring,
-  deleting,
-  disabled,
-  onRestore,
-  onDelete,
-}: {
-  bot: Bot;
-  restoring: boolean;
-  deleting: boolean;
-  disabled: boolean;
-  onRestore: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <div className="flex min-h-[82px] items-center gap-3 border-b border-hairline/35 px-1 py-3">
-      <BotAvatar bot={bot} state="happy" size={42} animated={false} />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[14px] font-medium text-ink">{bot.name}</div>
-        <div className="mt-0.5 truncate text-[12.5px] text-ink-secondary">{bot.title || t("sidebar.archived.botFallback")}</div>
-      </div>
-      <div className="flex shrink-0 items-center gap-1.5">
-        <button
-          onClick={onRestore}
-          disabled={disabled || deleting}
-          className="flex min-w-[78px] items-center justify-center gap-2 rounded-full bg-raised h-7 px-3.5 text-[13px] font-medium leading-4 text-ink hover:bg-raised-hover disabled:opacity-40"
-        >
-          {restoring && <Loader2 size={13} className="animate-spin" />}
-          {t("sidebar.archived.restore")}
-        </button>
-        <button
-          type="button"
-          onClick={onDelete}
-          disabled={disabled || deleting}
-          aria-label={t("sidebar.archived.deleteAria", { name: bot.name })}
-          className="flex items-center justify-center gap-2 rounded-full h-7 px-3.5 text-[13px] font-medium leading-4 text-danger hover:bg-danger/10 disabled:opacity-40"
-        >
-          {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-          {t("common.delete")}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-export function ArchivedBotsPanel({
-  bots,
-  onClose,
-  onRestored,
-}: {
-  bots: Bot[];
-  onClose: () => void;
-  onRestored: (message: string) => void;
-}) {
-  const { state, dispatch } = useStore();
-  const showThreads = useShowThreads();
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [restoringAll, setRestoringAll] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState<Bot | "all" | null>(null);
-  const [error, setError] = useState("");
-  const deleting = bots.some((bot) => Boolean(state.deletingBots[bot.id]));
-  const locked = restoringAll || Boolean(busyId) || deleting || Boolean(pendingDelete);
-
-  useEffect(() => {
-    if (bots.length === 0) onClose();
-  }, [bots.length, onClose]);
-
-  useEffect(() => {
-    dialogRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !locked) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [locked, onClose]);
-
-  const restore = async (bot: Bot) => {
-    setBusyId(bot.id);
-    setError("");
-    try {
-      const response = await api(`/api/bots/${bot.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ hidden: false }),
-      });
-      dispatch({ type: "botPatched", bot: response.bot });
-      openBot(dispatch, response.bot, showThreads);
-      onRestored(t("sidebar.archived.restored", { name: bot.name }));
-      if (bots.length === 1) onClose();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const restoreAll = async () => {
-    setRestoringAll(true);
-    setError("");
-    try {
-      const responses = await Promise.all(
-        bots.map((bot) =>
-          api(`/api/bots/${bot.id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ hidden: false }),
-          }),
-        ),
-      );
-      for (const response of responses) dispatch({ type: "botPatched", bot: response.bot });
-      const first = responses[0]?.bot;
-      if (first) openBot(dispatch, first, showThreads);
-      onRestored(
-        bots.length === 1
-          ? t("sidebar.archived.restoredOne")
-          : t("sidebar.archived.restoredMany", { count: bots.length }),
-      );
-      onClose();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setRestoringAll(false);
-    }
-  };
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px] sm:p-6"
-      onMouseDown={(event) => event.target === event.currentTarget && !locked && onClose()}
-    >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="archived-bots-title"
-        tabIndex={-1}
-        className="animate-pop-in flex max-h-[min(680px,calc(100dvh-2rem))] w-full max-w-[760px] flex-col overflow-hidden rounded-[24px] border border-hairline/50 bg-panel shadow-2xl shadow-black/50 outline-none"
-      >
-        <header className="flex items-start justify-between gap-4 px-6 pb-4 pt-6 sm:px-8 sm:pt-7">
-          <div>
-            <h2 id="archived-bots-title" className="text-[22px] font-semibold tracking-[-0.01em] text-ink">{t("sidebar.archived.title")}</h2>
-            <p className="mt-1 text-[13px] text-ink-secondary">{t("sidebar.archived.subtitle")}</p>
-          </div>
-          <div className="flex items-center gap-1">
-            {bots.length > 1 && (
-              <button
-                onClick={() => void restoreAll()}
-                disabled={locked}
-                className="flex items-center gap-2 rounded-full bg-raised h-7 px-3.5 text-[13px] font-medium leading-4 text-ink hover:bg-raised-hover disabled:opacity-40"
-              >
-                {restoringAll && <Loader2 size={13} className="animate-spin" />}
-                {t("sidebar.archived.restoreAll")}
-              </button>
-            )}
-            {bots.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setPendingDelete("all")}
-                disabled={locked}
-                className="flex items-center gap-2 rounded-full h-7 px-3.5 text-[13px] font-medium leading-4 text-danger hover:bg-danger/10 disabled:opacity-40"
-              >
-                <Trash2 size={13} />
-                {t("sidebar.archived.deleteAll")}
-              </button>
-            )}
-            <button
-              onClick={onClose}
-              disabled={locked}
-              className="flex size-10 items-center justify-center rounded-lg text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-40"
-              aria-label={t("sidebar.archived.close")}
-            >
-              <X size={21} />
-            </button>
-          </div>
-        </header>
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-7 pt-3 sm:px-8">
-          <div className="mb-3 text-[12px] font-medium text-ink-secondary">{t("sidebar.archived.count", { count: bots.length })}</div>
-          <div className="grid grid-cols-1 gap-x-8 md:grid-cols-2">
-            {bots.map((bot) => (
-              <ArchivedBotRow
-                key={bot.id}
-                bot={bot}
-                restoring={busyId === bot.id}
-                deleting={Boolean(state.deletingBots[bot.id])}
-                disabled={locked}
-                onRestore={() => void restore(bot)}
-                onDelete={() => setPendingDelete(bot)}
-              />
-            ))}
-          </div>
-          {error && <div role="alert" className="mt-4 rounded-lg bg-danger/10 px-3 py-2 text-[12.5px] text-danger">{error}</div>}
-        </div>
-      </div>
-      <ConfirmDialog
-        open={pendingDelete !== null}
-        {...(pendingDelete === "all"
-          ? archivedDeleteAllCopy()
-          : botConfirmCopy("delete", pendingDelete?.name ?? ""))}
-        icon={<Trash2 size={18} />}
-        onCancel={() => setPendingDelete(null)}
-        onConfirm={() => {
-          if (!pendingDelete) return;
-          const target = pendingDelete;
-          setPendingDelete(null);
-          if (target === "all") {
-            for (const bot of bots) dispatch({ type: "deleteBot", botId: bot.id });
-            return;
-          }
-          dispatch({ type: "deleteBot", botId: target.id });
-        }}
-      />
-    </div>,
-    document.body,
-  );
-}
-
-/** A named team's context menu: add bots, rename, share the whole team,
- * delete. Exported for a markup test. */
 export function TeamMenuItems({ onAddBots, onRename, onShare, onDelete, onSetForAll }: {
   onAddBots: () => void;
   onRename: () => void;
   onShare: () => void;
   onDelete: () => void;
-  /** Owner/admin only: one approval level or model for every bot in the team. */
   onSetForAll?: () => void;
 }) {
   const item = "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] hover:bg-raised";
@@ -1934,18 +1217,11 @@ export function TeamMenuItems({ onAddBots, onRename, onShare, onDelete, onSetFor
 export function Sidebar({ open, onClose, collapseToIcons = false }: {
   open: boolean;
   onClose: () => void;
-  /** Show the avatar rail regardless of the saved density: a side panel is
-   * open and the window cannot seat the full sidebar, the chat and the
-   * panel (App decides). The saved choice is untouched and returns when the
-   * panel closes or the window grows. */
   collapseToIcons?: boolean;
 }) {
   const { state, dispatch } = useStore();
   const now = useRelativeNow();
   const cloudOwner = useCloudOwner(state.config?.cloudHome === true);
-  // The Show me how tip ends when the server menu it points at closes,
-  // whatever was chosen (components/CloudHowTo.tsx); Add a Cloud… chosen
-  // there shows as the dialog opened from it (cloud_dialog_shown).
   const endHowTo = useCallback(() => {
     track("cloud_howto", { result: "closed" });
     dispatch({ type: "cloudHowTo", open: false });
@@ -1962,13 +1238,16 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   const [newTeam, setNewTeam] = useState(false);
   const [teamMenu, setTeamMenu] = useState<{ name: string; x: number; y: number } | null>(null);
   const [teamSettings, setTeamSettings] = useState<string | null>(null);
-  // Approval levels and models are the owner's to set, as in each bot's panel.
   const teamSettingsAllowed = useOwnerOrAdmin();
   const teamMotion = useHeldMenuMotion(teamMenu);
   const teamMenuReturn = useRef<HTMLElement | null>(null);
   const closeTeamMenu = () => {
     (teamMenuReturn.current?.isConnected ? teamMenuReturn.current : sidebarRef.current)?.focus();
     setTeamMenu(null);
+  };
+  const openTeamMenu = (name: string, x: number, y: number, returnTo: HTMLElement) => {
+    teamMenuReturn.current = returnTo;
+    setTeamMenu({ name, x: Math.max(8, Math.min(x, window.innerWidth - 266)), y: Math.max(8, Math.min(y, window.innerHeight - 190)) });
   };
   const renamedTeam = (oldName: string, newName: string) => {
     const replace = (ids: string[]) => [...new Set(ids.map(id => id === userSectionId(oldName) ? userSectionId(newName) : id))];
@@ -2014,38 +1293,22 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     restoreBot?: { id: string; name: string };
   } | null>(null);
   const [query, setQuery] = useState("");
-  // Chosen in Settings → Appearance; the header's collapse button only flips
-  // between the avatar rail and the last expanded density.
   const storedDensity = useSidebarDensity();
   const density = collapseToIcons ? "icons" : storedDensity;
-  const defaultWidth = density === "compact" ? 272 : 320;
+  const simple = !advanced && density !== "icons";
+  const rail = !advanced && density === "icons";
   const sidePanelOpen = state.computerOpen || state.inspectorOpen;
-  const maxSidebarWidth = sidePanelOpen ? defaultWidth : Math.min(480, window.innerWidth - 320);
-  const [sidebarWidth, setSidebarWidth] = useState<number | null>(() => loadSidebarWidth());
-  const widthRef = useRef(sidebarWidth);
-  const [resizing, setResizing] = useState(false);
-  const resizeTo = (width: number) => {
-    const next = clampSidebarWidth(width, sidePanelOpen ? defaultWidth + 320 : window.innerWidth);
-    if (next === Math.round(sidebarRef.current?.getBoundingClientRect().width ?? defaultWidth)) return null;
-    widthRef.current = next;
-    sidebarRef.current?.style.setProperty("--sidebar-width", `${next}px`);
-    return next;
-  };
-  const finishResize = () => {
-    setResizing(false);
-    if (widthRef.current !== null) {
-      setSidebarWidth(widthRef.current);
-      saveSidebarWidth(widthRef.current);
-    }
-  };
+  const sizing = useSidebarWidth({ simple: !advanced, density, sidePanelOpen, sidebarRef });
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchShown = searchOpen || query !== "";
+  const searchToggleRef = useRef<HTMLButtonElement>(null);
+  const closeSearch = () => { setSearchOpen(false); setQuery(""); searchToggleRef.current?.focus(); };
   const [lastExpandedDensity, setLastExpandedDensity] = useState<Exclude<SidebarDensity, "icons">>(
     () => density === "icons" ? "comfortable" : density,
   );
   const pinnedCircles = usePinnedCircles();
   const universalPins = useUniversalPins();
   const [pinnedCircleThreadsCollapsed, setPinnedCircleThreadsCollapsed] = useState(true);
-  // Compact is the quiet sidebar: a row is its name and its status, nothing
-  // else (see the `quiet` prop on BotListItem and GroupListItem).
   const quietRows = density === "compact";
   const [collapsedSections, setCollapsedSections] = useState<string[]>(() => loadCollapsedSections());
   const [sectionOrder, setSectionOrder] = useState<string[]>(() => loadSectionOrder());
@@ -2057,12 +1320,8 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     over: { id: string; place: SectionDropPlace } | null;
   }>({ from: null, over: null });
 
-  // The density can change here or from Settings, so react to the value
-  // rather than to either control.
   useEffect(() => {
     if (density !== "icons") setLastExpandedDensity(density);
-    // Search is hidden in avatar-only mode. Keeping its value would silently
-    // filter bots, rooms, and message results with no visible way to clear it.
     else setQuery("");
   }, [density]);
 
@@ -2070,10 +1329,6 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     setSidebarDensity(density === "icons" ? lastExpandedDensity : "icons");
   };
 
-  // Esc closes the drawer, mirroring ApiKeys.tsx:75-85. Bound only while the
-  // drawer is open — on mobile, exactly when a bot/room context menu or the
-  // New Room panel can be open on top of it, so the same Escape press closes
-  // them together. Fine, since both directions are "get me out of here."
   useEffect(() => {
     if (!open || confirm || deletingRoom) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -2083,7 +1338,6 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [open, onClose, confirm, deletingRoom]);
 
-  // Each header menu root wraps its trigger and its popover.
   const attentionMenuRef = useRef<HTMLDivElement>(null);
   const plusMenuRef = useRef<HTMLDivElement>(null);
   usePopoverDismiss(attentionOpen, attentionMenuRef, () => setAttentionOpen(false));
@@ -2104,7 +1358,6 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   }, [teamFeedback]);
 
 
-  // Archive and delete share one pending confirmation at a time.
   const requestArchive = (bot: Bot) => {
     const current = currentArchivableBot(state.bots, bot.id);
     if (current) setConfirm({ kind: "archive", bot: current });
@@ -2112,28 +1365,10 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
 
   const archiveBot = async ({ id }: Pick<Bot, "id">) => {
     const bot = currentArchivableBot(state.bots, id);
-    if (!bot) return;
-    const activeBots = state.bots.filter((candidate) => !candidate.hidden);
-    setTeamFeedback(null);
-    try {
-      const response = await api(`/api/bots/${bot.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ hidden: true }),
-      });
-      dispatch({ type: "botPatched", bot: response.bot });
-      if (state.selectedId === bot.id) {
-        const next = activeBots.find((candidate) => candidate.id !== bot.id);
-        if (next) openBot(dispatch, next, showThreads);
-      }
-      setTeamFeedback({
-        error: false,
-        text: t("sidebar.bot.archived", { name: bot.name }),
-        restoreBot: { id: bot.id, name: bot.name },
-      });
-    } catch (cause) {
-      setTeamFeedback({ error: true, text: cause instanceof Error ? cause.message : String(cause) });
-    }
+    if (bot) await archiveBotWithNotice(bot, { bots: state.bots, selectedId: state.selectedId, dispatch, showThreads, notify: setTeamFeedback });
   };
+  // Archives from the bot panel report here too, with the same Undo.
+  useEffect(() => onArchiveNotice(setTeamFeedback), []);
 
   const undoBotArchive = async (bot: { id: string; name: string }) => {
     setTeamFeedback(null);
@@ -2152,26 +1387,18 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
 
   const macInset = capabilities.windowChrome === "mac-inset";
   const browser = capabilities.host.label === "Browser";
-  // macOS owns inset traffic lights; Windows hides the native bar and draws
-  // caption buttons over the header's right end. Either way this top row is
-  // the window's drag handle (ChatView/GroupView headers do the same).
   const draggableChrome = macInset || capabilities.windowChrome === "win-caption";
-  // SAFETY: Electron's documented -webkit-app-region CSS property is not in
-  // React's CSSProperties type, but the renderer accepts it as an inline style.
+  // SAFETY: Electron's -webkit-app-region is not in React's CSSProperties type; the renderer accepts it as an inline
+  // style.
   const windowDragStyle = draggableChrome
     ? ({ WebkitAppRegion: "drag" } as React.CSSProperties)
     : undefined;
-  // SAFETY: Same Electron-only CSS property as windowDragStyle; interactive
-  // buttons must explicitly opt out of the draggable title-bar region.
+  // SAFETY: interactive buttons must opt out of the draggable title-bar region.
   const windowNoDragStyle = draggableChrome
     ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties)
     : undefined;
 
   const q = query.trim().toLowerCase();
-
-  // Message search rides the same box as the name filter: names match
-  // instantly from local state; transcript hits are the SearchResults
-  // section below the list (debounced, lands on the message).
 
   const matchingBots = state.bots
     .filter((b) => !b.hidden)
@@ -2180,7 +1407,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         !q ||
         b.name.toLowerCase().includes(q) ||
         (b.title ?? "").toLowerCase().includes(q) ||
-        preview(b, visibleMessages(b), state.instances).toLowerCase().includes(q) ||
+        botPreview(b, visibleMessages(b), state.instances, advanced).toLowerCase().includes(q) ||
         b.tasks?.some((task) => !task.routineRunId && task.title.toLowerCase().includes(q)) ||
         b.projects?.some((folder) => folder.name.toLowerCase().includes(q)),
     );
@@ -2191,11 +1418,9 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     sectionChiefs,
     sectionedBots,
     unsectionedBots,
-  } = partitionSidebarBots(matchingBots, { universalPins });
+  } = partitionSidebarBots(matchingBots, { universalPins, viewerEmail: useViewerEmail(), welcoming: useWelcomingBot() });
   const { botChats, sectionedRooms, unsectionedRooms } = partitionSidebarGroups(visibleGroups);
 
-  // User sections keep first-appearance order. The saved layout keeps an
-  // empty section's former slot so it returns there when content comes back.
   const sectionNames: string[] = (state.sections ?? []).filter((name) => !q || name.toLowerCase().includes(q.toLowerCase()));
   for (const bot of sectionedBots) {
     if (!sectionNames.includes(bot.section!)) sectionNames.push(bot.section!);
@@ -2213,9 +1438,9 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     ...(unsectionedBots.length > 0 ? [BOTS_SECTION_ID] : []),
     ...sectionNames.map(userSectionId),
   ];
-  const sectionIds = orderedSidebarSections(naturalSectionIds, sectionOrder);
-  // Circle mode removes these bots from the normal rows. Their thread list
-  // stays at the bottom and is not part of the draggable section order.
+  const orderedIds = orderedSidebarSections(naturalSectionIds, sectionOrder);
+  const sectionIds = simple || rail ? simpleSidebarSections(orderedIds) : orderedIds;
+  const reorderableIds = simple ? sectionIds.filter((id) => !SIMPLE_FIXED_SECTION_IDS.includes(id)) : sectionIds;
   const showPinnedCircleThreads = pinnedCircleThreadListVisible(pinnedCircles, density, pinnedBots.length);
   const layoutInteractive = sidebarLayoutInteractive(density, q);
   const sectionCollapsed = (id: string) =>
@@ -2248,12 +1473,13 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
     );
   };
 
-  const moveSidebarSection = (id: string, direction: -1 | 1) => {
-    const next = moveSection(sectionIds, id, direction);
+  const reorderSections = (id: string, moved: string[]) => {
+    const next = simple ? simpleSidebarSections(moved) : moved;
     if (sameSectionOrder(next, sectionIds)) return;
-    commitSectionOrder(next);
+    commitSectionOrder(simple ? keepFixedSectionSlots(orderedIds, next) : next);
     announceSectionPosition(id, next);
   };
+  const moveSidebarSection = (id: string, direction: -1 | 1) => reorderSections(id, moveSection(sectionIds, id, direction));
 
   const resetSectionDrag = () => {
     sectionDragRef.current = { from: null, over: null };
@@ -2280,25 +1506,96 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
       event.dataTransfer.getData("text/plain") ||
       sectionDragRef.current.from;
     const over = sectionDragRef.current.over;
-    if (from && over) {
-      const next = placeSection(sectionIds, from, over.id, over.place);
-      if (!sameSectionOrder(next, sectionIds)) {
-        commitSectionOrder(next);
-        announceSectionPosition(from, next);
-      }
-    }
+    if (from && over) reorderSections(from, placeSection(sectionIds, from, over.id, over.place));
     resetSectionDrag();
   };
-  const archivedBots = state.bots.filter((bot) => bot.hidden);
-  // Every thread across every bot that needs the person right now — the
-  // same rule and order as the sidebar tree, so the bell can never
-  // disagree with it.
+  const archivedBots = state.bots.filter((bot) => bot.hidden && !bot.movedTo);
   const attention = crossBotAttentionThreads(state.bots, state.pendingQueued, undefined, state.groups);
-  // Every pinned thread across every bot and room — the thread-level twin
-  // of the built-in pinned-bots section, which only ever covered whole bots.
   const pinnedThreads = crossBotPinnedThreads(state.bots, state.groups, state.pendingQueued);
   const pendingBotUndo = teamFeedback?.restoreBot;
   const botRow = (bot: Bot) => botRowProps(state, dispatch, bot, { density, quiet: quietRows, query: q, onMenu: setMenu });
+  const plusControl = (
+    <div ref={plusMenuRef} className="contents">
+    <button
+      ref={importReturnRef}
+      onClick={() => setPlusOpen((o) => !o)}
+      aria-label={remoteClient ? t("sidebar.new") : t("sidebar.newOrShare")}
+      className={rail ? SIMPLE_RAIL_BUTTON : simple ? SIMPLE_TOP_BUTTON : cn(
+        "flex items-center justify-center text-ink-secondary hover:bg-raised hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
+        density === "icons" ? "size-[46px] shrink-0 rounded-xl" : "size-8 rounded-md",
+      )}
+      title={remoteClient ? t("sidebar.new") : t("sidebar.newOrShare")}
+    >
+      <Plus size={rail ? 18 : density === "icons" ? 20 : simple ? 16 : 17} strokeWidth={2} />
+    </button>
+    {plusMotion.shown && (
+      <>
+        <div className={cn(
+          "absolute z-40 w-52 overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60",
+          rail ? "bottom-0 left-full ml-4" : cn("top-full mt-1", density === "icons" ? "left-0" : "right-0"),
+          plusMotion.className,
+        )} {...plusMotion.exitProps}>
+          <button
+            onClick={() => {
+              setPlusOpen(false);
+              setNewChatOpen(true);
+            }}
+            className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
+          >
+            <MessageSquarePlus size={16} className="text-ink-secondary" />
+            {t("sidebar.newChat.title")}
+          </button>
+          <button
+            onClick={() => { setPlusOpen(false); addBot(dispatch); }}
+            className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
+          >
+            <BotIcon size={16} className="text-ink-secondary" />
+            <span className="flex-1">{t("sidebar.newBot")}</span>
+            <ShortcutHint id="new-bot" />
+          </button>
+          <button
+            onClick={() => {
+              setPlusOpen(false);
+              setNewRoom(true);
+            }}
+            className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
+          >
+            <Users size={16} className="text-ink-secondary" />
+            {t("sidebar.newChannel.title")}
+          </button>
+          {advanced && !remoteClient && <button
+            onClick={() => { setPlusOpen(false); setNewTeam(true); }}
+            className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
+          >
+            <FolderPlus size={16} className="text-ink-secondary" /> {t("team.create")}
+          </button>}
+          {!remoteClient && <>
+          {advanced && <button
+            onClick={() => { setPlusOpen(false); setTeamLibraryOpen(true); }}
+            className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
+          >
+            <Library size={16} className="text-ink-secondary" />
+            {t("sidebar.teamLibrary")}
+          </button>}
+          {archivedBots.length > 0 && (
+            <button
+              onClick={() => {
+                setPlusOpen(false);
+                setArchivedBotsOpen(true);
+              }}
+              className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
+            >
+              <Archive size={16} className="text-ink-secondary" />
+              <span className="flex-1">{t("sidebar.archived.title")}</span>
+              <span className="text-[11.5px] text-ink-secondary">{archivedBots.length}</span>
+            </button>
+          )}
+          </>}
+        </div>
+      </>
+    )}
+    </div>
+  );
 
   return (
     <aside
@@ -2307,41 +1604,21 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
       aria-label={t("sidebar.aria")}
       data-native-view-overlay
       data-sidebar
-      style={{ "--sidebar-width": `${widthRef.current ?? defaultWidth}px` } as CSSProperties}
+      style={{ "--sidebar-width": `${sizing.width}px` } as CSSProperties}
       className={cn(
         "relative flex h-full shrink-0 flex-col border-r border-hairline/40 bg-panel",
-        resizing ? "transition-none" : "transition-[width] duration-200",
-        density === "icons" ? "w-[80px]" : density === "compact" ? "w-[272px] md:w-[var(--sidebar-width)]" : "w-[320px] md:w-[var(--sidebar-width)]",
-        sidePanelOpen ? density === "compact" ? "md:max-w-[272px]" : "md:max-w-[320px]" : "md:max-w-[calc(100vw-320px)]",
-        // Below md only: the sidebar leaves the flow and slides in over the chat.
-        // Scoped with max-md: rather than cancelled with md: on purpose — Tailwind
-        // v4 emits the native `translate` property, and any value other than
-        // `none` turns this element into a containing block for its `fixed`
-        // descendants. Cancelling it with an `md:` prefix still emits a value, which
-        // silently reparents NewRoomPanel's overlay and the "+" menu backdrop on
-        // desktop.
+        sizing.resizing ? "transition-none" : "transition-[width] duration-200",
+        density === "icons" ? rail ? "w-[92px]" : "w-[80px]" : density === "compact" ? "w-[272px] md:w-[var(--sidebar-width)]" : advanced ? "w-[320px] md:w-[var(--sidebar-width)]" : "w-[288px] md:w-[var(--sidebar-width)]",
+        sidePanelOpen ? density === "compact" ? "md:max-w-[272px]" : advanced ? "md:max-w-[320px]" : "md:max-w-[288px]" : "md:max-w-[calc(100vw-320px)]",
+        // max-md: rather than an md: cancel: Tailwind v4 emits the native `translate`, and any value but `none` makes
+        // this a containing block for its `fixed` descendants.
         "max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-40",
         "max-md:transition-transform max-md:duration-200",
         open ? "max-md:translate-x-0" : "max-md:-translate-x-full",
       )}
     >
-      {/* The bot list scrolls on under the head (top row, search, pinned
-          panels) and the foot (places and profile), both liquid glass. The
-          frame fills the sidebar, so the resize handle inside it still
-          spans the sidebar's full height. */}
       <GlassScrollFrame className="flex-1">
       <GlassBar edge="top">
-      {/* One top row: [traffic lights] [drag space] [server] [buttons].
-          macOS owns inset traffic lights; Linux/Windows use native chrome.
-          On macOS the row is twice the lights' centre line tall, so
-          items-center puts every control on that line. The server switcher
-          sits at the right, just left of the buttons, so the left stays an
-          empty drag region clear of the lights; where the row is too tight
-          for its name and a visible gap, it shows icon + chevron only, and
-          the buttons never wrap. The row is `relative` so the switcher's
-          error note hangs inside the sidebar.
-          The icons rail is too narrow for a row and stacks instead, server
-          switcher underneath. */}
       <div
         data-sidebar-top-row
         className={cn(
@@ -2352,8 +1629,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         style={density !== "icons" && macInset ? { ...windowDragStyle, height: MAC_TRAFFIC_LIGHT_CENTER_Y * 2 } : windowDragStyle}
       >
         {macInset ? (
-          // The lights span 16-76px on macOS 26; from the row's 16px inset this
-          // ends 12px past them, so nothing clickable starts before 88px.
+          // The macOS 26 traffic lights span 16-76px; nothing clickable starts before 88px.
           <div aria-hidden="true" data-traffic-light-space className={density === "icons" ? "h-5 w-full" : "w-[72px] shrink-0"} />
         ) : browser ? (
           <div className={cn("flex shrink-0 items-center gap-2", density !== "icons" && "mr-3")}>
@@ -2363,31 +1639,19 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           </div>
         ) : null}
         {density !== "icons" && (
-          // Everything between the lights and the buttons; the switcher's
-          // pill reads this slot's width (container `sidebar-top`). Once the
-          // slot can hold a truncated name (96px), a 24px drag gap stays and
-          // the name ellipsizes inside the 140px cap. Narrower than that, the
-          // name hides and the spacer may shrink to nothing. On macOS at
-          // 320px the slot is about 121px in Advanced and 189px in Simple.
-          <div data-sidebar-top-slot className="@container/sidebar-top flex min-w-0 flex-1 items-center">
-            {/* Empty, so it stays a drag region; it takes the slack, which
-                keeps the switcher beside the buttons. The 24px floor applies
-                only while the name is showing, so a 240px sidebar can still
-                fit icon and chevron. */}
-            <div data-sidebar-top-spacer className="min-w-0 flex-1 @min-[96px]/sidebar-top:min-w-6" />
-            {/* Gives way first when the row is tight; only the switcher's own
-                button opts out of the drag region. */}
-            <div data-sidebar-top-switcher className="flex min-w-0 max-w-[140px] items-center">
-              <DesktopWorkspaceSwitcher inline cloudHome={state.config?.cloudHome === true} owner={cloudOwner} howTo={state.cloudHowTo} onMenuClosed={endHowTo} />
+          <div data-sidebar-top-slot className={cn("@container/sidebar-top flex min-w-0 flex-1 items-center", simple && "justify-end")}>
+            {!simple && <div data-sidebar-top-spacer className="min-w-0 flex-1 @min-[96px]/sidebar-top:min-w-6" />}
+            <div data-sidebar-top-switcher className={simple ? "flex min-w-0 items-center" : "flex min-w-0 max-w-[140px] items-center"}>
+              <DesktopWorkspaceSwitcher inline pill={simple} cloudHome={state.config?.cloudHome === true} owner={cloudOwner} howTo={state.cloudHowTo} onMenuClosed={endHowTo} />
             </div>
           </div>
         )}
-        <div
+        {!rail && <div
           data-sidebar-top-buttons
-          className={cn("relative flex shrink-0 items-center", density === "icons" ? "flex-col gap-1" : "ml-0.5 gap-0.5")}
+          className={cn("relative flex shrink-0 items-center", density === "icons" ? "flex-col gap-1" : simple ? "gap-1 pl-0.5" : "ml-0.5 gap-0.5")}
           style={windowNoDragStyle}
         >
-          {/* Simple mode keeps only "+". Expand stays so an icons rail is never a dead end. */}
+          {simple && <SidebarSearchToggle ref={searchToggleRef} open={searchShown} onToggle={() => (searchShown ? closeSearch() : setSearchOpen(true))} />}
           {!collapseToIcons && (advanced || density === "icons") && <button
             type="button"
             onClick={toggleCollapsed}
@@ -2400,7 +1664,6 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           >
             {density === "icons" ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={17} />}
           </button>}
-          {/* The rail hides the search box, so it gets the ⌘K switcher instead. */}
           {density === "icons" && <button
             type="button"
             onClick={openCommandPalette}
@@ -2458,100 +1721,13 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
               </>
             )}
           </div>}
-          {/* `contents` keeps the popover anchored to the header row */}
-          <div ref={plusMenuRef} className="contents">
-          <button
-            ref={importReturnRef}
-            onClick={() => setPlusOpen((o) => !o)}
-            aria-label={remoteClient ? t("sidebar.new") : t("sidebar.newOrShare")}
-            className={cn(
-              "flex items-center justify-center text-ink-secondary hover:bg-raised hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
-              density === "icons" ? "size-[46px] shrink-0 rounded-xl" : "size-8 rounded-md",
-            )}
-            title={remoteClient ? t("sidebar.new") : t("sidebar.newOrShare")}
-          >
-            <Plus size={density === "icons" ? 20 : 17} strokeWidth={2} />
-          </button>
-          {plusMotion.shown && (
-            <>
-              <div className={cn(
-                "absolute top-full z-40 mt-1 w-52 overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60",
-                density === "icons" ? "left-0" : "right-0",
-                plusMotion.className,
-              )} {...plusMotion.exitProps}>
-                <button
-                  onClick={() => {
-                    setPlusOpen(false);
-                    setNewChatOpen(true);
-                  }}
-                  className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
-                >
-                  <MessageSquarePlus size={16} className="text-ink-secondary" />
-                  {t("sidebar.newChat.title")}
-                </button>
-                <button
-                  onClick={() => {
-                    setPlusOpen(false);
-                    dispatch({ type: "toggleNewBot", open: true });
-                  }}
-                  className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
-                >
-                  <BotIcon size={16} className="text-ink-secondary" />
-                  <span className="flex-1">{t("sidebar.newBot")}</span>
-                  <ShortcutHint id="new-bot" />
-                </button>
-                <button
-                  onClick={() => {
-                    setPlusOpen(false);
-                    setNewRoom(true);
-                  }}
-                  className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
-                >
-                  <Users size={16} className="text-ink-secondary" />
-                  {t("sidebar.newChannel.title")}
-                </button>
-                {!remoteClient && <button
-                  onClick={() => { setPlusOpen(false); setNewTeam(true); }}
-                  className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
-                >
-                  <FolderPlus size={16} className="text-ink-secondary" /> {t("team.create")}
-                </button>}
-                {!remoteClient && <>
-                <button
-                  onClick={() => {
-                    setPlusOpen(false);
-                    setTeamLibraryOpen(true);
-                  }}
-                  className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
-                >
-                  <Library size={16} className="text-ink-secondary" />
-                  {t("sidebar.teamLibrary")}
-                </button>
-                {archivedBots.length > 0 && (
-                  <button
-                    onClick={() => {
-                      setPlusOpen(false);
-                      setArchivedBotsOpen(true);
-                    }}
-                    className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
-                  >
-                    <Archive size={16} className="text-ink-secondary" />
-                    <span className="flex-1">{t("sidebar.archived.title")}</span>
-                    <span className="text-[11.5px] text-ink-secondary">{archivedBots.length}</span>
-                  </button>
-                )}
-                </>}
-              </div>
-            </>
-          )}
-          </div>
-        </div>
+          {plusControl}
+        </div>}
       </div>
 
-      {density === "icons" && <DesktopWorkspaceSwitcher compact cloudHome={state.config?.cloudHome === true} owner={cloudOwner} howTo={state.cloudHowTo} onMenuClosed={endHowTo} />}
+      {density === "icons" && !rail && <DesktopWorkspaceSwitcher compact cloudHome={state.config?.cloudHome === true} owner={cloudOwner} howTo={state.cloudHowTo} onMenuClosed={endHowTo} />}
       <OrganizationIdentity compact={density === "icons"} />
-      {/* Search */}
-      <div className={cn("pt-1 pb-3", density === "icons" ? "hidden" : "px-3")}>
+      {simple ? searchShown && <SidebarSearchPill query={query} onQuery={setQuery} onClose={closeSearch} /> : <div className={cn("pt-1 pb-3", density === "icons" ? "hidden" : "px-3")}>
         <div className="flex items-center gap-2 rounded-md border border-hairline/40 bg-inset/40 px-2.5 py-1.5 focus-within:border-focus">
           <Search size={14} className="text-ink-secondary" />
           <input
@@ -2563,13 +1739,11 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             className="w-full bg-transparent text-[12.5px] text-ink placeholder:text-ink-secondary focus:outline-none"
           />
         </div>
-      </div>
-
+      </div>}
       {universalPins && pinnedBots.length > 0 && (
         <div
           data-sidebar-universal-pins=""
-          // vh, not %: inside the glass head a percentage has no height to
-          // resolve against and would stop capping the list.
+          // vh, not %: a percentage has no height to resolve against inside the glass head.
           className="max-h-[min(40vh,280px)] shrink-0 overflow-y-auto border-b border-hairline/40 px-2 pb-2"
         >
           {density !== "icons" && !pinnedCircles && (
@@ -2582,6 +1756,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             density={density}
             circles={pinnedCircles}
             row={botRow}
+            listItem={BotListItem}
           />
         </div>
       )}
@@ -2610,46 +1785,11 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
       )}
       </GlassBar>
 
-      {density !== "icons" && <div
-        role="separator"
-        aria-label={t("sidebar.resize")}
-        aria-orientation="vertical"
-        aria-valuemin={240}
-        aria-valuemax={maxSidebarWidth}
-        aria-valuenow={Math.min(sidebarWidth ?? defaultWidth, maxSidebarWidth)}
-        tabIndex={0}
-        data-sidebar-resize
-        className="absolute inset-y-0 -right-1 z-20 hidden w-2 cursor-col-resize touch-none hover:bg-accent/20 focus-visible:bg-accent/30 md:block"
-        style={windowNoDragStyle}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          event.preventDefault();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          setResizing(true);
-        }}
-        onPointerMove={(event) => {
-          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-          const next = resizeTo(event.clientX - (sidebarRef.current?.getBoundingClientRect().left ?? 0));
-          if (next !== null) event.currentTarget.setAttribute("aria-valuenow", String(next));
-        }}
-        onPointerUp={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) finishResize();
-        }}
-        onPointerCancel={finishResize}
-        onKeyDown={(event) => {
-          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-          event.preventDefault();
-          const limit = sidePanelOpen ? defaultWidth : Math.min(480, window.innerWidth - 320);
-          const next = resizeTo(Math.min(widthRef.current ?? defaultWidth, limit) + (event.key === "ArrowRight" ? 16 : -16));
-          if (next === null) return;
-          setSidebarWidth(next);
-          saveSidebarWidth(next);
-        }}
-      />}
+      {density !== "icons" && <SidebarResizeHandle sizing={sizing} sidebarRef={sidebarRef} style={windowNoDragStyle} />}
+      {!advanced && !collapseToIcons && <SidebarEdgeToggle collapsed={rail} onToggle={toggleCollapsed} style={windowNoDragStyle} anchorRef={sidebarRef} />}
 
-      {/* Bot list */}
-      <GlassScroller className="px-2">
-        <div className="flex flex-col gap-0.5">
+      <GlassScroller className={rail ? "[scrollbar-gutter:stable_both-edges]" : "px-2"}>
+        <div className={cn("flex flex-col", advanced ? "gap-0.5" : "gap-1 pt-2")}>
           {matchingBots.length === 0 && visibleGroups.length === 0 && q && q.length < MIN_QUERY && (
             <div className="px-3 py-6 text-center text-[13px] text-ink-secondary">{t("sidebar.noMatch", { query })}</div>
           )}
@@ -2679,7 +1819,8 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
                   : sectionName
                     ? sectionedBots.filter((bot) => bot.section === sectionName)
                     : [];
-            const collapsed = sectionCollapsed(id);
+            const headless = simple && id === BOTS_SECTION_ID && index === 0;
+            const collapsed = !headless && sectionCollapsed(id);
             const queued = collapsed ? [...sectionChiefItems, ...sectionBotItems].flatMap((bot) =>
               sidebarBotActivityTasks(bot, state.pendingQueued).filter((task) => task.queued).map((task) => `${bot.name}: ${task.title}`)) : [];
             const attention = collapsed
@@ -2695,25 +1836,32 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
                 onDragOver={(event) => updateSectionDropTarget(event, id)}
                 onDrop={dropSection}
                 className={cn(
-                  "flex flex-col gap-0.5",
-                  density !== "icons" && index > 0 && "pt-3",
+                  "flex flex-col",
+                  advanced ? "gap-0.5" : "gap-1",
+                  density !== "icons" && index > 0 && !simple && "pt-3",
                 )}
               >
+                {rail && index > 0 && <SidebarRailSeparator />}
                 {dropTarget?.id === id && dropTarget.place === "before" && draggingSectionId !== id && (
                   <div className="mx-2 h-0.5 rounded-full bg-accent" />
                 )}
-                {density !== "icons" && (
+                {density !== "icons" && !headless && (
                   <SidebarSectionHeader
                     name={sectionLabel(id)}
+                    line={simple}
+                    onMenu={simple && !remoteClient && sectionName ? (button) => {
+                      const rect = button.getBoundingClientRect();
+                      openTeamMenu(sectionName, rect.right - 256, rect.bottom + 4, button);
+                    } : undefined}
+                    menuOpen={teamMenu !== null && teamMenu.name === sectionName}
                     onContextMenu={!remoteClient && layoutInteractive && sectionName ? (event) => {
                       event.preventDefault();
-                      teamMenuReturn.current = event.currentTarget.querySelector<HTMLElement>("button") ?? event.currentTarget;
-                      setTeamMenu({ name: sectionName, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 266)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 190)) });
+                      openTeamMenu(sectionName, event.clientX, event.clientY, event.currentTarget.querySelector<HTMLElement>("button") ?? event.currentTarget);
                     } : undefined}
                     collapsed={collapsed}
                     attention={attention}
                     onToggle={layoutInteractive ? () => toggleSection(id) : undefined}
-                    reorderable={layoutInteractive && sectionIds.length > 1}
+                    reorderable={layoutInteractive && reorderableIds.length > 1 && reorderableIds.includes(id)}
                     dragging={draggingSectionId === id}
                     onDragStart={(event) => {
                       event.dataTransfer.effectAllowed = "move";
@@ -2724,7 +1872,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
                     }}
                     onDragEnd={resetSectionDrag}
                     onMove={(direction) => moveSidebarSection(id, direction)}
-                    onDelete={!remoteClient && sectionName ? () => setDeletingTeam(sectionName) : undefined}
+                    onDelete={!simple && !remoteClient && sectionName ? () => setDeletingTeam(sectionName) : undefined}
                   />
                 )}
                 {collapsed && queued.length > 0 && <button type="button" onClick={() => toggleSection(id)}
@@ -2749,9 +1897,10 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
                         density={density}
                         circles={pinnedCircles}
                         row={botRow}
+                        listItem={BotListItem}
                       />
                     ) : sectionBotItems.map((bot) => <BotListItem key={bot.id} {...botRow(bot)} />)}
-                    {!remoteClient && sectionName && layoutInteractive && (
+                    {!remoteClient && sectionName && layoutInteractive && (!simple || sectionChiefItems.length + sectionGroupItems.length + sectionBotItems.length === 0) && (
                       <button onClick={() => setMoveToTeam(sectionName)} aria-label={t(state.bots.some(bot => !bot.hidden && bot.section?.trim() === sectionName) ? "team.manageBotsIn" : "team.addBotsTo", { name: sectionName })}
                         className="mx-3 my-1 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[12px] text-ink-secondary hover:bg-raised hover:text-ink">
                         <Plus size={13} /> {t(state.bots.some(bot => !bot.hidden && bot.section?.trim() === sectionName) ? "team.manageBots" : "team.addBots")}
@@ -2765,7 +1914,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
               </div>
             );
           })}
-          <SearchResults query={query} onLanded={() => setQuery("")} />
+          <MovedBotRows bots={state.bots} /><SearchResults query={query} onLanded={() => { setQuery(""); setSearchOpen(false); }} />
           {showPinnedCircleThreads && (
             <PinnedCircleThreadSection
               bots={pinnedBots}
@@ -2781,16 +1930,21 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
       </p>
 
       <GlassBar edge="bottom">
-      {/* This window's Live call, while its chat is not on screen. Outside
-          the scrolling sections, so it always shows. */}
       <LiveCallPill
         currentBotId={state.activeView === "chat" ? state.selectedId : null}
         onOpen={(botId, threadId) => openThread(dispatch, { botId, threadId }, state, showThreads)}
         iconOnly={density === "icons"}
       />
 
-      {/* Footer */}
-      <div className={cn("pb-3 pt-2", density === "icons" ? "flex flex-col items-center gap-1 px-2" : "px-3")}>
+      {rail ? <SimpleRailFooter
+        onSearch={() => {
+          if (collapseToIcons) return openCommandPalette();
+          setSearchOpen(true);
+          toggleCollapsed();
+        }}
+        plus={plusControl}
+        server={<DesktopWorkspaceSwitcher rail cloudHome={state.config?.cloudHome === true} owner={cloudOwner} howTo={state.cloudHowTo} onMenuClosed={endHowTo} />}
+      /> : <div className={cn("pb-3 pt-2", density === "icons" ? "flex flex-col items-center gap-1 px-2" : "px-3")}>
         <SidebarFooterNav
           density={density}
           collapsed={sectionCollapsed(TOOLS_SECTION_ID)}
@@ -2803,30 +1957,19 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           />
         )}
         {density === "icons" ? (
-          // Collapsed to avatars, the avatar opens the same menu as the
-          // profile row, anchored to it and kept inside the window.
           <div className="flex flex-col items-center justify-center gap-1">
             <UpdateIndicator />
             <SidebarProfileMenu iconOnly />
           </div>
         ) : (
-          // The place rows and the profile row are two different kinds of
-          // thing — places to go, versus who you are and what the app is —
-          // so they get clear space between them (none when Simple mode has
-          // no place rows and the profile row leads). A hairline lived here
-          // briefly and made it worse: full-bleed, it ran within a few pixels
-          // of the profile row's rounded hover pill, and the two hover states
-          // read as one crowded block rather than two rows. Apps sits at the
-          // end of the profile row.
           <div className="flex items-center gap-1 not-first:mt-3">
             <div className="min-w-0 flex-1">
               <SidebarProfileMenu />
             </div>
-            <UpdateIndicator />
-            <SidebarAppsButton />
+            <SidebarBottomButtons />
           </div>
         )}
-      </div>
+      </div>}
       </GlassBar>
       </GlassScrollFrame>
 
@@ -2920,8 +2063,6 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             setRoomSectionPicker({ groupId, x: roomMenu.x, y: roomMenu.y });
           }}
           onDelete={(groupId) => {
-            // The closing menu remains mounted briefly for its exit animation.
-            // Give the dialog a stable opener instead of that disappearing item.
             sidebarRef.current?.focus();
             setDeletingRoomId(groupId);
           }}
@@ -2933,8 +2074,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         returnFocusRef={sidebarRef}
         onCancel={() => setDeletingRoomId(null)}
         onConfirm={() => {
-          // Read the room from live state: it may have been removed elsewhere
-          // while the dialog was open.
+          // Read the room from live state: it may have been removed while the dialog was open.
           const groupId = deletingRoom?.id;
           setDeletingRoomId(null);
           if (groupId) dispatch({ type: "deleteGroup", groupId });
@@ -2950,14 +2090,13 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           }}
         />
       {newRoom && <NewRoomPanel onClose={() => setNewRoom(false)} />}
-      {/* Portaled: below md the sidebar's translate makes it the containing
-          block for fixed children, which would trap the panel inside it. */}
+      {/* Portaled: below md the sidebar's translate makes it the containing block for fixed children. */}
       {newChatOpen && createPortal(
         <SidebarNewChatPanel
           anchor={sidebarRef.current}
           style={windowNoDragStyle}
           onClose={() => setNewChatOpen(false)}
-          onNewBot={() => { setNewChatOpen(false); dispatch({ type: "toggleNewBot", open: true }); }}
+          onNewBot={() => { setNewChatOpen(false); addBot(dispatch); }}
           onNewGroup={() => { setNewChatOpen(false); setNewRoom(true); }}
         />,
         document.body,

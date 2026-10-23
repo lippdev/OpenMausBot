@@ -1,5 +1,3 @@
-// The verbs that are one MCP tool call each (or two, for doctor): the same
-// tools external agents call (scripts/mcp-server.ts), named for people.
 // `--json` prints a tool's result unchanged; plain output is a line per item.
 import { EXIT, flag, parseCount, parseDuration, requiredFlag, usageError } from "./args.ts";
 import { newSendId, readMessage, resolveTarget, type Target, type VerbContext, type VerbOutcome } from "./context.ts";
@@ -18,14 +16,12 @@ const targetArgs = (target: Target): Rec => ({ [`${target.type}_id`]: target.id,
 
 const DAY = 24 * 3_600_000;
 
-/** Is the server reachable, current enough, and able to run a bot? Who are you to it? */
 async function doctorOnce(ctx: VerbContext): Promise<VerbOutcome> {
   const client = await ctx.client();
   const [rawHealth, models] = await Promise.all([client.tool("get_system_health", {}), client.tool("list_available_models", {})]);
   const health = { ...rawHealth, endpoint: client.baseUrl };
   const instances: Rec[] = Array.isArray(models?.instances) ? models.instances : [];
   const availableEngines = instances.filter((instance) => instance.snapshot?.state === "available").map((instance) => instance.instanceId);
-  // Each further check is the server's own read; one an older server lacks is reported, never fatal.
   const quietly = <T>(read: Promise<T>) => read.catch(() => null);
   const [server, session, config] = await Promise.all([
     quietly(client.json<Rec>("/.well-known/openmausbot/environment")),
@@ -112,11 +108,9 @@ export async function messages(ctx: VerbContext): Promise<VerbOutcome> {
 
 export async function send(ctx: VerbContext): Promise<VerbOutcome> {
   const channelOnly = ctx.verb === "send-channel";
-  // With --bot, --channel or --thread the first value is the message.
   const named = Boolean(flag(ctx.flags, "bot") ?? flag(ctx.flags, "channel") ?? flag(ctx.flags, "thread"));
   const [first, second] = ctx.positionals;
   const text = await readMessage(ctx, named ? first : second);
-  // An id names the target without a lookup, so a dry run touches no server.
   const target = await resolveTarget(ctx, named ? undefined : first, channelOnly ? "channel" : "any");
   const tool = target.type === "bot" ? "send_bot_message" : "send_channel_message";
   const args = { ...targetArgs(target), text, send_id: flag(ctx.flags, "send-id") ?? newSendId() };
@@ -146,7 +140,6 @@ export async function interrupt(ctx: VerbContext): Promise<VerbOutcome> {
 
 const interruptArgs = (target: Target): Rec => ({ target_type: target.type, target_id: target.id, ...(target.taskId ? { task_id: target.taskId } : {}) });
 
-/** INSTANCE/MODEL from --model, or --instance with --model (control-omb's form). */
 function modelArgs(ctx: VerbContext, required: boolean): Rec {
   const model = flag(ctx.flags, "model")?.trim();
   const instance = flag(ctx.flags, "instance")?.trim();

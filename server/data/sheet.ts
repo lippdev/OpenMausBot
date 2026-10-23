@@ -1,8 +1,4 @@
-// The sheet: the ordered cards a bot's Data tab shows, persisted as
-// sheet.json beside data.duckdb in the bot folder. Cards keep their SQL and
-// their chart spec, never their rows: rows live in DuckDB (omb_results) and
-// the panel pages them, so the file stays small enough to send whole on
-// every change. One store per bot; the tools and the panel routes share it.
+// Cards keep their SQL and chart spec, never their rows: rows live in DuckDB, so the file is small enough to send whole.
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
@@ -16,21 +12,15 @@ export function sheetFile(botId: string): string {
   return join(botFolder(botId), SHEET_FILE);
 }
 
-/** On disk: the sheet plus one counter. Card ids (`c_<n>`) and result
- * tables (`q_<n>`) draw from it, so an id is never reused after a delete
- * and a model holding an old id can never be answered with another card. */
+/** Card ids and result tables draw from one counter: an old id can never answer with another card. */
 type StoredSheet = DataSheet & { seq: number };
 
 export interface SheetDeps {
   botId: string;
-  /** The folder sheet.json lives in. Default: the bot folder. */
   dir?: string;
-  /** Sends the whole sheet to every client after a change. */
   broadcast?: (frame: DataBroadcast) => void;
-  /** Drops a deleted or pruned card's result table (BotDatabase.dropResult). */
   dropResult?: (name: string) => Promise<void>;
   now?: () => Date;
-  /** Default DATA_LIMITS.sheetCardsMax. */
   cardsMax?: number;
 }
 
@@ -99,7 +89,6 @@ export class DataSheetStore {
     this.deps.broadcast?.({ kind: "data", botId: this.botId, sheet: this.sheet() });
   }
 
-  /** The sheet as clients and tools see it (no counter). */
   sheet(): DataSheet {
     const { version, botId, cards, sources, updatedAt } = this.load();
     return { version, botId, cards, sources, updatedAt };
@@ -113,19 +102,16 @@ export class DataSheetStore {
     return this.load().cards.find((card) => card.id === id);
   }
 
-  /** What `data_show` returns so the model knows what the person sees. */
   outline(): Array<{ id: string; title: string; kind: DataCard["kind"] }> {
     return this.load().cards.map(({ id, title, kind }) => ({ id, title, kind }));
   }
 
-  /** A result table name no earlier result used: `q_<n>` for data_sql. */
   nextResultName(prefix = "q"): string {
     const stored = this.load();
     stored.seq += 1;
     return `${prefix}_${stored.seq}`;
   }
 
-  /** Appends a card (newest at the bottom), prunes past the cap, saves. */
   async addCard(input: NewCard): Promise<DataCard> {
     const stored = this.load();
     stored.seq += 1;
@@ -137,7 +123,6 @@ export class DataSheetStore {
     return card;
   }
 
-  /** Changes a card in place; `id` and `createdAt` never change. */
   updateCard(id: string, patch: Partial<Omit<DataCard, "id" | "createdAt">>): DataCard | undefined {
     const stored = this.load();
     const index = stored.cards.findIndex((card) => card.id === id);
@@ -158,7 +143,6 @@ export class DataSheetStore {
     return true;
   }
 
-  /** Records a load; a table loaded again replaces its earlier entry. */
   recordSource(source: DataSource): void {
     const stored = this.load();
     const index = stored.sources.findIndex((entry) => entry.name === source.name);
@@ -174,10 +158,6 @@ export class DataSheetStore {
     if (stored.sources.length !== before) this.save();
   }
 
-  /** Over the cap, the oldest unpinned card goes first; only when every
-   * older card is pinned does the oldest pinned one go. The card just added
-   * is never the one removed. Their result tables are dropped with them, so
-   * a sheet never leaks tables it no longer shows. */
   private async prune(): Promise<void> {
     const stored = this.load();
     const max = this.deps.cardsMax ?? DATA_LIMITS.sheetCardsMax;
@@ -198,8 +178,7 @@ export class DataSheetStore {
   }
 }
 
-/** One store per bot for the whole server: the tools (internal MCP route)
- * and the panel routes must see the same cards. */
+/** One store per bot for the whole server: the tools and the panel routes must see the same cards. */
 export class DataSheetRegistry {
   private readonly stores = new Map<string, DataSheetStore>();
   private readonly deps: { broadcast: (frame: DataBroadcast) => void; dropResult: (botId: string, name: string) => Promise<void>; dir?: (botId: string) => string };
@@ -219,12 +198,10 @@ export class DataSheetRegistry {
     return store;
   }
 
-  /** Drops the in-memory store (a test, or a bot whose folder is gone). */
   forget(botId: string): void {
     this.stores.delete(botId);
   }
 
-  /** When a bot is deleted: forget the store and remove its sheet.json. */
   delete(botId: string): void {
     const dir = this.deps.dir?.(botId) ?? botFolder(botId);
     this.stores.delete(botId);

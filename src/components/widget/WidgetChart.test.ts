@@ -1,5 +1,3 @@
-// What the chart puts on the page before Vega draws into it: the marks
-// themselves are tested on the spec (shared/widget-chart.test.ts).
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";

@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StoreProvider } from "@/state/store";
 import * as store from "@/state/store";
-import { AnthropicEveryClaudeBot, ApiKeyRow, looksLikeKey, OpenAiCompatUrl, OpenCodeProviderKeys } from "./ApiKeys";
+import { AnthropicEveryClaudeBot, ApiKeyRow, desktopCredentialSlot, looksLikeKey, OpenAiCompatUrl, OpenCodeProviderKeys, tregVerdict } from "./ApiKeys";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -36,10 +36,8 @@ describe("provider key rows", () => {
     expect(anthropic).toContain("Anthropic API key");
     expect(anthropic).toContain('type="password"');
     expect(anthropic).toContain("sk-ant-…");
-    // The console link and the description live in the help popover.
     expect(anthropic).toContain('aria-label="About Anthropic API key"');
     expect(anthropic).not.toContain("Connected");
-    // Nothing to test until a key is typed or saved.
     expect(anthropic).not.toContain(">Test<");
 
     const compat = render(createElement(ApiKeyRow, { section: "openaiCompat", testProvider: "openaiCompat" }));
@@ -80,7 +78,6 @@ describe("provider key rows", () => {
     const included = render(createElement(ApiKeyRow, { section: "box" }));
     expect(included).toContain("Included with your Cloud plan");
     expect(included).not.toContain("Configured");
-    // an own key can still be added, and there is nothing to remove
     expect(included).toContain('placeholder="Paste your Boat API key"');
     expect(included).not.toContain("Remove the saved key");
 
@@ -129,12 +126,10 @@ describe("provider key rows", () => {
       expect(saved).toContain(`data-opencode-provider-key="${name}"`);
       expect(saved).toContain(`aria-label="Remove ${name}"`);
     }
-    // A new one: a name and a write-only key.
     expect(saved).toContain('placeholder="VENICE_API_KEY"');
     expect(saved).toContain('aria-label="Key name"');
     expect(saved).toMatch(/<input type="password"[^>]*aria-label="Key"/);
 
-    // From a server that predates the list, or with nothing saved yet: closed and empty.
     withKeys(undefined);
     const none = render(createElement(OpenCodeProviderKeys));
     expect(none).not.toMatch(/<details[^>]*open=""/);
@@ -147,5 +142,30 @@ describe("provider key rows", () => {
     expect(html).toContain("OpenAI-compatible base URL");
     expect(html).toContain('placeholder="https://api.groq.com/openai/v1"');
     expect(html).toContain("localhost:11434/v1");
+  });
+});
+
+
+describe("the treg key row", () => {
+  it("is write-only and shows where to get a key, under the field", () => {
+    const html = render(createElement(ApiKeyRow, { section: "treg", testProvider: "treg" }));
+    expect(html).toContain("treg key");
+    expect(html).toContain('type="password"');
+    expect(html).toContain('value=""');
+    expect(html).toMatch(/<a href="https:\/\/treg\.to"[^>]*>Get a key at treg\.to/);
+  });
+
+  it("says treg is working with the balance, or names the exact problem", () => {
+    expect(tregVerdict({ ok: true, check: "treg", balanceUsd: 4.25 } as never)).toBe("treg is working ✓ Balance: $4.25.");
+    expect(tregVerdict({ ok: true })).toBe("treg is working ✓");
+    expect(tregVerdict({ ok: false, message: "treg rejected this key. Copy it again from treg.to." })).toBe("treg rejected this key. Copy it again from treg.to.");
+  });
+});
+
+describe("desktop credential slots", () => {
+  it("saves the desktop-held keys in the encrypted store, so Clear removes them there too", () => {
+    expect(desktopCredentialSlot("treg")).toBe("tregApiKey");
+    expect(desktopCredentialSlot("box")).toBe("boxToken");
+    expect(desktopCredentialSlot("openai")).toBeUndefined();
   });
 });

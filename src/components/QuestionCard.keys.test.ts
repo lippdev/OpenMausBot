@@ -1,6 +1,4 @@
 // @vitest-environment happy-dom
-// Letter keys pick options and typing your own answer replaces a single
-// pick.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -45,10 +43,8 @@ const plan: AskQuestion = { question: "Which plan?", options: [{ label: "Free" }
 
 describe("QuestionCard keys", () => {
   it("picks the option a letter names", () => {
-    // two questions, so a pick waits for submit instead of sending
     mount([plan, { ...plan, question: "Which region?" }]);
     press(radios()[0]!, "b");
-    // the pick lands, and the card moves on to the question still owed
     expect(host.textContent).toContain("1 of 2 answered");
     expect(host.textContent).toContain("Which region?");
     press(radios()[0]!, "C");

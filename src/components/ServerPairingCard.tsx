@@ -6,10 +6,11 @@ import { copyText, type CopyFeedback } from "@/lib/copy-text";
 import { api } from "@/state/store";
 import { isOwnerOrAdmin, readSessionState, type SessionState } from "../lib/session";
 import { readMembership } from "../lib/membership";
+import { lastSeen, minutesLeft } from "../lib/pairing-time";
 import { revealPhonePairing } from "../lib/phone-pairing";
 import { Card } from "./SettingsPrimitives";
+import { TeamPhoneCard } from "./TeamPhoneCard";
 
-/** What the server hands out for a new device (POST /api/auth/pairing). */
 export interface PairingOffer {
   id: string;
   code: string;
@@ -27,57 +28,27 @@ export interface PairedDevice {
   email?: string;
 }
 
-/** The server's owner on its own machine, or an admin session, may pair
- * devices; a chat-only session must not even see the offer. */
+/**
+ * Security: only the owner on its own machine or an admin session may pair; a chat-only session must not even see the
+ * offer.
+ */
 export function canPairDevices(state: SessionState | null): boolean {
   return isOwnerOrAdmin(state);
 }
 
-/** A session that may see the card but not act: say why, instead of showing
- * nothing at all. Only a paired session can be chat-only; loopback is the
- * owner, and the unauthenticated case never reaches Settings. */
 export function pairingBlockedReason(state: SessionState | null): "chat-only" | null {
   return state?.kind === "session" && !state.scopes.includes("admin") ? "chat-only" : null;
 }
 
-/** The devices the card lists: on an OMB Cloud home only the owner's own,
- * each with full access (the server lists no other). */
 export function shownDevices(devices: PairedDevice[], cloudHome: boolean): PairedDevice[] {
   return cloudHome ? devices.filter((device) => device.scopes.includes("admin")) : devices;
-}
-
-export function minutesLeft(expiresAt: number, now = Date.now()): number {
-  return Math.max(0, Math.ceil((expiresAt - now) / 60_000));
-}
-
-export function lastSeen(lastSeenAt: number, now = Date.now()): string {
-  const minutes = Math.max(0, Math.floor((now - lastSeenAt) / 60_000));
-  if (minutes < 1) return t("remote.serverPairing.justNow");
-  if (minutes < 60) return t("remote.serverPairing.minutesAgo", { minutes });
-  if (minutes < 1440) return t("remote.serverPairing.hoursAgo", { hours: Math.round(minutes / 60) });
-  return t("remote.serverPairing.daysAgo", { days: Math.round(minutes / 1440) });
 }
 
 const button = "ui-button ui-button-primary";
 const quiet = "ui-button";
 
-/** Settings → Remote access: mint a one-time pairing code with a QR for
- * the phone app (or for a non-phone client — MCP, `openmausbot pair`, a
- * second desktop app), and see or sign out the devices that hold a
- * session. Shown for every client of a server: a hosted server reached
- * from a browser, the desktop app's own local server (#950), and the
- * desktop app connected to a hosted workspace, whose requests reach that
- * server with the paired session — the only place its phones can be
- * paired from (MOCA-84). `canPairDevices` decides who may act. On an OMB
- * Cloud home (`cloudHome`), which is personal, every device paired is one of
- * the owner's own, with full access: no chat-only choice, only the owner's
- * devices listed, and one line saying why. `focusRequest` counts up when
- * "Connect your phone" opened Settings here: the card scrolls into view with
- * focus on Create pairing code, once it knows what it may show. */
-export function ServerPairingCard({ initialSession = null, initialPairingCodes = true, cloudHome = false, focusRequest = 0 }: { initialSession?: SessionState | null; initialPairingCodes?: boolean; cloudHome?: boolean; focusRequest?: number }) {
+export function ServerPairingCard({ initialSession = null, initialPairingCodes = true, cloudHome = false, focusRequest = 0, team }: { initialSession?: SessionState | null; initialPairingCodes?: boolean; cloudHome?: boolean; focusRequest?: number; team?: string }) {
   const [session, setSession] = useState<SessionState | null>(initialSession);
-  // A hosted workspace refuses pairing codes: people sign in through the
-  // organisation's portal. Offer only the signed-in devices there.
   const [pairingCodes, setPairingCodes] = useState(initialPairingCodes);
   const [scope, setScope] = useState<"admin" | "client">("admin");
   const [offer, setOffer] = useState<PairingOffer | null>(null);
@@ -110,8 +81,6 @@ export function ServerPairingCard({ initialSession = null, initialPairingCodes =
     });
   }, []);
 
-  // The card renders nothing until the session is known; reveal it then,
-  // once per request. Any other Settings navigation ends the request (0).
   useEffect(() => {
     if (!focusRequest) revealed.current = 0;
     else if (revealed.current !== focusRequest && revealPhonePairing(root.current)) revealed.current = focusRequest;
@@ -123,6 +92,13 @@ export function ServerPairingCard({ initialSession = null, initialPairingCodes =
     return () => clearInterval(timer);
   }, [offer]);
 
+  if (team && session?.kind === "session" && session.team) {
+    return (
+      <div ref={root} tabIndex={-1} data-phone-pairing="server" className="scroll-mt-4 rounded-xl focus:outline-none">
+        <TeamPhoneCard team={team} />
+      </div>
+    );
+  }
   if (!canPairDevices(session)) {
     if (pairingBlockedReason(session) !== "chat-only") return null;
     return (

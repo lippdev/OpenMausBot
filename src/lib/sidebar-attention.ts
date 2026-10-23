@@ -7,7 +7,6 @@ export type SidebarAttentionBot = {
 export type SidebarAttentionGroup = {
   unread?: boolean;
   busyBotId?: string | null;
-  /** A room's threads run side by side; one speaking off-screen counts too. */
   tasks?: Array<{ busyBotId?: string | null }>;
 };
 
@@ -17,7 +16,6 @@ export type SidebarSectionAttention = {
   working: number;
 };
 
-/** Summarize signals that would otherwise disappear when a section closes. */
 export function sidebarSectionAttention(
   bots: SidebarAttentionBot[],
   groups: SidebarAttentionGroup[],

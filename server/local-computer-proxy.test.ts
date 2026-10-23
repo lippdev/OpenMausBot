@@ -12,6 +12,8 @@ import { describe, expect, it } from "vitest";
 import { CONTROL_UNCONFIRMED } from "./control-client.ts";
 import { gatedLocalComputer } from "./local-computer.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
+import { wideSchema } from "./testing/oversized-tool-schema.ts";
+import { TOOL_SCHEMA_PROFILE_ENV } from "./tool-schema-profile.ts";
 
 // A disposable MCP child that never opens a computer or reads user data.
 const FAKE_DRIVER = `
@@ -60,10 +62,8 @@ describe("local computer proxy (isolated child and control endpoint)", () => {
     let child: ChildProcess | undefined;
     try {
       if (runtime === "electron") {
-        // Build the real descriptor INSIDE Electron: in a Node-only test
-        // process.execPath hides a missing ELECTRON_RUN_AS_NODE flag. Never
-        // load the user's app, daemon, or data, and fail before spawning a
-        // malformed descriptor (which would launch a GUI).
+        // Built inside Electron: in a Node-only process execPath hides a missing ELECTRON_RUN_AS_NODE. Never loads the user's app,
+        // daemon or data, and fails before spawning a malformed descriptor (which would launch a GUI).
         const electron = createRequire(import.meta.url)("electron") as string;
         const moduleUrl = new URL("./local-computer.ts", import.meta.url).href;
         const bootstrap = spawnSync(electron, ["--input-type=module", "-e", `
@@ -108,9 +108,7 @@ describe("local computer proxy (isolated child and control endpoint)", () => {
       expect((await rpc("ping")).result).toEqual({});
       const refused = await rpc("tools/call", { name: "click" });
       expect(refused.result).toMatchObject({ isError: true, content: [{ type: "text", text: reason }] });
-      // The harness holds a check while the computer is busy. The bridge's
-      // real client waits it out — past the 2 s that used to turn this
-      // answer into "A person has taken control".
+      // The harness holds its check while the computer is busy; the bridge's real client must wait past 2 s.
       delayMs = 2_600;
       const slow = await rpc("tools/call", { name: "click" }, false, 8_000);
       expect(slow.result).toMatchObject({ isError: true, content: [{ type: "text", text: reason }] });
@@ -138,8 +136,7 @@ describe("local computer proxy (isolated child and control endpoint)", () => {
   });
 
   it("hands every engine a provider-safe tools/list, whatever root schema the driver ships", async () => {
-    // cua-driver 0.22.1's browser_prepare root: an anyOf of untyped branches
-    // that strict providers refuse, failing the whole turn.
+    // cua-driver 0.22.1's browser_prepare root: an anyOf of untyped branches that strict providers refuse.
     const driver = `
 const readline = require("node:readline");
 const inputSchema = {type:"object",required:[],additionalProperties:true,
@@ -175,12 +172,38 @@ readline.createInterface({input: process.stdin}).on("line", (line) => {
       });
       expect(click.inputSchema).toEqual({ type: "object", properties: {} });
 
-      // Anything that is not the answer to a tools/list reaches the agent as sent.
       const other = await rpc(2, "initialize");
       expect(other.result.echo.inputSchema.anyOf).toHaveLength(2);
     } finally {
       child.kill("SIGKILL");
     }
+  });
+
+  it("fits the driver's tools to the engine's provider profile when the turn carries one", async () => {
+    const wide = wideSchema(110);
+    const driver = `
+const readline = require("node:readline");
+readline.createInterface({input: process.stdin}).on("line", (line) => {
+  const message = JSON.parse(line);
+  process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:message.id,result:{tools:[{name:"configure",inputSchema:${JSON.stringify(wide)}}]}}) + "\\n");
+});
+`;
+    const connection = gatedLocalComputer(
+      { command: process.execPath, args: ["-e", driver], env: {}, platform: "darwin", scope: "local-computer" },
+      { url: "http://127.0.0.1:1/control", token: "schema-fixture-token" },
+    );
+    const listed = async (env: Record<string, string>) => {
+      const child = spawn(connection.command, connection.args, { env: { ...process.env, ...connection.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
+      try {
+        const lines = createInterface({ input: child.stdout! })[Symbol.asyncIterator]();
+        child.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) + "\n");
+        return JSON.parse((await lines.next()).value as string).result.tools[0].inputSchema;
+      } finally {
+        child.kill("SIGKILL");
+      }
+    };
+    expect(JSON.stringify(await listed({ [TOOL_SCHEMA_PROFILE_ENV]: "moonshot" })).length).toBeLessThanOrEqual(12_000);
+    expect(await listed({})).toEqual(wide);
   });
 
   it("rejects malformed environment and missing authority without printing connection secrets", () => {

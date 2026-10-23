@@ -19,16 +19,10 @@ function queryBounds(panelHeight: number) {
   return { min: Math.min(QUERY_MIN_HEIGHT, max), max };
 }
 const clampHeight = (height: number, bounds: { min: number; max: number }) => Math.max(bounds.min, Math.min(bounds.max, height));
-/** How long typing pauses before the text runs. Each run materialises a
- * table on the server and interrupts the previous one, so one keystroke
- * burst should be one query, not one per character; 50 ms still feels live. */
 export const LIVE_RUN_DELAY_MS = 50;
 const reason = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 
-/** One result at a time, following the latest update until History or
- * another result is selected. Older cards remain intact on the sheet. */
 export function DataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: string; requestId: number } }) {
-  // A different conversation must not inherit this editor or its live request.
   return <BotDataPanel key={`${bot.id}:${bot.threadId}`} bot={bot} requestedCard={requestedCard} />;
 }
 
@@ -38,7 +32,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
   const theme = useColorScheme();
   const [loadError, setLoadError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
-  // A run of this box's text is on the wire (first run or live edit).
   const [running, setRunning] = useState(false);
   const [selection, setSelection] = useState<{ cardId: string } | null>(() => requestedCard ? { cardId: requestedCard.id } : null);
   const selectionRef = useRef(selection);
@@ -52,18 +45,12 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
   const [queryHeight, setQueryHeight] = useState<number | null>(null);
   const resizeFrom = useRef<{ pointerId: number; y: number; height: number } | null>(null);
   const bounds = queryBounds(panelHeight);
-  // The run on the wire. Only a live edit can be dropped at once: the server
-  // keeps the old result. A first run owns its card's status, so the next
-  // run supersedes it on the server instead of aborting it into "failed".
+  // Only a live edit is aborted at once (the server keeps the old result); a first run is superseded on the server,
+  // never aborted into "failed".
   const liveRequest = useRef<{ controller: AbortController; live: boolean } | null>(null);
-  // The text waiting out LIVE_RUN_DELAY_MS; a newer keystroke replaces it.
   const runTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // A first run with no card yet. Text typed before its card arrives waits
-  // here instead of making a second card.
   const creating = useRef<{ pending: string | null } | null>(null);
-  // The person's text since the box last took a result's SQL; null = none.
   const typed = useRef<string | null>(null);
-  // The SQL the box last took from a result; a new revision makes it take `sql`.
   const [shown, setShown] = useState({ sql: "", revision: 0 });
   const requested = useRef<string | null | undefined>(undefined);
   const previousConnection = useRef(state.connected);
@@ -86,8 +73,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
   };
 
   useEffect(() => {
-    // Reconcile cached sheets after a restart or missed frame, and retry an
-    // explicit result request if the current cache does not contain it.
     const reconnected = previousConnection.current === false && state.connected === true;
     previousConnection.current = state.connected;
     const refresh = reconnected || requested.current === undefined || (requested.current !== requestKey && requestedCard && !sheet?.cards.some((card) => card.id === requestedCard.id));
@@ -101,8 +86,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
   const tables = state.dataTables[bot.id] ?? sheet?.sources ?? [];
   const selectedCard = selection ? cards.find((card) => card.id === selection.cardId) : null;
   const card = selection ? selectedCard ?? null : cards[0] ?? null;
-  // The result the SQL box edits. A text result or an empty sheet has none,
-  // so the box starts empty and its first run makes a new card.
   const target = card && card.sql !== undefined && card.kind !== "text" ? card : null;
   const targetRef = useRef(target);
   targetRef.current = target;
@@ -129,7 +112,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
     }
     forgetRun();
     const controller = new AbortController();
-    // A result to keep if the new query fails; a card still on its first run has none.
     const live = Boolean(target?.result);
     liveRequest.current = { controller, live };
     setRunning(true);
@@ -138,13 +120,11 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
     const request: DataRunRequest = target ? { cardId: target.id, sql, ...(live ? { live: true } : {}) } : { sql };
     try {
       const body = await api<{ card?: { id: string }; result?: { id: string } } | undefined>(DATA_ROUTES.run(bot.id), { method: "POST", body: JSON.stringify(request), signal: controller.signal });
-      // A new card made while History held another result: show it.
       const id = body?.card?.id ?? body?.result?.id;
       if (!target && id && liveRequest.current?.controller === controller && selectionRef.current) setSelection({ cardId: id });
     } catch (cause) {
       const current = liveRequest.current?.controller === controller;
       if (!target && (current || controller.signal.aborted)) {
-        // No card came of it (refused or cancelled): the text typed meanwhile is the next first run.
         const pending = creating.current?.pending ?? null;
         creating.current = null;
         if (pending !== null && current) {
@@ -160,7 +140,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
       }
     }
   };
-  /** Every keystroke: chat sees the draft at once; the run waits for a pause. */
   const edit = (sql: string) => {
     typed.current = sql;
     const target = targetRef.current;
@@ -168,7 +147,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
     dropPendingRun();
     runTimer.current = setTimeout(() => { runTimer.current = null; void run(sql); }, LIVE_RUN_DELAY_MS);
   };
-  /** Stops this box's run and, for a card, asks the server to stop its query. */
   const cancel = () => {
     const target = targetRef.current;
     dropPendingRun();
@@ -185,7 +163,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
     const previous = last.current;
     const targetId = target?.id ?? null;
     last.current = { selection: selectionKey, targetId, external: externalRevision };
-    // The card this box's first run made: keep the typing, run what waited.
     const own = creating.current !== null && target?.by === "person";
     if (own) {
       const pending = creating.current!.pending;
@@ -195,8 +172,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
     const botUpdated = externalRevision !== undefined && previous?.external !== externalRevision;
     const switched = previous === null || (!own && (previous.selection !== selectionKey || previous.targetId !== targetId));
     if (!switched && !botUpdated) return;
-    // Another result, or the bot's finished edit of this one: the box takes
-    // its SQL, and text typed against the old query must not run over it.
     dropPendingRun();
     forgetRun();
     setRunError(null);
@@ -275,7 +250,6 @@ function BotDataPanel({ bot, requestedCard }: { bot: Bot; requestedCard?: { id: 
 
   return (
     <div ref={panel} className="@container/data flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card text-ink fullscreen:h-full fullscreen:w-full" data-testid="data-panel">
-      {/* Footer menus size against this result area, leaving the 44px footer and 4px gap. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden [container-type:size]" data-testid="data-result">
         {!sheet && !loadError && (
           <p className="flex items-center justify-center gap-2 py-10 text-[12.5px] text-ink-secondary" role="status">

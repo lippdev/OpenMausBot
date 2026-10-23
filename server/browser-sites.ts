@@ -1,40 +1,26 @@
-// Signed-in sites: what a bot's browser remembers per site, and signing out.
-//
-// agent-browser keeps a session's cookies and storage in two places: in the
-// running Chrome, and in the restore file it autosaves and loads at the next
-// launch (`<restore key>-<session>.json.enc`; format in cli/src/native/
-// state.rs: AES-256-GCM under SHA-256 of the key text, a 12-byte nonce first,
-// the 16-byte tag last). A running browser is read with the engine's own
-// `state save`, a stopped one from that file. A site is listed when the
-// browser holds cookies or storage for it, and signing out clears both
-// places: the running browser over its own DevTools connection, the saved
-// file by rewriting it. The same on desktop, server and Cloud. The key stays
-// in this server process; neither the bot nor a page ever sees it.
+// agent-browser keeps a session's cookies and storage in the running Chrome, in its kept profile, and in the restore file
+// it autosaves (`<restore key>-<session>.json.enc`, cli/src/native/state.rs: AES-256-GCM under SHA-256 of the key text,
+// 12-byte nonce first, 16-byte tag last); signing out clears all three. The key stays in this server process; no bot or page ever sees it.
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { browserRestoreKey, browserSessionsDirectory, inRunningBrowser } from "./browser-engine.ts";
+import { browserRestoreKey, browserSessionsDirectory, closeBrowserSession, inRunningBrowser, startBrowserSession } from "./browser-engine.ts";
 import { browserRuntimeEnv } from "./browser-runtime.ts";
 
 export interface SignedInSite {
-  /** The site's host, as wide as the browser's own records go: a cookie for
-   * `.google.com` makes `google.com` the site of `accounts.google.com`. */
+  /** As wide as the browser's own records go: a cookie for `.google.com` makes `google.com` the site of `accounts.google.com`. */
   site: string;
   cookies: number;
-  /** Origins with local or session storage. */
   storage: number;
 }
 
 export interface SignedInSites {
-  /** The browser is open now; signing out also clears it live. */
   running: boolean;
   sites: SignedInSite[];
 }
 
-/** One browser session: the engine, its launch environment (the bot's own
- * spec), and the key its saved state is encrypted with. */
 export interface BrowserSitesTarget {
   binaryPath: string;
   session: string;
@@ -42,17 +28,20 @@ export interface BrowserSitesTarget {
   encryptionKey: string;
 }
 
-/** The DevTools calls this module makes. */
 export interface Cdp {
   send(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>>;
   close(): void;
 }
 
+export interface CdpEvent { method: string; params?: Record<string, unknown>; sessionId?: string }
+export interface CdpListeners { event?(message: CdpEvent): void; closed?(): void }
+
 export interface BrowserSitesDeps {
-  /** One engine command in the session's running browser (inRunningBrowser):
-   * its answer's data, or null when the browser is stopped. */
   engine?: (target: BrowserSitesTarget, args: string[]) => Promise<Record<string, unknown> | null>;
   connect?: (url: string) => Promise<Cdp>;
+  /** Starts the stopped browser of a session with a kept profile, so a sign-out reaches the profile too. */
+  start?: (target: BrowserSitesTarget) => Promise<boolean>;
+  stop?: (target: BrowserSitesTarget) => Promise<boolean>;
 }
 
 interface Cookie { name: string; domain: string; path: string; partitionKey?: unknown }
@@ -104,9 +93,7 @@ function hasStorage(origin: SavedOrigin): boolean {
   return [origin.localStorage, origin.sessionStorage].some((entries) => Array.isArray(entries) && entries.length > 0);
 }
 
-/** The widest host the browser itself keeps records under: `accounts.google.com`
- * belongs to `google.com` only when something is stored for `google.com`. No
- * suffix list is needed, because a browser never stores a cookie for `co.uk`. */
+/** No suffix list is needed: a browser never stores a cookie for `co.uk`. */
 function siteOf(host: string, hosts: ReadonlySet<string>): string {
   if (/^[\d.]+$|:/u.test(host)) return host;
   const labels = host.split(".");
@@ -121,7 +108,6 @@ function inSite(host: string, site: string): boolean {
   return host === site || host.endsWith(`.${site}`);
 }
 
-/** Sites with cookies or storage, alphabetical. */
 export function signedInSites(cookies: readonly unknown[], origins: readonly unknown[]): SignedInSite[] {
   const cookieHosts = cookies.filter(isCookie).map(hostOfCookie);
   const storageHosts = origins.filter(isOrigin).filter(hasStorage).flatMap((origin) => hostOfOrigin(origin.origin) ?? []);
@@ -150,8 +136,6 @@ function withoutSite(state: SavedState, site: string): SavedState {
 }
 
 function stateBases(session: string): string[] {
-  // The current restore key first, then the spelling a profile used before
-  // it (prepareBrowserSessionState adopts that one while the first is missing).
   return [`${browserRestoreKey(session)}-${session}`, `${session}-${session}`];
 }
 
@@ -167,8 +151,7 @@ function modified(path: string): number {
   try { return statSync(path).mtimeMs; } catch { return 0; }
 }
 
-/** The state the next launch restores: agent-browser loads the newest file
- * under the session's restore key. An unreadable file restores nothing. */
+/** agent-browser restores the newest file under the session's restore key; an unreadable file restores nothing. */
 function savedState(directory: string, session: string, key: string): SavedState {
   for (const base of stateBases(session)) {
     const path = [".json.enc", ".json"].map((suffix) => join(directory, base + suffix)).filter(existsSync)
@@ -185,14 +168,11 @@ function writeState(path: string, state: SavedState, key: string): void {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temporary, path.endsWith(".enc") ? encryptBrowserState(text, key) : text, { mode: 0o600 });
   try { renameSync(temporary, path); }
-  catch (error) { try { unlinkSync(temporary); } catch { /* already gone */ } throw error; }
+  catch (error) { try { unlinkSync(temporary); } catch {} throw error; }
 }
 
-/** Rewrite every saved file of the session without the site (or with
- * nothing, for all). Synchronous from read to rename, so no other cleanup in
- * this process can interleave, and a profile erased meanwhile stays erased.
- * The `.previous` backups agent-browser leaves mid-save hold the old logins
- * and are never restored; they go. */
+/** Synchronous from read to rename, so no other cleanup interleaves; the `.previous` backups agent-browser leaves mid-save
+ * hold the old logins and go too. */
 function rewriteSavedState(directory: string, session: string, key: string, site: string | null): void {
   for (const base of stateBases(session)) {
     for (const suffix of [".json.enc", ".json"]) {
@@ -201,7 +181,7 @@ function rewriteSavedState(directory: string, session: string, key: string, site
         let state: SavedState = EMPTY_STATE;
         if (site !== null) {
           try { state = withoutSite(readState(path, key), site); }
-          catch { continue; } // unreadable: nothing in it can be restored either
+          catch { continue; }
         }
         writeState(path, state, key);
       }
@@ -211,8 +191,7 @@ function rewriteSavedState(directory: string, session: string, key: string, site
   }
 }
 
-/** A minimal DevTools client over the browser's own WebSocket. */
-export function connectCdp(url: string, timeoutMs = 10_000): Promise<Cdp> {
+export function connectCdp(url: string, timeoutMs = 10_000, listeners: CdpListeners = {}): Promise<Cdp> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     const pending = new Map<number, { done: (value: Record<string, unknown>) => void; fail: (error: Error) => void }>();
@@ -224,10 +203,17 @@ export function connectCdp(url: string, timeoutMs = 10_000): Promise<Cdp> {
       reject(new Error("Could not reach the running browser."));
       failAll(new Error("The browser connection failed."));
     });
-    socket.addEventListener("close", () => failAll(new Error("The browser connection closed.")));
+    socket.addEventListener("close", () => {
+      failAll(new Error("The browser connection closed."));
+      listeners.closed?.();
+    });
     socket.addEventListener("message", (event) => {
-      let message: { id?: number; result?: Record<string, unknown>; error?: { message?: string } };
+      let message: { id?: number; method?: unknown; params?: Record<string, unknown>; sessionId?: string; result?: Record<string, unknown>; error?: { message?: string } };
       try { message = JSON.parse(String(event.data)); } catch { return; }
+      if (message.id === undefined && typeof message.method === "string") {
+        listeners.event?.({ method: message.method, params: message.params, sessionId: message.sessionId });
+        return;
+      }
       const call = typeof message.id === "number" ? pending.get(message.id) : undefined;
       if (!call) return;
       pending.delete(message.id!);
@@ -238,6 +224,7 @@ export function connectCdp(url: string, timeoutMs = 10_000): Promise<Cdp> {
       clearTimeout(opening);
       resolve({
         send: (method, params = {}, sessionId) => new Promise((done, fail) => {
+          if (socket.readyState !== WebSocket.OPEN) return fail(new Error("The browser connection closed."));
           const id = next++;
           const timer = setTimeout(() => { pending.delete(id); fail(new Error("The running browser did not answer.")); }, timeoutMs);
           pending.set(id, {
@@ -260,8 +247,7 @@ async function pages(cdp: Cdp): Promise<PageTarget[]> {
     ? [{ targetId: target.targetId, url: typeof target.url === "string" ? target.url : "" }] : []);
 }
 
-/** Run `act` attached to a page: cookies are read and deleted through a page,
- * in the bot's own browser context. */
+/** Cookies are read and deleted through a page, in the bot's own browser context. */
 async function onPage<T>(cdp: Cdp, target: PageTarget, act: (sessionId: string) => Promise<T>): Promise<T> {
   const { sessionId } = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true }) as { sessionId?: string };
   if (typeof sessionId !== "string") throw new Error("Could not open the running browser's page.");
@@ -276,9 +262,6 @@ function originOf(url: string): string | null {
   } catch { return null; }
 }
 
-/** Sign the running browser out of one site (or all): its cookies, the
- * storage of every origin the engine's own save found for it (`live`), of its
- * cookies' hosts and of its open tabs, and those tabs' sessionStorage. */
 async function signOutLive(cdp: Cdp, site: string | null, live: SavedState): Promise<void> {
   const open = await pages(cdp);
   const first = open[0];
@@ -312,11 +295,16 @@ async function signOutLive(cdp: Cdp, site: string | null, live: SavedState): Pro
   }
 }
 
-const defaultEngine = (target: BrowserSitesTarget, args: string[]) =>
-  inRunningBrowser(target.binaryPath, browserRuntimeEnv({ ...target.env, AGENT_BROWSER_SESSION: target.session }), args);
+const sessionEnv = (target: BrowserSitesTarget) => browserRuntimeEnv({ ...target.env, AGENT_BROWSER_SESSION: target.session });
+const defaultEngine = (target: BrowserSitesTarget, args: string[]) => inRunningBrowser(target.binaryPath, sessionEnv(target), args);
+const defaultStart = (target: BrowserSitesTarget) => startBrowserSession(target.binaryPath, sessionEnv(target));
+const defaultStop = (target: BrowserSitesTarget) => closeBrowserSession(target.binaryPath, sessionEnv(target));
 
-/** The running browser's cookies and storage, as the engine itself saves them
- * (`state save` into a private scratch file), or null when it is stopped. */
+function keptProfile(target: BrowserSitesTarget): boolean {
+  const dir = target.env.AGENT_BROWSER_PROFILE;
+  return !!dir && existsSync(dir);
+}
+
 async function runningState(target: BrowserSitesTarget, deps: BrowserSitesDeps): Promise<SavedState | null> {
   const scratch = mkdtempSync(join(tmpdir(), "omb-browser-state-"));
   try {
@@ -333,8 +321,7 @@ function directoryOf(target: BrowserSitesTarget): string {
   return browserSessionsDirectory(browserRuntimeEnv({ ...target.env, AGENT_BROWSER_SESSION: target.session }));
 }
 
-// One listing or sign-out at a time per session, so two clicks cannot
-// interleave their live deletes and file rewrites.
+// One listing or sign-out at a time per session, so two clicks cannot interleave live deletes and file rewrites.
 const queues = new Map<string, Promise<unknown>>();
 function serially<T>(session: string, work: () => Promise<T>): Promise<T> {
   const previous = queues.get(session) ?? Promise.resolve();
@@ -345,15 +332,11 @@ function serially<T>(session: string, work: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** What this session is signed in to: what the running browser holds now,
- * as the engine saves it, or else what its saved state will restore. */
 export function listSignedInSites(target: BrowserSitesTarget, deps: BrowserSitesDeps = {}): Promise<SignedInSites> {
   return serially(target.session, () => visit(target, deps, null, false));
 }
 
-/** Sign out of one listed site, or of everything (`site` null): the running
- * browser first, then the saved state, so the next launch restores neither.
- * A site that is not listed (already signed out) changes nothing. */
+/** The running browser first, then the saved state, so the next launch restores neither. */
 export function signOutOfSites(target: BrowserSitesTarget, site: string | null, deps: BrowserSitesDeps = {}): Promise<SignedInSites> {
   return serially(target.session, () => visit(target, deps, site, true));
 }
@@ -369,12 +352,28 @@ async function visit(target: BrowserSitesTarget, deps: BrowserSitesDeps, site: s
     const after = savedState(directory, target.session, target.encryptionKey);
     return { running: false, sites: signedInSites(after.cookies, after.origins) };
   };
-  const live = await runningState(target, deps);
-  if (!live) return stopped();
+  let live = await runningState(target, deps);
+  const starting = !live && signOut && keptProfile(target);
+  if (starting) {
+    if (!await (deps.start ?? defaultStart)(target)) throw new Error("The browser could not start to sign out. Try again.");
+    live = await runningState(target, deps);
+  }
+  try {
+    if (!live) return stopped();
+    const result = await signOutLiveState(target, deps, site, signOut, live, stopped);
+    return starting ? { ...result, running: false } : result;
+  } finally {
+    if (starting) await (deps.stop ?? defaultStop)(target).catch(() => false);
+  }
+}
+
+async function signOutLiveState(target: BrowserSitesTarget, deps: BrowserSitesDeps, site: string | null, signOut: boolean, live: SavedState, stopped: () => SignedInSites): Promise<SignedInSites> {
+  const directory = directoryOf(target);
+  const listed = (sites: SignedInSite[]) => site === null || sites.some((entry) => entry.site === site);
   const sites = signedInSites(live.cookies, live.origins);
   if (!signOut || !listed(sites)) return { running: true, sites };
   const answer = await (deps.engine ?? defaultEngine)(target, ["get", "cdp-url"]);
-  if (!answer) return stopped(); // it closed meanwhile, saving what it had
+  if (!answer) return stopped();
   const url = answer.cdpUrl;
   // Only the engine's own Chrome on this machine is ever addressed.
   if (typeof url !== "string" || !/^wss?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+\//u.test(url)) {

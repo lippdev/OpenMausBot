@@ -1,6 +1,3 @@
-// A preview card that floats above a link in a bot reply. It opens when the
-// pointer rests on the link, on keyboard focus, or on a long press, and
-// shows what the app knows about the link without fetching it.
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ArrowUpRight, CircleDot, GitCommitHorizontal, GitPullRequest, Github, Globe, Hash } from "lucide-react";
@@ -8,7 +5,6 @@ import { t } from "@/lib/i18n";
 import { githubRefLabel, type GithubRef, type GithubRefKind } from "@/lib/github-refs";
 
 export const HOVER_OPEN_DELAY_MS = 300;
-/** time to move the pointer from the link into the card */
 export const HOVER_CLOSE_GRACE_MS = 150;
 export const LONG_PRESS_MS = 500;
 const GAP = 8;
@@ -16,8 +12,6 @@ const EDGE = 8;
 
 type Box = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 
-/** Above the link and centered on it, inside the window. Below when there
- * is no room above. */
 export function placeCard(anchor: Box, card: { width: number; height: number }, view: { width: number; height: number }) {
   const maxLeft = Math.max(EDGE, view.width - card.width - EDGE);
   const left = Math.min(maxLeft, Math.max(EDGE, anchor.left + anchor.width / 2 - card.width / 2));
@@ -47,8 +41,6 @@ function pathOf(url: URL): string {
   }
 }
 
-/** The card itself: a title, a short muted description, and the site with
- * an outward arrow, in the composer's surface and radius. */
 export function LinkPreviewCard({ href, github }: { href: string; github?: GithubRef | null }) {
   let url: URL | null = null;
   try {
@@ -84,9 +76,6 @@ export function LinkPreviewCard({ href, github }: { href: string; github?: Githu
   );
 }
 
-/** Wraps a link: hover (after a short delay), keyboard focus or a long press
- * opens the card, leaving closes it after a grace period that lets the
- * pointer move into the card. */
 export function LinkHoverCard({ href, github, children }: { href: string; github?: GithubRef | null; children: (anchor: AnchorProps) => ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -125,7 +114,6 @@ export function LinkHoverCard({ href, github, children }: { href: string; github
       if (!anchorRef.current?.contains(target) && !cardRef.current?.contains(target)) setOpen(false);
     };
     window.addEventListener("resize", update);
-    // a scrolled transcript moves the link away from the card
     window.addEventListener("scroll", close, true);
     document.addEventListener("pointerdown", outside, true);
     return () => {
@@ -147,7 +135,7 @@ export function LinkHoverCard({ href, github, children }: { href: string; github
       later(false, HOVER_CLOSE_GRACE_MS);
     },
     onFocus: (event) => {
-      // keyboard focus only: a click focuses the link too
+      // :focus-visible only: a click focuses the link too.
       if (event.currentTarget.matches(":focus-visible")) {
         clear();
         setOpen(true);
@@ -185,8 +173,6 @@ export function LinkHoverCard({ href, github, children }: { href: string; github
       if (!pressed.current) clear();
     },
     onClick: (event) => {
-      // the long press showed the card; lifting the finger must not also
-      // open the link
       if (pressed.current) {
         event.preventDefault();
         pressed.current = false;

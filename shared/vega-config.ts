@@ -1,15 +1,7 @@
-// The one Vega config every chart in OMB is drawn with: the Data panel
-// (vega-embed), the server's SVG/PNG for phones, Slack and email, and the
-// headless render check all pass this same object, so a chart looks the same
-// wherever it lands (PLAN D6, risk 6: theme drift). Vega-Lite accepts it as
-// `config`; Vega as the runtime config.
-//
-// Only two themes exist here, light and dark, chosen by the caller from the
-// skin's `--code-color-scheme`. The ink and hairline values are the Midnight
-// and Atelier tokens in src/styles.css; the skins' accents are not used for
-// marks, because a series must keep its colour between the panel and a PNG
-// in an email, and a brown-first palette (Atelier) next to a blue-first one
-// (Midnight) would break that.
+// The one Vega config every chart is drawn with (the Data panel, the server's
+// SVG/PNG, the headless render check): Vega-Lite's `config`, or Vega's runtime
+// config. Light and dark only. Skin accents are not used for marks, so a series
+// keeps its colour between the panel and a PNG in an email.
 
 export type VegaTheme = "light" | "dark";
 
@@ -18,9 +10,8 @@ export type VegaTheme = "light" | "dark";
  * generic family. */
 export const VEGA_FONT = '"Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif';
 
-/** Ten categorical colours of middling luminance so every one of them reads
- * on both #111 and white (≥ 3:1 each way, see shared/vega-config.test.ts).
- * Hue order alternates warm and cool so neighbouring series differ at a glance. */
+/** Ten categorical colours of middling luminance, each ≥ 3:1 on both #111111
+ * and white. Hue order alternates warm and cool so neighbouring series differ. */
 export const VEGA_CATEGORY_RANGE: readonly string[] = [
   "#3b82f6", // blue
   "#ea580c", // orange

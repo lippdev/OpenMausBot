@@ -1,9 +1,5 @@
-// events: the server's live event stream (GET /api/events, the one the app
-// itself reads) as one redacted JSON line per frame, for sidecars and CI
-// logs. It resumes from its cursor after a drop; the server's hello line
-// says whether it could (resumed: false means "read the state again").
-// --job follows the threads of one conversation's job as it grows, and
-// --until-settled ends when that job does, with the job's exit code.
+// Resumes from its cursor after a drop: the server's hello line says whether it could (resumed: false means "read the
+// state again"). --until-settled ends when the job does, with the job's exit code.
 import { EXIT, flag, usageError } from "./args.ts";
 import { readJob } from "./client.ts";
 import type { VerbContext, VerbOutcome } from "./context.ts";
@@ -14,7 +10,6 @@ type Frame = Record<string, any>;
 export const DEFAULT_EVENT_KINDS = ["message", "message.patch", "thread", "bot", "group"];
 const FINAL = new Set(["needs-input", "completed", "failed", "stalled", "idle"]);
 
-/** The conversations a frame is about. */
 export function frameThreads(frame: Frame): string[] {
   const own = (record: Frame | undefined) => [record?.threadId, ...(Array.isArray(record?.tasks) ? record.tasks.map((task: Frame) => task.threadId) : [])];
   switch (frame.kind) {
@@ -26,19 +21,16 @@ export function frameThreads(frame: Frame): string[] {
   }
 }
 
-/** Whether to print a frame: hello always, pings never, otherwise its kind and threads. */
 export function wantFrame(frame: Frame, kinds: ReadonlySet<string>, threads: ReadonlySet<string> | null): boolean {
   if (frame.kind === "hello") return true;
   if (frame.kind === "ping" || !kinds.has(frame.kind)) return false;
   return !threads || frameThreads(frame).some((thread) => typeof thread === "string" && threads.has(thread));
 }
 
-/** Server-sent events from a byte stream, as { id, data } blocks. */
 export async function* sseFrames(body: AsyncIterable<Uint8Array>): AsyncGenerator<{ id?: string; data: string }> {
   const decoder = new TextDecoder();
   let buffer = "";
   for await (const chunk of body) {
-    // a CRLF split across chunks meets again in the buffer
     buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(/\r\n/g, "\n");
     for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
       const block = buffer.slice(0, end);
@@ -68,7 +60,6 @@ export async function eventsVerb(ctx: VerbContext): Promise<VerbOutcome> {
   let cursor = flag(ctx.flags, "since")?.trim();
   const client = await ctx.client();
 
-  // --job: the threads of that job, read again when a bot or room changes.
   let since: number | undefined;
   let settled: string | undefined;
   let refreshing: Promise<void> | undefined;
@@ -86,9 +77,7 @@ export async function eventsVerb(ctx: VerbContext): Promise<VerbOutcome> {
     }
   };
   if (job) await refresh();
-  // Read the job again a moment after a frame about a bot, a room, a message,
-  // a (re)connection or a heartbeat: the last change of a job can land
-  // without a frame of its own, or while a read is already under way.
+  // The last change of a job can land without a frame of its own, or while a read is already under way.
   const schedule = () => {
     if (refreshing) { again = true; return; }
     refreshing = new Promise<void>((done) => setTimeout(done, 300)).then(refresh).catch(() => undefined).finally(() => {
@@ -130,4 +119,3 @@ export async function eventsVerb(ctx: VerbContext): Promise<VerbOutcome> {
   if (!settled && ctx.signal.aborted) return { result: { ok: true, cursor }, exitCode: EXIT.interrupted, human: [], printed: true };
   return { result: { ok: true, cursor, ...(settled ? { state: settled } : {}) }, exitCode: settled ? jobExit(settled) : EXIT.done, human: [], printed: true };
 }
-

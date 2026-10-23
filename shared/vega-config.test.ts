@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { VEGA_CATEGORY_RANGE, VEGA_FONT, vegaConfig, vegaSurface } from "./vega-config.ts";
 
-/** WCAG relative luminance and contrast ratio, as scripts/check-skin-contrast.mjs computes them. */
+/** WCAG relative luminance and contrast ratio. */
 function luminance(hex: string): number {
   const channel = (i: number): number => {
     const c = parseInt(hex.slice(i, i + 2), 16) / 255;

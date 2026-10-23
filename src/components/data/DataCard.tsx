@@ -17,12 +17,10 @@ export interface DataCardProps {
   card: DataCardModel;
   theme: ColorScheme;
   controls?: ReactNode;
-  /** The panel's own run of this card's SQL is on the wire; the card itself stays "ready". */
   running?: boolean;
   onCancel: () => void;
 }
 
-/** The one spinner-and-Cancel for a card's first run and for a live edit. */
 export function RunningStatus({ onCancel }: { onCancel: () => void }) {
   return <span className="flex items-center gap-2 text-[11.5px] text-ink-secondary" role="status">
     <Loader2 size={13} className="animate-spin" aria-hidden="true" />{t("data.card.running")}
@@ -30,7 +28,6 @@ export function RunningStatus({ onCancel }: { onCancel: () => void }) {
   </span>;
 }
 
-/** How the server shrank the rows before charting, in the person's words. */
 const REDUCTION_KEYS: Record<DataReduction["method"], LocaleKey> = {
   group: "data.card.reduction.group", bins: "data.card.reduction.bins", topN: "data.card.reduction.topN",
   timeBucket: "data.card.reduction.timeBucket", m4: "data.card.reduction.m4", sample: "data.card.reduction.sample", none: "data.card.reduction.none",
@@ -38,8 +35,6 @@ const REDUCTION_KEYS: Record<DataReduction["method"], LocaleKey> = {
 const action = "flex items-center gap-1 rounded-md px-2 py-1 text-[11.5px] text-ink-secondary hover:bg-inset hover:text-ink disabled:cursor-not-allowed disabled:opacity-40";
 const menuItem = "rounded-md px-3 py-1.5 text-left text-[12px] hover:bg-inset disabled:opacity-40";
 
-/** Export and copy for any paged result: a card's or a loaded table's. The
- * server writes the file and answers with where it put it. */
 export function useExportMenu(botId: string, target: Omit<DataExportRequest, "format">, grid: RefObject<DataGridHandle | null>) {
   const [notice, setNotice] = useState<{ kind: "status" | "alert"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -87,11 +82,9 @@ export function ExportMenu({ formats, busy, onExport, onCopyMarkdown }: { format
   );
 }
 
-/** The one selected result, with only display and export controls. */
 export function DataCard({ bot, card, theme, controls, running, onCancel }: DataCardProps) {
   const grid = useRef<DataGridHandle | null>(null);
   const [view, setView] = useState<"chart" | "table">("chart");
-  // One identity per card: the grid's paging keys off it.
   const target = useMemo(() => ({ cardId: card.id }), [card.id]);
   const exporter = useExportMenu(bot.id, target, grid);
   const columns: DataColumn[] = card.columns ?? [];

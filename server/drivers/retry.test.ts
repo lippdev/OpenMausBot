@@ -37,6 +37,13 @@ describe("classifyError", () => {
     });
   });
 
+  it("calls Codex's failed workspace routing discovery transient, but not a refused sign-in", () => {
+    expect(classifyError({ text: "stream error: workspace routing discovery failed: error sending request" })).toEqual({ transient: true, reason: "server_error" });
+    expect(classifyError(new Error("workspace routing discovery timed out"))).toEqual({ transient: true, reason: "server_error" });
+    expect(classifyError({ exitCode: 1, stderr: "Error: workspace routing discovery failed" })).toEqual({ transient: true, reason: "server_error" });
+    expect(classifyError({ text: "workspace routing discovery unauthorized (401)" })).toEqual({ transient: false, reason: "auth" });
+  });
+
   it("calls connection failures and timeouts transient", () => {
     expect(classifyError(new Error("fetch failed"))).toMatchObject({ transient: true });
     expect(classifyError(new Error("read ECONNRESET"))).toMatchObject({ transient: true, reason: "connection_reset" });
@@ -74,7 +81,6 @@ describe("classifyError", () => {
   });
 
   it("prefers the transient reading when stderr carries both shapes", () => {
-    // a crash whose stderr mentions throttling is worth one more try
     expect(classifyError({ exitCode: 1, stderr: "error: 429 too many requests" })).toEqual({
       transient: true,
       reason: "rate_limited",
@@ -114,9 +120,6 @@ describe("classifyError — usage limits", () => {
     expect(classifyError({ exitCode: 1, stderr: text })).toEqual({ transient: true, reason: "rate_limited" });
     expect(classifyError({ exitCode: 1, stderr: "API Error: 429 Rate limit reached: weekly limit reached" })).toEqual({ transient: false, reason: "quota" });
   });
-  // A subscription's usage limit is not a 429 to retry through: the window
-  // is hours away. It is terminal for this engine, and the harness may
-  // carry the task to another account or engine instead.
   it("calls a subscription usage limit a quota problem, not a retry", () => {
     for (const text of [
       "You've hit your usage limit for this session. Try again at 7pm.",

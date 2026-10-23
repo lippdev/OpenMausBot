@@ -1,12 +1,4 @@
-// Parallel work in one room, end to end against the isolated fixture server.
-// Each room thread has its own drive: two threads run at the same time, a
-// thread's Stop reaches only that thread, and a bot asked in several threads
-// works them one after another — every thread that waited on it gets its
-// reply, none is skipped because the waiters woke together.
-//
-// The fake Claude CLI runs in `slow` mode and holds every reply until the
-// gate file exists, so "still working" is a state the test controls rather
-// than a race it hopes to win.
+// The fake Claude CLI in `slow` mode holds every reply until the gate file exists, so "still working" is a state the test controls.
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,7 +43,6 @@ describe.skipIf(process.platform === "win32")("parallel room threads", () => {
       const xena = (await control("new-bot", "--name", "Xena")).bot;
       const yuri = (await control("new-bot", "--name", "Yuri")).bot;
 
-      // ── one bot, three threads: it finishes one thread, then the next ──
       const solo = (await control("new-channel", "--name", "Solo room", "--members", xena.id)).channel;
       const soloFirst = solo.activeTaskId as string;
       const soloSecond = await newThread(solo.id, "Second");
@@ -60,13 +51,11 @@ describe.skipIf(process.platform === "win32")("parallel room threads", () => {
       await expect.poll(async () => (await task(solo.id, soloFirst))?.busyBotId, POLL).toBe(xena.id);
       await send(solo.id, soloSecond, "Second thread work");
       await send(solo.id, soloThird, "Third thread work");
-      // both later threads are working — waiting on Xena, each with its chip
       for (const threadId of [soloSecond, soloThird]) {
         await expect.poll(async () => (await messages(threadId)).some((message) =>
           message.kind === "activity" && message.tool?.name?.includes("is finishing another conversation")), POLL).toBe(true);
         expect((await task(solo.id, threadId))?.working).toBe(true);
       }
-      // the bot is still in exactly one thread
       expect((await room(solo.id)).tasks?.filter((item) => item.busyBotId === xena.id).map((item) => item.threadId)).toEqual([soloFirst]);
 
       writeFileSync(gate, "finish");
@@ -80,11 +69,9 @@ describe.skipIf(process.platform === "win32")("parallel room threads", () => {
       for (const threadId of [soloSecond, soloThird]) {
         const transcript = await messages(threadId);
         expect(transcript.filter((message) => message.kind === "activity" && /skipped/.test(message.tool?.name ?? ""))).toEqual([]);
-        // the "will reply here when free" promise was kept, not left open
         expect(transcript.find((message) => message.tool?.name?.includes("is finishing another conversation"))?.tool?.ok).toBe(true);
       }
 
-      // ── two bots, two threads: both work at once; Stop is per thread ──
       rmSync(gate);
       const pair = (await control("new-channel", "--name", "Pair room", "--members", `${xena.id},${yuri.id}`)).channel;
       const pairFirst = pair.activeTaskId as string;
@@ -102,7 +89,6 @@ describe.skipIf(process.platform === "win32")("parallel room threads", () => {
 
       await api("POST", `/api/groups/${pair.id}/interrupt`, { threadId: pairFirst });
       await expect.poll(async () => (await task(pair.id, pairFirst))?.working, POLL).toBe(false);
-      // the other thread keeps its speaker and its turn
       expect(await task(pair.id, pairSecond)).toMatchObject({ working: true, busyBotId: yuri.id });
 
       writeFileSync(gate, "finish");

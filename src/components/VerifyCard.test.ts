@@ -32,7 +32,6 @@ describe("VerifyCard", () => {
     expect(markup).toContain(">git push<");
     expect(markup).toContain('title="pnpm control:omb doctor --url http://127.0.0.1:8799"');
     expect(markup).toContain('title="git push origin main"');
-    // the tag sits between the label and the command, on verified steps only
     expect(markup.match(new RegExp(TAG, "g"))).toHaveLength(2);
     expect(markup).toMatch(new RegExp(`>doctor</span><span class="[^"]*text-success">${t("chat.verify.verifiedTag")}</span><code`));
     expect(markup).toMatch(/>git push<\/span><code/);
@@ -94,7 +93,6 @@ describe("VerifyCard", () => {
     expect(markup).toContain("1 step · 1 running");
     expect(markup).toContain(">git push<");
     expect(markup).not.toContain(TAG);
-    // ChatView asks this before mounting the card
     expect(showRun(one)).toBe(false);
     expect(showRun(steps)).toBe(true);
   });

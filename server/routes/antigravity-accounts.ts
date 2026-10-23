@@ -1,6 +1,3 @@
-// Add another Google account to Antigravity: a new personal Antigravity provider
-// that shares only the source provider's runtime and gets its own Google profile.
-//
 // POST /api/instances/antigravity-accounts, body { displayName, sourceInstanceId }.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -9,13 +6,9 @@ import type { InstanceConfigMap } from "../contracts.ts";
 import { PASS, type RouteHandler } from "./table.ts";
 
 export interface AntigravityAccountRouteDeps {
-  /** The provider instances as they would be saved now. */
   instances(): InstanceConfigMap;
-  /** Saves the map with this new instance and applies it. */
   persist(instanceId: string, instances: InstanceConfigMap): Promise<void>;
-  /** Every provider instance, as GET /api/instances describes them. */
   describe(): Promise<unknown>;
-  /** Runs `work` while no other provider-settings change runs; null when one already is. */
   exclusive<T>(work: () => Promise<T>): Promise<T> | null;
 }
 

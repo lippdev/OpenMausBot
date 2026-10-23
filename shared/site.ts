@@ -1,8 +1,7 @@
 // Which site a host belongs to: its registrable domain, for telling a page's
-// own requests and scripts from third parties (server/browser-page-health.ts).
-// Not the whole Public Suffix List: the multi-label suffixes and hosting
-// platforms sites commonly sit under. An unknown suffix falls back to the
-// last two labels, which over-merges a few hosts and never splits one.
+// own requests from third parties. Not the whole Public Suffix List: an unknown
+// suffix falls back to the last two labels, which over-merges a few hosts and
+// never splits one.
 
 /** Public suffixes with more than one label, where the registrable domain is
  * one label more. */

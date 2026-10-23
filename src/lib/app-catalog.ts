@@ -1,22 +1,15 @@
-// How the Apps pop-up groups the marketplace: category pills ranked by how
-// many apps carry them, and the sections the unfiltered view stacks
-// (connected first, a few categories, then everything). Pure, so the
-// component stays a renderer and these rules are tested on their own.
+import { t } from "./i18n";
+import type { LocaleKey } from "@/locales";
 
 export interface CatalogCard {
   slug: string;
   categories?: string[];
 }
 
-/** Category pills shown inline before the rest fold under "More". */
 export const INLINE_CATEGORY_COUNT = 5;
-/** Categories previewed as their own section in the unfiltered view. */
 export const CATEGORY_SECTION_COUNT = 3;
-/** Apps a category section previews (two rows of two). */
 export const CATEGORY_SECTION_SIZE = 4;
 
-/** Every category, most used first (ties alphabetically), split into the
- * pills shown inline and the ones under More. */
 export function rankCategories(cards: readonly CatalogCard[], inline = INLINE_CATEGORY_COUNT): { inline: string[]; more: string[] } {
   const counts = new Map<string, number>();
   for (const card of cards) for (const category of new Set(card.categories ?? [])) counts.set(category, (counts.get(category) ?? 0) + 1);
@@ -33,10 +26,6 @@ export type CatalogSection<Card> =
   | { kind: "category"; category: string; cards: Card[]; more: boolean }
   | { kind: "all"; cards: Card[] };
 
-/** The unfiltered, unsearched view: your connected apps, then a short
- * preview of the busiest categories (apps you have not connected yet), then
- * the whole catalog. A section with nothing in it is left out, except the
- * catalog itself, which still carries its loading and empty states. */
 export function catalogSections<Card extends CatalogCard>(
   cards: readonly Card[],
   isConnected: (slug: string) => boolean,
@@ -51,4 +40,53 @@ export function catalogSections<Card extends CatalogCard>(
   }
   sections.push({ kind: "all", cards: cards.filter((card) => !isConnected(card.slug)) });
   return sections;
+}
+
+// Catalog categories and blurbs come in English; the known ones show in the app's language.
+const APP_CATEGORY_COPY: Record<string, string> = {
+  productivity: "productivity",
+  "developer tools": "developerTools",
+  communication: "communication",
+  files: "files",
+  "sales and crm": "salesCrm",
+  design: "design",
+  marketing: "marketing",
+  analytics: "analytics",
+};
+
+const CONNECTOR_COPY: Record<string, string> = {
+  "google calendar": "googleCalendar",
+  "google sheets": "googleSheets",
+  "google docs": "googleDocs",
+  notion: "notion",
+  github: "github",
+  linear: "linear",
+  sentry: "sentry",
+  jira: "jira",
+  slack: "slack",
+  gmail: "gmail",
+  discord: "discord",
+  "google drive": "googleDrive",
+  posthog: "posthog",
+  "x (twitter)": "xTwitter",
+  reddit: "reddit",
+  zapier: "zapier",
+  hubspot: "hubspot",
+  salesforce: "salesforce",
+  asana: "asana",
+  trello: "trello",
+  dropbox: "dropbox",
+  airtable: "airtable",
+  figma: "figma",
+  stripe: "stripe",
+};
+
+export function appCategoryLabel(name: string): string {
+  const id = APP_CATEGORY_COPY[name.trim().toLowerCase()];
+  return id ? t(`apps.category.${id}` as LocaleKey) : name;
+}
+
+export function connectorDescription(card: { label: string; blurb: string }): string {
+  const id = CONNECTOR_COPY[card.label.trim().toLowerCase()];
+  return id ? t(`apps.catalog.${id}.blurb` as LocaleKey) : card.blurb;
 }

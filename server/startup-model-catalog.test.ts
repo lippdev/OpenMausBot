@@ -1,7 +1,3 @@
-// A later start must not wait out engine model discovery before listen.
-// The first run still does, so the seeded bot's default model stays the one
-// discovery would have chosen. A turn that needs the list waits for the
-// refresh already in flight instead of reading the saved catalog early.
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -101,9 +97,7 @@ const acpSupport = (resolveModels: () => Promise<ModelCatalog>): AcpSupport => (
 async function settledSoon(promise: Promise<unknown>): Promise<boolean> {
   let settled = false;
   void promise.then(() => { settled = true; }, () => { settled = true; });
-  // create() and registry.load() queue a handful of already-resolved awaits
-  // (file cache, dispose, Promise.all). A refresh still sitting on the gate
-  // never becomes settled inside this drain.
+  // create() and registry.load() queue a few already-resolved awaits; a refresh still on the gate never settles inside this drain.
   for (let i = 0; i < 12; i += 1) await Promise.resolve();
   return settled;
 }

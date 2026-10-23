@@ -67,14 +67,12 @@ describe("engine library", () => {
   });
 
   it("keeps cards under the same keyed parent when a refreshed status regroups them", () => {
-    const other = instance({ instanceId: "work" }); // Duplicate display names are valid.
+    const other = instance({ instanceId: "work" });
     const renderEngine = (value: InstanceInfo) => createElement(EngineCard, { instance: value, children: null });
     const ready = EngineSections({ instances: [instance(), other], renderEngine });
     const signedOut = EngineSections({ instances: [instance({ snapshot: { state: "available", authenticated: false } }), other], renderEngine });
     for (const tree of [ready, signedOut]) {
       expect(tree.type).toBe("div");
-      // This parent/key contract prevents native disclosure state and React
-      // form drafts from being discarded when authentication changes.
       const card = tree.props.children[0].find((node: { key: string }) => node.key === "claude");
       expect(card.type).toBe("div");
       expect(card.props.children.type).toBe(EngineCard);

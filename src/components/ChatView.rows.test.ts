@@ -1,9 +1,5 @@
 // @vitest-environment happy-dom
-// The open chat's rows re-render only when their own message changes. A
-// store event elsewhere (another bot's frame, a field of this bot that no
-// row shows) renders none of them; a patched tool chip renders that chip
-// and nothing else. Counted through the leaf each row draws, which is not
-// memoized here, so it renders exactly when its row does.
+// Counted through the leaf each row draws, which is not memoized here, so it renders exactly when its row does.
 import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -32,8 +28,7 @@ vi.mock("./ToolActivity", async (importOriginal) => ({
     return createElement("span", null, tool.name);
   },
 }));
-// The real button, run inside a counting component: whatever it subscribes
-// to re-renders this component, so every render of it is counted.
+// The real button, run inside a counting component, so every render of it is counted.
 vi.mock("./SpeakButton", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./SpeakButton")>();
   return {
@@ -42,7 +37,6 @@ vi.mock("./SpeakButton", async (importOriginal) => {
       renders.speak++;
       return actual.SpeakButton(props);
     },
-    // read aloud now lives in the more menu, built by this hook on every row
     useSpeakAction: (args: Parameters<typeof actual.useSpeakAction>[0]) => {
       renders.speak++;
       return actual.useSpeakAction(args);
@@ -54,7 +48,7 @@ vi.mock("./DesktopCapabilities", async (importOriginal) => ({
   useDesktopCapabilities: () => ({ capabilities: { dictation: { available: false }, host: { packaged: true, platform: "other" }, localComputer: { available: false } }, ready: true }),
 }));
 vi.mock("@/lib/analytics", () => ({ track: vi.fn() }));
-vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true }));
+vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => true, useReactor: () => "user" }));
 vi.mock("./ModelPicker", () => ({ ModelPicker: () => null }));
 
 const { ChatView } = await import("./ChatView");
@@ -64,8 +58,6 @@ const { t } = await import("@/lib/i18n");
 
 const message = (id: string, parentId: string | undefined, fields: Partial<Message>): Message =>
   ({ id, parentId, role: "bot", kind: "text", at: new Date(2026, 9, 3, 9, Number(id.slice(1))).getTime(), ...fields });
-// Three turns, each a question, one tool step and an answer; the last turn's
-// step is still running.
 const messages: Message[] = [];
 for (let turn = 0; turn < 3; turn++) {
   const at = turn * 3;
@@ -101,7 +93,6 @@ async function draw() {
   flushSync(() => root.render(createElement(BotEditorStore, { value, children })));
   await settle();
 }
-// What a row's more menu offers: open it, read the items, close it again.
 async function menuOf(mid: string) {
   const more = document.querySelector<HTMLButtonElement>(`[data-mid="${mid}"] button[aria-haspopup="menu"]`);
   if (!more) return [];
@@ -129,7 +120,6 @@ async function rowRendersAfter(change: (current: AppState) => AppState) {
 }
 
 beforeAll(async () => {
-  // late on the day of the thread, so its separator reads "Today"
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(2026, 9, 3, 23, 0));
   vi.stubGlobal("fetch", () => new Promise(() => {}));
@@ -173,7 +163,6 @@ describe("chat transcript rows", () => {
     expect(document.body.textContent).toContain("Read file 2, page 2");
   });
 
-  // The separator used to follow every store event; now it follows the date.
   it("moves Today on to Yesterday after midnight, at the next store event", async () => {
     vi.setSystemTime(new Date(2026, 9, 4, 0, 30));
     const scout = state.bots.find((bot) => bot.id === "scout")!;
@@ -196,9 +185,6 @@ describe("chat transcript rows", () => {
     expect(await regenerate()).toEqual(["m5"]);
   });
 
-  // A paired Mac keeps its voice choice ("This Mac" or "Host voice") on the
-  // device, outside the store. The read-aloud buttons pick up a switch at the
-  // next store event, here the settings beside the chat closing.
   it("follows this device's voice choice at the next store event", async () => {
     const bridge = window.ogb;
     window.ogb = { ...bridge, platform: "darwin", remoteClient: { active: true } } as typeof window.ogb;
@@ -215,11 +201,9 @@ describe("chat transcript rows", () => {
     try {
       await switchTo("system");
       expect(await speak()).toEqual([t("chat.speak.read"), t("chat.speak.read")]);
-      // no speech key on the host, so Host voice cannot read aloud
       await switchTo("host");
       expect(await speak()).toEqual([`${t("chat.speak.needsKey")} (off)`, `${t("chat.speak.needsKey")} (off)`]);
     } finally {
-      // the stubbed globals go in afterAll
       window.ogb = bridge;
     }
   });

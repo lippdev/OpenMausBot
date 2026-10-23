@@ -18,6 +18,18 @@ describe("written skills", () => {
     expect(parseSkillMd(text)).toMatchObject({ name: "standup", description: "Two lines --- name: evil" });
   });
 
+  it("double-quotes a description containing a colon+space so the frontmatter stays valid YAML", () => {
+    const text = writtenSkillMd({ ...draft, description: "Show me your work: evidence, not vibes." });
+    expect(text.split("\n")[2]).toBe('description: "Show me your work: evidence, not vibes."');
+    expect(parseSkillMd(text)).toMatchObject({ description: "Show me your work: evidence, not vibes." });
+  });
+
+  it("escapes double quotes inside a description and reads them back", () => {
+    const text = writtenSkillMd({ ...draft, description: 'Show the "receipt", not the promise' });
+    expect(text.split("\n")[2]).toBe('description: "Show the \\"receipt\\", not the promise"');
+    expect(parseSkillMd(text)).toMatchObject({ description: 'Show the "receipt", not the promise' });
+  });
+
   it("names the first problem in a draft", () => {
     expect(writtenSkillProblem({ ...draft, name: "Stand Up" })).toBe("name");
     expect(writtenSkillProblem({ ...draft, name: "goal" })).toBe("reserved");

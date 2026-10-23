@@ -1,17 +1,5 @@
-// The Data surface's engine: DuckDB inside the OMB server, one database per
-// bot, the same on desktop, headless server and Cloud (D1, D2 in
-// _plans/data-surface-2026-10-09/PLAN.md).
-//
-// The binding is loaded on first use through a dynamic require so esbuild
-// never bundles it: the packaged app ships no node_modules, so the binding
-// travels as a resource tree (resources/duckdb, staged by
-// scripts/prepare-duckdb.mjs) and the Docker image sets OMB_DUCKDB_DIR. A
-// binding that cannot load never throws at import; `unavailable()` says why.
-//
-// Each bot gets two connections, "bot" and "panel", so the person's paging
-// never waits behind the bot's query and each side cancels only its own.
-// `interrupt()` is per connection, so each connection runs one statement at
-// a time: a cancellation always hits the statement it was meant for.
+// The binding loads on first use through a dynamic require so esbuild never bundles it (the packaged app ships no
+// node_modules). DuckDB's interrupt() is per connection, so each connection runs one statement at a time.
 import { existsSync, mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -44,30 +32,24 @@ type Cell = string | number | boolean | null;
 export const DATA_DB_FILE = "data.duckdb";
 export const DATA_TMP_DIR = "data-tmp";
 const IDLE_CLOSE_MS = 10 * 60_000;
-/** A first-time INSTALL downloads the extension; it gets this budget, not the statement's. */
 export const EXTENSION_INSTALL_TIMEOUT_MS = 5 * 60_000;
 const HISTOGRAM_BINS = 20;
 const SAMPLE_SCAN_ROWS = 1_000;
 const STATS_CACHE_MAX = 64;
 const PAGE_LIMIT_MAX = 10 * DATA_LIMITS.pageSize;
+const INTERRUPT_DELIVERY_MS = 10;
 const RESULT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PLAIN_IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
 
 export interface DataEngineOptions {
-  /** Where a bot's database lives. Default: the bot folder (DATA_DIR/bots/<id>). */
   botFolder?: (botId: string) => string;
-  /** Holds the shared extension directory. Default: DATA_DIR. */
   dataDir?: string;
   env?: NodeJS.ProcessEnv;
-  /** Minutes of silence before a bot's database closes; default 10. */
   idleMs?: number;
-  /** The loaded @duckdb/node-api module. Default: loaded from duckdbDirectory() on first use. */
   binding?: Binding;
 }
 
-/** The directory whose node_modules/@duckdb holds the binding: a packaged
- * resource tree or an explicit override. Null means the server's own
- * node_modules (a checkout, the npm package). */
+/** Null means the server's own node_modules. */
 export function duckdbDirectory(env: NodeJS.ProcessEnv = process.env): string | null {
   if (env.OMB_DUCKDB_DIR) return env.OMB_DUCKDB_DIR;
   if (env.OMB_RESOURCES_PATH) {
@@ -77,11 +59,7 @@ export function duckdbDirectory(env: NodeJS.ProcessEnv = process.env): string | 
   return null;
 }
 
-/** A require that resolves the Data engine's native modules (DuckDB, and
- * resvg for chart images) from the staged tree, or from the server's own
- * node_modules when there is none. createRequire resolves from the given
- * file's folder upwards, so an anchor inside <dir>/node_modules finds
- * <dir>/node_modules/@duckdb and @resvg first. */
+/** createRequire resolves upwards from the anchor, so one inside <dir>/node_modules finds the staged @duckdb and @resvg first. */
 export function nativeRequire(directory: string | null = duckdbDirectory()): NodeJS.Require {
   return createRequire(directory ? join(directory, "node_modules", "openmausbot-duckdb-anchor.js") : import.meta.url);
 }
@@ -90,9 +68,7 @@ function loadBinding(directory: string | null): Binding {
   return nativeRequire(directory)("@duckdb/node-api") as Binding;
 }
 
-/** DuckDB's defaults assume it owns the machine (80 % of RAM, every core).
- * It shares this one with bots, Electron and the engines, and a native OOM
- * takes the whole server down, so the limits are explicit and conservative. */
+/** DuckDB's defaults assume it owns the machine (80 % of RAM, every core), and a native OOM takes the server down. */
 export function instanceSettings(folder: string, dataDir: string, duckdbVersion: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const quarterOfRam = Math.floor(totalmem() / 4);
   const memoryMiB = Math.max(256, Math.floor(Math.min(2 * 1024 ** 3, quarterOfRam) / 1024 ** 2));
@@ -101,11 +77,11 @@ export function instanceSettings(folder: string, dataDir: string, duckdbVersion:
     temp_directory: join(folder, DATA_TMP_DIR),
     max_temp_directory_size: env.OMB_DUCKDB_MAX_TEMP_SIZE || "20GB",
     threads: String(Math.max(1, Math.min(4, cpus().length || 1))),
-    // Extensions are tied to the exact DuckDB version; a bump gets a fresh folder (D16).
+    // Extensions are tied to the exact DuckDB version.
     extension_directory: join(dataDir, "duckdb-extensions", duckdbVersion),
     autoinstall_known_extensions: "false",
     autoload_known_extensions: "true",
-    // Persistent secrets sit unencrypted on disk; OMB's broker issues temporary ones (D15).
+    // Persistent secrets sit unencrypted on disk; OMB's broker issues temporary ones.
     allow_persistent_secrets: "false",
     preserve_insertion_order: "false",
   };
@@ -137,8 +113,6 @@ export async function loadExtensions(connection: Pick<DuckDB.DuckDBConnection, "
   }
 }
 
-/** The text a person typed in the grid's filter box, as a LIKE pattern that
- * matches it literally. */
 export function likePattern(filter: string): string {
   return `%${filter.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
 }
@@ -158,9 +132,6 @@ export function levenshtein(a: string, b: string): number {
   return previous[b.length];
 }
 
-/** Up to five names a bot could have meant: what the wanted name is a
- * prefix of comes first, then substring matches and names a few edits away,
- * nearest first. */
 export function closeNames(wanted: string, names: readonly string[], max = 5): string[] {
   const target = wanted.toLowerCase();
   const budget = Math.max(2, Math.floor(target.length / 3));
@@ -194,9 +165,9 @@ function missingTableName(message: string): string | null {
 
 type InterruptCause = "timeout" | "cancelled";
 
-/** DuckDB's text travels verbatim; only the code and the position are ours. */
+type RunState = { interrupted: InterruptCause | null; retry?: NodeJS.Timeout };
+
 function failureFrom(error: unknown, sql: string, interrupted: InterruptCause | null, timeoutMs: number): DataFailure {
-  // Already structured (loadExtensions' hint, say): an interrupt must not reword it as a slow query.
   if (error instanceof DataFailure) return error;
   const message = error instanceof Error ? error.message : String(error);
   if (interrupted === "timeout") {
@@ -208,10 +179,9 @@ function failureFrom(error: unknown, sql: string, interrupted: InterruptCause | 
   return new DataFailure({ code: "sql_error", message, sql, line });
 }
 
-/** One connection, one statement at a time, with the interrupt aimed at it. */
 export class Lane {
   private queue: Promise<unknown> = Promise.resolve();
-  private running: { interrupted: InterruptCause | null } | null = null;
+  private running: RunState | null = null;
 
   readonly connection: DuckDB.DuckDBConnection;
   constructor(connection: DuckDB.DuckDBConnection) { this.connection = connection; }
@@ -225,12 +195,24 @@ export class Lane {
   private async execute<T>(sql: string, options: { timeoutMs?: number; signal?: AbortSignal }, work: (connection: DuckDB.DuckDBConnection) => Promise<T>): Promise<T> {
     const timeoutMs = options.timeoutMs ?? DATA_LIMITS.sqlTimeoutMs;
     if (options.signal?.aborted) throw new DataFailure({ code: "cancelled", message: "Cancelled before it ran.", sql });
-    const state: { interrupted: InterruptCause | null } = { interrupted: null };
+    const state: RunState = { interrupted: null };
+    const deadline = Date.now() + timeoutMs;
     this.running = state;
+    // DuckDB honours an interrupt only once its statement is dispatched, so a cause keeps re-delivering
+    // until the statement settles: one that lands first is not lost, and no cause blocks the next.
     const interrupt = (cause: InterruptCause) => {
-      if (state.interrupted) return;
-      state.interrupted = cause;
+      state.interrupted ??= cause;
       this.connection.interrupt();
+      if (state.retry || Date.now() >= deadline) return;
+      const retry = setInterval(() => {
+        if (Date.now() >= deadline) {
+          clearInterval(retry);
+          state.retry = undefined;
+          return;
+        }
+        this.connection.interrupt();
+      }, INTERRUPT_DELIVERY_MS);
+      state.retry = retry;
     };
     const timer = setTimeout(() => interrupt("timeout"), timeoutMs);
     const onAbort = () => interrupt("cancelled");
@@ -241,6 +223,7 @@ export class Lane {
       throw failureFrom(error, sql, state.interrupted, timeoutMs);
     } finally {
       clearTimeout(timer);
+      if (state.retry) clearInterval(state.retry);
       options.signal?.removeEventListener("abort", onAbort);
       this.running = null;
     }
@@ -260,13 +243,9 @@ interface Open {
   reserved: Set<string>;
 }
 
-/** How long a close waits for interrupted statements to finish before it
- * gives up on the native handles. */
 export const CLOSE_DRAIN_MS = 10_000;
 
-/** Resolves true once every lane has run its queue dry, false when one is
- * still busy after `ms`. A statement DuckDB did not stop (seen on Windows)
- * would otherwise hold a close, and so the server's shutdown, forever. */
+/** A statement DuckDB did not stop (seen on Windows) would otherwise hold a close, and shutdown, forever. */
 export async function drainLanes(lanes: Array<{ run<T>(sql: string, options: object, work: () => Promise<T>): Promise<T> }>, ms: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
   const drained = Promise.all(lanes.map((lane) => lane.run("", {}, async () => undefined).catch(() => undefined))).then(() => true);
@@ -307,8 +286,7 @@ class BotDb implements BotDatabase {
 
   private open(): Promise<Open> {
     if (!this.state) {
-      // The file admits one instance per process: a reopen waits for the
-      // close that may still be draining.
+      // The file admits one instance per process: a reopen waits for a close that may still be draining.
       const previous = this.closing ?? Promise.resolve();
       const opening = previous.then(() => this.openNow());
       this.state = opening;
@@ -331,8 +309,7 @@ class BotDb implements BotDatabase {
     try {
       bot = await instance.connect();
       panel = await instance.connect();
-      // Results live in a real schema: temp tables would be invisible to the
-      // panel's connection (DATA_RESULTS_SCHEMA).
+      // A real schema: temp tables would be invisible to the panel's connection.
       await bot.run(`CREATE SCHEMA IF NOT EXISTS ${DATA_RESULTS_SCHEMA}`);
       const keywords = await bot.runAndReadAll("SELECT keyword_name FROM duckdb_keywords() WHERE keyword_category = 'reserved'");
       const reserved = new Set(keywords.getRowsJson().map((row) => String(row[0]).toLowerCase()));
@@ -345,8 +322,6 @@ class BotDb implements BotDatabase {
     }
   }
 
-  /** Closes after a quiet stretch, never under a running statement: a long
-   * load simply pushes the close out. */
   private touch(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
@@ -388,8 +363,6 @@ class BotDb implements BotDatabase {
     return Array.from({ length: result.columnCount }, (_, i) => ({ name: result.columnName(i), type: result.columnType(i).toString() }));
   }
 
-  /** A statement's rows as JSON cells, bounded; the exact count comes free
-   * with a materialised result. */
   private async read(open: Open, conn: DuckDB.DuckDBConnection, sql: string, maxRows = Infinity): Promise<RunResult> {
     const started = performance.now();
     const result = await conn.run(sql);
@@ -413,9 +386,7 @@ class BotDb implements BotDatabase {
     return this.statement(options.connection, sql, options, (open, conn) => this.read(open, conn, sql, maxRows));
   }
 
-  /** Extensions load as their own lane step, ahead of the statement and on
-   * their own budget: a first-time INSTALL is a download, which must not
-   * count against the statement's timeout. */
+  /** A first-time INSTALL is a download, so extensions load as their own step, off the statement's timeout. */
   private async loadExtensions(options: RunOptions): Promise<void> {
     const extensions = options.extensions ?? [];
     if (!extensions.length) return;
@@ -462,7 +433,6 @@ class BotDb implements BotDatabase {
     return `${part(entry.schema)}.${part(entry.name)}`;
   }
 
-  /** `a.b`, `"A B".c`, or a bare name, with quotes removed. */
   private splitIdentifier(text: string): string[] {
     const parts: string[] = [];
     let current = "";
@@ -488,7 +458,6 @@ class BotDb implements BotDatabase {
     if (!table) throw new DataFailure({ code: "invalid_input", message: "A table name is required." });
     const entries = await this.catalog();
     const inSchema = schema ? entries.filter((entry) => entry.schema === schema || entry.schema.toLowerCase() === schema.toLowerCase()) : entries;
-    // Bare names mean the bot's own tables first, then results, then anything attached.
     const rank = (entry: CatalogEntry) => (entry.schema === "main" ? 0 : entry.schema === DATA_RESULTS_SCHEMA ? 1 : 2);
     const exact = inSchema.filter((entry) => entry.name === table).sort((x, y) => rank(x) - rank(y));
     const folded = inSchema.filter((entry) => entry.name.toLowerCase() === table.toLowerCase()).sort((x, y) => rank(x) - rank(y));
@@ -520,9 +489,7 @@ class BotDb implements BotDatabase {
     return result.rows.map((row) => ({ name: String(row[0]), type: String(row[1]) }));
   }
 
-  /** The explorer's numbers in as few scans as the types allow: null and
-   * distinct counts for every column in one pass, min/max for the comparable
-   * ones in another. SUMMARIZE would be one statement but 10-25x slower (D10). */
+  /** Two passes rather than SUMMARIZE, which is 10-25x slower. */
   private async aggregate(connection: DataConnection, from: string, columns: DataColumn[], options: { timeoutMs?: number; signal?: AbortSignal }): Promise<{ rowCount: number; columns: DataColumn[] }> {
     const countSql = `SELECT count(*) FROM ${from}`;
     const count = await this.statement(connection, countSql, options, (open, conn) => this.read(open, conn, countSql));
@@ -552,7 +519,6 @@ class BotDb implements BotDatabase {
     return { rowCount, columns: enriched };
   }
 
-  /** `target` is a table (bare or qualified) or a query. */
   private async source(target: string): Promise<string> {
     const text = target.trim().replace(/;+\s*$/, "");
     const looksLikeName = /^[\w."$ -]+$/.test(text) && !/\s(?:from|select|with|values)\s/i.test(text) && !/^(?:select|with|from|values|pivot|unpivot|show|describe)\b/i.test(text);
@@ -566,8 +532,6 @@ class BotDb implements BotDatabase {
     const profiled = all.slice(0, DATA_LIMITS.describeColumnsMax);
     const { rowCount, columns } = await this.aggregate(options.connection, from, profiled, options);
     if (profiled.length) {
-      // Three distinct values per column from one bounded scan: enough for
-      // text-to-SQL, cheap on any table size.
       const samplesSql = `SELECT ${profiled.map((column) => `list(DISTINCT CAST(${quoteIdentifier(column.name)} AS VARCHAR)) FILTER (WHERE ${quoteIdentifier(column.name)} IS NOT NULL)[1:${DATA_LIMITS.sampleValues}]`).join(", ")} FROM (SELECT * FROM ${from} LIMIT ${SAMPLE_SCAN_ROWS})`;
       const samples = await this.statement(options.connection, samplesSql, options, (open, conn) => this.read(open, conn, samplesSql));
       const sampleRow = samples.rows[0] ?? [];
@@ -655,9 +619,7 @@ FROM ${from}, omb_range WHERE ${id} IS NOT NULL GROUP BY bin ORDER BY bin`;
       ? ` WHERE ${filterColumns.map((column) => `CAST(${quoteIdentifier(column.name)} AS VARCHAR) ILIKE ${quoteLiteral(likePattern(filter))} ESCAPE '\\'`).join(" OR ")}`
       : "";
 
-    // With preserve_insertion_order off a scan's order is not fixed, so every
-    // page orders by something: rowid keeps a table's pages stable and
-    // breaks ties under a sort. Views have no rowid.
+    // With preserve_insertion_order off a scan's order is not fixed: rowid keeps a table's pages stable. Views have no rowid.
     const tiebreak = entry.type === "VIEW" ? [] : ["rowid"];
     const order: string[] = [];
     if (options.sort) {
@@ -691,7 +653,6 @@ FROM ${from}, omb_range WHERE ${id} IS NOT NULL GROUP BY bin ORDER BY bin`;
       list.push({ name: String(row[2]), type: String(row[3]) });
       columnsByTable.set(key, list);
     }
-    // One statement for every count: a table's count(*) is metadata, a view's is a scan.
     const countSql = `SELECT ${entries.map((entry) => `(SELECT count(*) FROM ${this.qualified(entry, open.reserved)})`).join(", ")}`;
     const counts = await this.statement("panel", countSql, {}, (o, conn) => this.read(o, conn, countSql));
     const countRow = counts.rows[0] ?? [];
@@ -723,9 +684,7 @@ FROM ${from}, omb_range WHERE ${id} IS NOT NULL GROUP BY bin ORDER BY bin`;
     const closing = (async () => {
       let open: Open;
       try { open = await pending; } catch { return; }
-      // Closing a connection with a statement in flight is undefined; interrupt
-      // first, then let the lanes drain. One that never drains keeps its
-      // handles: the process reclaims them, and nothing else waits on it.
+      // Closing a connection with a statement in flight is undefined: interrupt first, then let the lanes drain.
       for (const lane of Object.values(open.lanes)) lane.interrupt();
       if (!await drainLanes(Object.values(open.lanes), CLOSE_DRAIN_MS)) {
         console.warn(`data: ${this.botId}'s database still had a statement running after ${CLOSE_DRAIN_MS} ms; its handles are left to the process`);
@@ -819,5 +778,4 @@ export function createDataEngine(options: DataEngineOptions = {}): DataEngine {
   return new Engine(options);
 }
 
-/** The server's engine. Nothing loads until a bot's database is first asked for. */
 export const dataEngine: DataEngine = createDataEngine();

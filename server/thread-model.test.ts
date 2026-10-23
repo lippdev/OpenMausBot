@@ -1,8 +1,3 @@
-// Threads follow their bot's model: a thread keeps a model of its own only
-// when a person picks one there. These tests cover
-// the store's half (what a thread stores, the one-time cleanup of the copies
-// older builds made, and moving threads back onto the bot's model) and the
-// rule a turn's start applies to a thread's own model (threadModelFallback).
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -40,8 +35,6 @@ describe("threads follow their bot's model", () => {
     expect(runsOn(store, bot.id, second.threadId)).toEqual(opus);
     store.applyModelDefault(bot.id, codex);
     expect(runsOn(store, bot.id, second.threadId)).toEqual(codex);
-    // Changing the bot's model from one thread moves every follower too, and
-    // the thread it was changed from follows the bot rather than copying it.
     store.switchTaskModel(bot.id, first, sonnet, true, false);
     expect(ownModel(store, bot.id, first)).toBeUndefined();
     expect(runsOn(store, bot.id, second.threadId)).toEqual(sonnet);
@@ -90,7 +83,6 @@ describe("threads follow their bot's model", () => {
     const fresh = store.createTask(bot.id, "Fresh", false)!;
     expect(ownModel(store, bot.id, child.threadId)).toEqual(codex);
     expect(ownModel(store, bot.id, fresh.threadId)).toBeUndefined();
-    // Handed the bot's own model: nothing to keep.
     const same = store.createTask(bot.id, "Same", false, undefined, undefined, undefined, sonnet)!;
     expect(ownModel(store, bot.id, same.threadId)).toBeUndefined();
   });
@@ -114,8 +106,6 @@ describe("threads follow their bot's model", () => {
     const saved = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8"))[0].tasks as TaskRecord[];
     expect(saved.map((entry) => entry.modelSelection)).toEqual([undefined, codex, { ...sonnet, effort: "high" }]);
 
-    // Once only: a pick that later equals the bot's model is still a pick, so
-    // when the bot moves on again the thread stays where the person put it.
     store.patchBot("legacy", { modelSelection: codex });
     const again = open();
     expect(ownModel(again, "legacy", "different")).toEqual(codex);
@@ -156,11 +146,9 @@ describe("threads follow their bot's model", () => {
       return { rewound: true };
     });
     expect(moved.sort()).toEqual([full.threadId, asks.threadId, same.threadId].sort());
-    // Full carries to the bot's engine, which runs it (#2697).
     expect(store.taskByThread(bot.id, full.threadId)).toMatchObject({ approvalMode: "full", alwaysAllow: ["Bash"], rewound: true });
     expect(store.taskByThread(bot.id, full.threadId)?.modelSelection).toBeUndefined();
     expect(store.taskByThread(bot.id, asks.threadId)).toMatchObject({ approvalMode: "ask" });
-    // Another model on the same engine: the level stays.
     expect(store.taskByThread(bot.id, same.threadId)).toMatchObject({ approvalMode: "full" });
     expect(ownModel(store, bot.id, untouched.threadId)).toEqual(opus);
     expect(resets.map(([, to]) => to)).toEqual([codex, codex, codex]);
@@ -231,14 +219,11 @@ describe("threadModelFallback", () => {
   it("gives way to a signed-out engine only when the bot's model is on another engine that can run", () => {
     const signedOut = engine("spare", { snapshot: snapshot({ authenticated: false }) });
     expect(threadModelFallback(spare, sonnet, engines({ spare: signedOut }))).toBe("signed-out");
-    // The same engine: the turn runs as picked, so its sign-in prompt shows.
     const claudeOut = engine("claude", { snapshot: snapshot({ authenticated: false }) });
     expect(threadModelFallback(opus, sonnet, engines({ claude: claudeOut }))).toBeNull();
-    // The bot's engine can't run either: nothing better to run on.
     expect(threadModelFallback(spare, sonnet, engines({ spare: signedOut, claude: claudeOut }))).toBeNull();
     expect(threadModelFallback(spare, sonnet, engines({ spare: signedOut, claude: undefined }))).toBeNull();
     expect(threadModelFallback(spare, sonnet, engines({ spare: signedOut, claude: engine("claude", { enabled: false }) }))).toBeNull();
-    // A custom endpoint brings its own credential: its sign-in state does not count.
     expect(threadModelFallback(spare, sonnet, engines({ spare: { ...signedOut, access: "custom" } }))).toBeNull();
   });
 

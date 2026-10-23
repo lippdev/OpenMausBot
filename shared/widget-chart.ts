@@ -1,8 +1,6 @@
-// A widget's Chart as a Vega-Lite spec. The canonical node (rows, up to four
-// series, an x key) is drawn by the pipeline every other chart in OMB uses:
-// the same Vega-Lite, the same config (shared/vega-config.ts), so a widget's
-// palette, type and hairlines match the Data panel's. Pure, so the server can
-// render the same spec headless for a client that cannot draw it.
+// A widget's Chart as a Vega-Lite spec, drawn with the same config as every
+// other chart, so its palette, type and hairlines match the Data panel's. Pure,
+// so the server can render the same spec headless for a client that cannot.
 import { widgetNumber, type WidgetNode } from "./widget.ts";
 
 interface ChartSeries {

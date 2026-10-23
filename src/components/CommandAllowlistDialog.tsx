@@ -5,13 +5,14 @@ import type { CommandAllowRule, CommandAllowlistResponse } from "../../shared/co
 import { api, useStore } from "@/state/store";
 import { t } from "@/lib/i18n";
 
-// Electron collects -webkit-app-region from layout boxes and ignores z-index,
-// so the chat header's drag strip swallows clicks that land on top of it.
-// This dialog's close button is in that band whenever the list is tall.
+// Electron collects -webkit-app-region from layout boxes and ignores z-index, so the chat header's drag strip swallows
+// clicks on top of it.
 const overlayStyle = { WebkitAppRegion: "no-drag" } as CSSProperties;
 
-/** Mounted for one captured bot/thread, so switching conversations cannot
- * redirect an in-flight save or reuse another bot's working folder. */
+/**
+ * Mounted for one captured bot and thread, so switching conversations cannot redirect an in-flight save or reuse
+ * another bot's folder.
+ */
 export function CommandAllowlistDialog({ botId, botName, threadId, onClose }: {
   botId: string;
   botName: string;
@@ -42,9 +43,8 @@ export function CommandAllowlistDialog({ botId, botName, threadId, onClose }: {
     mounted.current = true;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     closeRef.current?.focus();
-    // The opener keeps focus, and a drag-region click can blur the close
-    // button. Bot settings then sees this dialog and leaves Escape alone, so
-    // the key has to be taken here, before that parent handler runs.
+    // A drag-region click can blur the close button, and Bot settings then leaves Escape alone, so the key is taken
+    // here first.
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
       event.preventDefault();
@@ -80,8 +80,6 @@ export function CommandAllowlistDialog({ botId, botName, threadId, onClose }: {
     if (saving || !data || (!rule && (!command.trim() || !cwd.trim() || !data.supported))) return;
     setSaving(rule?.id ?? "add");
     setError(null);
-    // Keep focus inside the dialog when the clicked control becomes disabled
-    // or its row disappears after a successful deletion.
     dialogRef.current?.focus();
     try {
       const result = await api<CommandAllowlistResponse>(
@@ -104,8 +102,8 @@ export function CommandAllowlistDialog({ botId, botName, threadId, onClose }: {
     }
   };
 
-  // Portaled to the document so the overlay is after every drag region and is
-  // not trapped in the composer dock (pointer-events none, z-index 2).
+  // Portaled so the overlay comes after every drag region and is not trapped in the composer dock (pointer-events none,
+  // z-index 2).
   const overlay = (
     <div
       data-thread-overlay

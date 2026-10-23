@@ -1,33 +1,17 @@
-/**
- * Keyboard shortcuts catalog and platform-specific key resolution.
- * Provides structured shortcut groups for navigation, chat, and workspace management.
- */
 import type { SendKey } from "./send-key";
 
-/** Single keyboard shortcut entry with descriptions and platform-specific keys. */
 export interface ShortcutItem {
-  /** Stable identifier for the shortcut. */
   id: string;
-  /** Human-readable explanation of what the shortcut does. */
   description: string;
-  /** Keys displayed on macOS (e.g. ["⌘", "K"]). */
   macKeys: string[];
-  /** Keys displayed on Windows and Linux (e.g. ["Ctrl", "K"]). */
   winKeys: string[];
 }
 
-/** Group of related shortcuts displayed under a section heading. */
 export interface ShortcutGroup {
-  /** Category display name (e.g. "Navigation"). */
   category: string;
-  /** List of shortcuts belonging to this group. */
   items: ShortcutItem[];
 }
 
-/**
- * Complete catalog of keyboard shortcuts available in OpenMausBot,
- * organized logically into categories for quick reference.
- */
 export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
   {
     category: "Navigation",
@@ -138,14 +122,11 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
 type Keys = Pick<ShortcutItem, "macKeys" | "winKeys">;
 const ENTER: Keys = { macKeys: ["Return"], winKeys: ["Enter"] };
 const SHIFT_ENTER: Keys = { macKeys: ["⇧", "Return"], winKeys: ["Shift", "Enter"] };
-/** [send, new line] for each choice but the catalog's own Enter. */
 const SEND_ROWS: Record<Exclude<SendKey, "enter">, [Keys, Keys]> = {
   "shift-enter": [SHIFT_ENTER, ENTER],
   "mod-enter": [{ macKeys: ["⌘", "Return"], winKeys: ["Ctrl", "Enter"] }, ENTER],
 };
 
-/** The catalog with its send and new-line rows following Settings →
- * Appearance → Send messages with. */
 export function shortcutGroupsFor(sendKey: SendKey): readonly ShortcutGroup[] {
   if (sendKey === "enter") return SHORTCUT_GROUPS;
   const [send, newLine] = SEND_ROWS[sendKey];
@@ -158,7 +139,6 @@ export function shortcutGroupsFor(sendKey: SendKey): readonly ShortcutGroup[] {
   }));
 }
 
-/** Help chords must not interrupt editing, composition, or another dialog. */
 export function shouldOpenKeyboardShortcuts(event: KeyboardEvent): boolean {
   if (event.defaultPrevented || event.isComposing || event.altKey) return false;
   const helpKey = event.key === "?" && !event.metaKey && !event.ctrlKey;
@@ -170,10 +150,6 @@ export function shouldOpenKeyboardShortcuts(event: KeyboardEvent): boolean {
   ));
 }
 
-/**
- * Detect whether the current host platform is macOS.
- * Checks Electron's window.ogb bridge first, falling back to navigator.userAgent.
- */
 export function isMacPlatform(): boolean {
   if (typeof window !== "undefined" && window.ogb?.platform) {
     return window.ogb.platform === "darwin";
@@ -184,9 +160,6 @@ export function isMacPlatform(): boolean {
   return true;
 }
 
-/**
- * Resolve the appropriate key representation for a shortcut item based on the host OS.
- */
 export function shortcutKeysForPlatform(
   item: ShortcutItem,
   isMac: boolean = isMacPlatform(),
@@ -194,9 +167,6 @@ export function shortcutKeysForPlatform(
   return isMac ? item.macKeys : item.winKeys;
 }
 
-/**
- * Filter shortcut groups by query matching item descriptions or keys.
- */
 export function filterShortcutGroups(
   groups: readonly ShortcutGroup[],
   query: string,

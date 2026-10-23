@@ -1,157 +1,59 @@
 #!/usr/bin/env node
-// Fake of an ACP (Agent Client Protocol) CLI's stdio surface, for driver
-// tests of acp/core.ts + its harness shims (grok, gemini). Speaks JSON-RPC
-// 2.0 over stdin/stdout: answers initialize / authenticate / session/new /
-// session/prompt, and streams session/update notifications for a scripted
-// turn. Failure modes mirror how real ACP agents misbehave:
-//
-//   FAKE_ACP_LOAD_NULL  return null for session/load so the resume cursor is
-//                       ignored and the driver falls through to session/new
-//   FAKE_ACP_REJECT_LIVE_LOAD_FILE  while this file exists, session/load and
-//                       session/resume answer an error when the requested
-//                       session is already live in THIS process — the
-//                       real-agent shape that forces the driver's one-shot
-//                       re-spawn fallback. A fresh process holds no live
-//                       session, so its load succeeds.
-//   FAKE_ACP_CACHED_LIVE_LOAD  acknowledge session/load of a live session but
-//                       keep its original MCP credentials, matching Qwen.
-//   FAKE_ACP_TEXT_REPLY  answer every session/prompt with only this text.
-//   FAKE_ACP_MODE   happy (default) | image | empty-reply | reasoning-only | exit-early | fail-after-text | hang | hang-initialize | stall-after-text | unkeyed-tool | no-auth | auth-required | permission | question
-//                   | ask-question-unsupported (send a cursor/ask_question server→client
-//                     request mid-prompt; the driver must answer -32601 method
-//                     not found, and the prompt completes only after that
-//                     rejection arrives)
-//                   | interleave (message → tool → message → tool → message)
-//                   | no-session-config (reject session/set_mode + set_model
-//                     with -32601, i.e. an agent predating those methods)
-//                   | ask-peer (spawn the injected "agents" MCP server from
-//                     session/new's mcpServers, call list_bots, then ask a
-//                     peer a question with coordinate_bots(consult: true) and
-//                     reply with the tool's answer — the comms e2e; the
-//                     peer's answer resumes this bot in a later turn)
-//                   | delegate-peer (same as ask-peer but hands work on with
-//                     coordinate_bots — returns immediately, the peer runs
-//                     after our turn. With FAKE_ACP_REDELEGATE_FILE set, the
-//                     first wake that saw the result hands on a second task,
-//                     once, and writes that file)
-//                   | chief-delegate (hands work on only for an ASSIGN_TO_PEER
-//                     prompt, remembers the assignment id in
-//                     FAKE_ACP_TASKID_FILE, and answers a CHECK_STATUS prompt
-//                     with assignment_status(id); ordinary follow-ups stay
-//                     responsive)
-//                   | create-peer (a Chief creates a specialist, then hands
-//                     work to it through the returned id with coordinate_bots)
-//                   The four peer modes call coordinate_bots / assignment_status
-//                   (docs/runtime-contract.md §9).
-//                   A wake carrying a hand-off's result (the legacy "[A
-//                   delegated task just completed]" or the runtime's
-//                   "[OpenMausBot report from …]") is answered with a fixed
-//                   line and never hands work on again.
-//                   | echo-gated (reply by echoing the full prompt, and when
-//                     FAKE_ACP_GATE_FILE is set hold the turn open until that
-//                     file exists — a deterministic busy window for the
-//                     steer-queue e2e, with the echo pinning exactly what a
-//                     drained turn was sent)
-//                   | safe-agent-reads (simulate a native Auto reviewer around
-//                     the real injected agents MCP; not a real classifier test)
-//                   | stall-after-text (stream one message chunk, then go
-//                     fully silent forever — a wedged agent mid-answer; the
-//                     driver's prompt idle guard must fail the turn on its own)
-//                   | slow-tool (start a tool call and send nothing while it
-//                     "runs" for FAKE_ACP_TOOL_MS, default 600 — a quiet
-//                     `sleep` or build — then finish it and answer)
-//                   | stall-after-tool (finish a tool call, then go fully
-//                     silent forever: the guard must still fire once no tool
-//                     is running)
-//                   | quiet-then-answer (send nothing for FAKE_ACP_QUIET_MS,
-//                     default 600, then answer — a slow model or a rate-limit
-//                     wait. With QWEN_HOME set, appends FAKE_ACP_QWEN_LOG
-//                     (a JSON array of lines) to Qwen's debug log for this
-//                     session, one line every FAKE_ACP_LOG_EVERY_MS (default
-//                     100), repeating the last, as Qwen does while it retries)
-//                   | mcp-tools (connect every server in session/new's mcpServers
-//                     the way the agent's own client does, stdio or http,
-//                     with grok 1.0.25's initialize (FAKE_ACP_MCP_HANDSHAKE JSON
-//                     overrides it), list its tools, and reply one line per
-//                     server: "<name>: <tool>,<tool>" or "<name> failed: <why>")
-//                   | lend-question (call list_shared_computers through the
-//                     injected agents MCP, ask a question card, call it again
-//                     once the card is answered, and reply
-//                     "before: <first> | after: <second>" — the lent-Mac e2e)
-//   FAKE_ACP_MCP_TRANSPORTS  comma list of remote MCP transports the agent
-//                       advertises in initialize (mcpCapabilities), e.g. "http,sse"
-//   FAKE_ACP_PERMISSION_OPTIONS JSON options override in permission mode
-//   FAKE_ACP_DUMP   path to write {argv, env} as JSON, so a test can assert
-//                   argv shape (agent/stdio flags) and env hygiene
-//   FAKE_ACP_LAUNCH_COUNT_FILE  read-increment-write a process counter at
-//                       startup, so a test can tell a reused pooled session
-//                       (one launch) from a fresh child per turn (many)
-//   FAKE_ACP_RPC_DUMP   rewrite, after every request, this process's full
-//                       method list as a JSON array — per process, so a
-//                       pooled child keeps one dump and a replacement child
-//                       starts its own
-//   FAKE_ACP_RPC_APPEND_FILE  append one {"pid","method","cwd"} JSON line per
-//                       request, so a test can count RPCs across a pooled
-//                       child and its replacement together
-//   FAKE_ACP_RPC_FAILURE_FILE  read a JSON-RPC error object on session/prompt;
-//                       once read this process stays poisoned even if the
-//                       file is removed. A replacement process can recover.
-//   FAKE_ACP_RPC_FAILURE_METHOD  initialize, session/new or session/prompt (default).
-//   FAKE_ACP_RPC_FAILURE_GATE  hold the error until this file exists.
-//   FAKE_ACP_RPC_FAILURE_AFTER_OUTPUT  emit text + a tool result before failing.
-//   FAKE_ACP_RPC_FAILURE_AFTER_USAGE  emit scripted usage updates before failing.
-//   FAKE_ACP_LOAD_ERROR  JSON-RPC error object returned by session/load.
-//   FAKE_ACP_MODELS      comma-separated model ids. Enables the opencode-shaped
-//                        surface: session/new and session/load return
-//                        configOptions, and session/set_config_option switches
-//                        the model (rejecting an unadvertised one with -32602).
-//                        A new session starts on AGY_ACP_DEFAULT_MODEL (Google
-//                        Antigravity's own default variable) when it is set,
-//                        else on the first. Like agy_acp_server 1.1.1, any id
-//                        there is taken unchecked and added to the list.
-//   FAKE_ACP_MODELS_FILE  path of a file with the same comma-separated list,
-//                        read once when the process starts: a process started
-//                        before the file changed keeps the old list, the way
-//                        `opencode acp` never re-reads a login added later
-//   FAKE_ACP_MODELS_LIST=v2  OpenCode 2's `models` surface: plain `models`
-//                        answers an empty list with exit 0 (its first answer
-//                        after the background service starts), and `models
-//                        --verbose` is rejected with exit 1
-//   FAKE_ACP_VERBOSE_FAIL_ONCE  path of a marker file: the first `models
-//                        --verbose` creates it and fails, the way a first run
-//                        in a new OpenCode home loses the race to create its
-//                        database; later runs answer normally
-//   FAKE_ACP_MODEL_STICKS  session/set_config_option succeeds but leaves the
-//                        model where it was, so the confirmation guard in
-//                        core.ts has something to catch
-//   FAKE_ACP_VARIANTS JSON map of model -> {id?, currentValue?, options} using
-//                        ACP select values/groups; never contacts a provider.
-//   FAKE_ACP_CONFIG_UPDATES JSON array of {after, sessionId?, configOptions,
-//                        replay?}, emitted after the named RPC response.
-//   FAKE_ACP_USAGE_ROOT  put the prompt result's usage at the root instead of
-//                        under _meta (what opencode 1.18.18 actually does)
-//   FAKE_ACP_USAGE_UPDATES_FILE  JSON array of numbers, re-read on every
-//                        session/prompt; each is sent as a usage_update
-//                        { used: n, size: 200000 } before the result
-//   FAKE_ACP_MODE_ACK_FILE  path of a file read on every mode switch: while it
-//                        exists, "empty" answers without configOptions (the
-//                        switch cannot be confirmed) and "error" refuses it,
-//                        leaving the session in its previous mode either way
-//
-// With FAKE_ACP_DUMP and FAKE_ACP_MODES or FAKE_ACP_MODELS, every
-// session/prompt appends {"pid","sessionId","mode","model"} to
-// <FAKE_ACP_DUMP>.prompts.jsonl: what the prompt actually ran under, across a
-// pooled child and its replacement. The .config.json log is per process, so
-// on a pooled child it also holds earlier turns' switches.
-//
-// Keep this file dependency-free — it runs as a bare `node` subprocess.
+// Fake of an ACP CLI's stdio surface (JSON-RPC 2.0: initialize, authenticate, session/new,
+// session/prompt and scripted session/update streams) for driver tests. Env knobs:
+//   FAKE_ACP_LOAD_NULL  session/load returns null, so the driver falls through to session/new
+//   FAKE_ACP_REJECT_LIVE_LOAD_FILE  while it exists, load/resume of a session live in this process errors
+//   FAKE_ACP_CACHED_LIVE_LOAD  a live session/load is acknowledged but keeps the old MCP credentials, like Qwen
+//   FAKE_ACP_TEXT_REPLY  answer every session/prompt with only this text
+//   FAKE_ACP_MODE  happy (default) | image | empty-reply | reasoning-only | exit-early | fail-after-text | crash-in-prompt | hang
+//     | hang-initialize | unkeyed-tool | no-auth | auth-required | permission | question
+//     | ask-question (a mid-prompt vendor question: FAKE_ACP_ASK_METHOD, default cursor/ask_question, params
+//       FAKE_ACP_ASK_PARAMS; the client's reply is written to FAKE_ACP_ASK_ANSWER. FAKE_ACP_ASK_TIMING=with-result
+//       settles the turn with the card open; after-result asks between turns)
+//     | interleave (message, tool, message, tool, message) | no-session-config (set_mode/set_model answer -32601)
+//     | ask-peer | delegate-peer | chief-delegate | create-peer (coordinate_bots through the injected agents
+//       MCP; FAKE_ACP_REDELEGATE_FILE, FAKE_ACP_TASKID_FILE; a hand-off result wake gets a fixed line)
+//     | echo-gated (echo the whole prompt; hold until FAKE_ACP_GATE_FILE exists) | safe-agent-reads
+//     | stall-after-text | stall-after-tool (then silent forever) | slow-tool (silent for FAKE_ACP_TOOL_MS)
+//     | quiet-then-answer (silent for FAKE_ACP_QUIET_MS; with QWEN_HOME, append FAKE_ACP_QWEN_LOG lines to
+//       Qwen's debug log every FAKE_ACP_LOG_EVERY_MS) | mcp-tools (list each mcpServers entry's tools with
+//       grok 1.0.25's initialize, or FAKE_ACP_MCP_HANDSHAKE; FAKE_ACP_MCP_SCHEMA_BYTES=1 adds each schema's length)
+//     | lend-question (list_shared_computers around a question)
+//     | list-peers (list_bots through the agents MCP; keeps the first agents server it is offered, like Hermes)
+//   FAKE_ACP_MCP_TRANSPORTS  remote MCP transports advertised in initialize, e.g. "http,sse"
+//   FAKE_ACP_PERMISSION_OPTIONS  JSON options override in permission mode
+//   FAKE_ACP_DUMP  path for {argv, env}; with FAKE_ACP_MODES or FAKE_ACP_MODELS also <dump>.prompts.jsonl
+//   FAKE_ACP_LAUNCH_COUNT_FILE  process counter incremented at startup
+//   FAKE_ACP_RPC_DUMP  this process's method list, rewritten after every request
+//   FAKE_ACP_RPC_APPEND_FILE  one {"pid","method","cwd"} line appended per request
+//   FAKE_ACP_RPC_FAILURE_FILE  JSON-RPC error for session/prompt; once read the process stays poisoned
+//   FAKE_ACP_RPC_FAILURE_METHOD  initialize, session/new or session/prompt (default)
+//   FAKE_ACP_RPC_FAILURE_GATE  hold the error until this file exists
+//   FAKE_ACP_RPC_FAILURE_AFTER_OUTPUT  emit text and a tool result before failing
+//   FAKE_ACP_RPC_FAILURE_AFTER_USAGE  emit the scripted usage updates and FAKE_ACP_UPDATES_FILE's before failing
+//   FAKE_ACP_LOAD_ERROR  JSON-RPC error returned by session/load
+//   FAKE_ACP_MODELS  model ids: opencode-shaped configOptions and set_config_option (-32602 for others);
+//     a new session starts on AGY_ACP_DEFAULT_MODEL when set, taken unchecked as agy_acp_server 1.1.1 does
+//   FAKE_ACP_MODELS_FILE  the same list, read once at startup, as `opencode acp` never re-reads a login
+//   FAKE_ACP_MODELS_LIST=v2  OpenCode 2: `models` answers empty with exit 0, `models --verbose` exits 1
+//   FAKE_ACP_VERBOSE_FAIL_ONCE  marker path: the first `models --verbose` fails, like a new OpenCode home's first run
+//   FAKE_ACP_MODEL_STICKS  set_config_option succeeds but keeps the old model
+//   FAKE_ACP_VARIANTS  JSON map model -> {id?, currentValue?, options} of ACP select values
+//   FAKE_ACP_CONFIG_UPDATES  JSON [{after, sessionId?, configOptions, replay?}] emitted after the named response
+//   FAKE_ACP_USAGE_ROOT  usage at the prompt result's root, as opencode 1.18.18 sends it
+//   FAKE_ACP_USAGE_UPDATES_FILE  JSON numbers re-read per prompt, each sent as usage_update {used, size: 200000}
+//   FAKE_ACP_UPDATES_FILE  JSON array of session/update params ({update, _meta?}) re-read per prompt, sent as-is
+//   FAKE_ACP_MODE_ACK_FILE  while it exists a mode switch answers "empty" (no configOptions) or "error"
+//   FAKE_ACP_HANG_ON  a prompt whose text holds this hangs as in mode hang; others answer
+//   FAKE_ACP_CURSOR_FAST=1  a `fast` select ("true") once initialize declares _meta.parameterizedModelPicker, as Cursor CLI 2026.10.19; =stuck acknowledges set_config_option but keeps "true"
+//   FAKE_ACP_SESSION_CLOSE=1  initialize advertises sessionCapabilities.close (OpenCode 1.19); session/close answers {}
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 
 const mode = process.env.FAKE_ACP_MODE ?? "happy";
 
-// Follow the spawning server down, including on Windows where ppid does
-// not change after parent exit. Inline: fakes must stay self-contained.
+// Follow the spawning server down; on Windows ppid does not change after parent exit.
 {
   const spawner = process.ppid;
   const orphanWatch = setInterval(() => {
@@ -163,13 +65,11 @@ const mode = process.env.FAKE_ACP_MODE ?? "happy";
   orphanWatch.unref();
 }
 const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-// opencode-shaped surface: the session carries its own model catalog and the
-// model is chosen with session/set_config_option, because `opencode acp` takes
-// no -m. Off unless FAKE_ACP_MODELS is set, so every existing mode is byte-
-// identical to before.
-const models = (process.env.FAKE_ACP_MODELS_FILE && existsSync(process.env.FAKE_ACP_MODELS_FILE)
+const modelsText = process.env.FAKE_ACP_MODELS_FILE && existsSync(process.env.FAKE_ACP_MODELS_FILE)
   ? readFileSync(process.env.FAKE_ACP_MODELS_FILE, "utf8")
-  : process.env.FAKE_ACP_MODELS ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+  : process.env.FAKE_ACP_MODELS ?? "";
+// One id per line when the list holds a newline (DeepSeek's wire values are JSON pairs with commas); else comma-separated.
+const models = modelsText.split(modelsText.includes("\n") ? "\n" : ",").map((id) => id.trim()).filter(Boolean);
 const defaultModelEnv = process.env.AGY_ACP_DEFAULT_MODEL;
 if (models.length && defaultModelEnv && !models.includes(defaultModelEnv)) models.push(defaultModelEnv);
 let currentModel: string | null = models.length && defaultModelEnv ? defaultModelEnv : models[0] ?? null;
@@ -181,21 +81,14 @@ const variantValues = (entries: any[]): string[] => entries.flatMap((entry) => (
 ));
 const modes = (process.env.FAKE_ACP_MODES ?? "").split(",").filter(Boolean);
 let currentMode: string | null = modes[0] ?? null;
-// assignment id captured from the last hand-off reply, for a later
-// assignment_status call. Each turn is a fresh process, so the id is passed
-// through a file (same state-passing pattern as FAKE_ACP_GATE_FILE).
+let currentFast: string | null = null;
 const taskIdFile = process.env.FAKE_ACP_TASKID_FILE ?? "";
-/** The teammate id as list_bots prints it ("[id: …]"). */
 const peerIdOf = (list: string): string => /id: ([\w-]+)/.exec(list)?.[1] ?? "";
-/** The hand-off a scripted mode makes to one peer. */
 function handoffCall(message: string, options: { consult?: boolean; reason?: string } = {}): { name: string; args: (list: string) => object } {
   const reason = options.reason ? { reason: options.reason } : {};
   return { name: "coordinate_bots", args: (list) => ({ bot_ids: [peerIdOf(list)], message, ...(options.consult ? { consult: true } : {}), ...reason }) };
 }
-/** The assignment id a hand-off reply names: coordinate_bots answers with
- * JSON receipts (requestId). */
 const handoffIdOf = (reply: string): string => /"requestId":"([\w-]+)"/.exec(reply)?.[1] ?? "";
-/** The status read for a remembered assignment id. */
 const statusCall = (id: string): { name: string; args: () => object } => ({ name: "assignment_status", args: () => ({ id }) });
 const logFile = process.env.FAKE_ACP_LOG_FILE ?? "";
 const rejectLiveLoadFile = process.env.FAKE_ACP_REJECT_LIVE_LOAD_FILE ?? "";
@@ -252,14 +145,18 @@ const configOptions = () => {
       currentValue: currentMode,
       options: modes.map((value) => ({ value, name: value })),
     }] : []),
+    ...(currentFast ? [{
+      id: "fast",
+      name: "Fast",
+      type: "select",
+      currentValue: currentFast,
+      options: [{ value: "true", name: "On" }, { value: "false", name: "Off" }],
+    }] : []),
   ];
   return options.length ? options : null;
 };
-// cursor-shaped surface: the session advertises `models.availableModels` with
-// parameterised ids (`default[]`) that differ from the argv `--model` slugs
-// (`auto`). Off unless FAKE_ACP_SESSION_MODELS is set, so every existing mode
-// stays byte-identical. Format: "id|Name,id|Name" — the name is optional, and
-// commas inside an id's `[...]` parameters do not split it.
+// FAKE_ACP_SESSION_MODELS "id|Name,id|Name": cursor-shaped `models.availableModels` whose ids
+// (`default[]`) differ from argv slugs (`auto`); commas inside `[...]` do not split an id.
 const acpModels = (process.env.FAKE_ACP_SESSION_MODELS ?? "")
   .split(/,(?![^[]*\])/)
   .filter(Boolean)
@@ -324,15 +221,30 @@ const dumpEnv = Object.fromEntries(
     "OMB_ANTHROPIC_API_KEY",
   ].flatMap((key) => (process.env[key] === undefined ? [] : [[key, process.env[key]]] as const)),
 );
-// pid rides along so a test can tell a respawned process (new pid, fresh
-// dump) from a pooled one whose dump was never rewritten
 const dumpState: Record<string, unknown> = { argv, env: dumpEnv, pid: process.pid };
+const writeDumpAtomic = (path: string, contents: string): void => {
+  const tmp = `${path}.${process.pid}.tmp`;
+  const delays = [5, 10, 20, 40, 80];
+  try {
+    writeFileSync(tmp, contents);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        renameSync(tmp, path);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "";
+        if (!["EPERM", "EACCES", "EBUSY"].includes(code) || attempt >= delays.length) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[attempt]);
+      }
+    }
+  } finally {
+    try { unlinkSync(tmp); } catch {}
+  }
+};
 if (process.env.FAKE_ACP_DUMP) {
-  writeFileSync(process.env.FAKE_ACP_DUMP, JSON.stringify(dumpState, null, 2));
+  writeDumpAtomic(process.env.FAKE_ACP_DUMP, JSON.stringify(dumpState, null, 2));
 }
 if (process.env.FAKE_ACP_LAUNCH_COUNT_FILE) {
-  // count launched processes: read-increment-write, so a test can assert
-  // how many children the driver spawned (a pooled session launches once)
   let launches = 0;
   try {
     launches = Number.parseInt(readFileSync(process.env.FAKE_ACP_LAUNCH_COUNT_FILE, "utf8").trim(), 10) || 0;
@@ -345,9 +257,7 @@ if (argv.includes("--version")) {
   console.log("fake-acp 1.0.0");
   process.exit(0);
 }
-// Cursor's driver probes `agent status` / `agent models` on the same binary
-// it later spawns for ACP. Answer those without entering the JSON-RPC loop
-// so catalog/auth tests do not hang on stdin.
+// Cursor's driver probes `agent status` / `agent models` on the binary it spawns for ACP.
 if (argv[0] === "status" || argv[0] === "whoami") {
   const authenticated = process.env.FAKE_ACP_AUTH !== "0";
   console.log(JSON.stringify({ isAuthenticated: authenticated }));
@@ -398,7 +308,14 @@ if (argv[0] === "models" || argv.includes("--list-models")) {
   process.exit(0);
 }
 
-const out = (obj: unknown) => process.stdout.write(JSON.stringify(obj) + "\n");
+// ACP names the session in every update and request: the one whose request this answers, or the live one.
+const answering = new AsyncLocalStorage<string>();
+const out = (obj: any) => {
+  if ((obj?.method === "session/update" || obj?.method === "session/request_permission") && obj.params && obj.params.sessionId === undefined) {
+    obj = { ...obj, params: { sessionId: answering.getStore() ?? liveSession ?? "fake-acp-session", ...obj.params } };
+  }
+  process.stdout.write(JSON.stringify(obj) + "\n");
+};
 const result = (id: unknown, res: unknown) => out({ jsonrpc: "2.0", id, result: res });
 const configUpdates = JSON.parse(process.env.FAKE_ACP_CONFIG_UPDATES ?? "[]") as Array<{
   after: string; sessionId?: string; configOptions: unknown[]; replay?: boolean;
@@ -414,8 +331,7 @@ const emitConfigUpdates = (after: string, sessionId: string) => {
     });
   }
 };
-// Send response and subsequent updates in one chunk to exercise wire ordering:
-// a promise continuation must not overwrite a newer notification with the ACK.
+// Response and updates go in one chunk to exercise wire ordering.
 const resultAndConfigUpdates = (id: unknown, res: unknown, after: string, sessionId: string) => {
   const updates = configUpdates.filter((entry) => entry.after === after).map((update) => ({
     jsonrpc: "2.0", method: "session/update", params: {
@@ -437,36 +353,27 @@ const recordMethod = (method: string) => {
   }
 };
 
-// session/set_mode + session/set_model calls seen this run
 const configCalls: Array<{ method: string; params: unknown }> = [];
 
-// pending server→client permission request id → resolver
 let pendingPermissionId: number | null = null;
 let onPermissionAnswered: ((allowed: boolean) => void) | null = null;
 let lastPermissionCancelled = false;
-// pending server→client cursor/ask_question probe → resolver (the unsupported
-// method the driver must reject rather than guess a shape for)
 let pendingAskQuestionId: number | null = null;
 let onAskQuestionAnswered: (() => void) | null = null;
 
-// hang mode: the prompt we are holding open and its keep-alive timer —
-// session/cancel resolves it cancelled (the ACP spec's cancel contract)
-// and drops the keep-alive
 let hangingPromptId: unknown = null;
 let hangKeepAlive: ReturnType<typeof setInterval> | null = null;
 
-// ask-peer mode: the "agents" MCP server entry from session/new's mcpServers
 type McpEntry = { command: string; args?: string[]; env?: Array<{ name: string; value: string }> };
 let agentsMcp: McpEntry | null = null;
-// mcp-tools mode: every entry from the last session/new or session/load
 type AnyMcpEntry = { name: string; command?: string; args?: string[]; env?: Array<{ name: string; value: string }>; url?: string; headers?: Array<{ name: string; value: string }> };
 let sessionMcp: AnyMcpEntry[] = [];
-/** grok 1.0.25's initialize (`grok mcp doctor`, captured Oct 8 2026) */
+/** grok 1.0.25's initialize (`grok mcp doctor`) */
 const GROK_MCP_HANDSHAKE = { protocolVersion: "2025-11-25", capabilities: { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } } }, clientInfo: { name: "grok-shell", version: "1.0.25" } };
 
-/** Connect one server as the agent's own MCP client would and list its tools. */
 async function listMcpTools(entry: AnyMcpEntry, handshake: unknown): Promise<string[]> {
-  const names = (result: any) => (result?.tools ?? []).map((tool: { name: string }) => tool.name);
+  const names = (result: any) => (result?.tools ?? []).map((tool: { name: string; inputSchema?: unknown }) =>
+    process.env.FAKE_ACP_MCP_SCHEMA_BYTES === "1" ? `${tool.name}=${JSON.stringify(tool.inputSchema ?? {}).length}` : tool.name);
   if (typeof entry.url === "string") {
     const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
     for (const { name, value } of entry.headers ?? []) headers[name] = value;
@@ -508,10 +415,18 @@ async function listMcpTools(entry: AnyMcpEntry, handshake: unknown): Promise<str
     write({ id: 1, method: "initialize", params: handshake });
   });
 }
-// the session this process established, for FAKE_ACP_REJECT_LIVE_LOAD_FILE
 let liveSession: string | null = null;
+let sessionsOpened = 0;
 let rpcFailure: unknown = null;
-function emitUsageUpdates(): void {
+function emitSessionReports(): void {
+  const updatesFile = process.env.FAKE_ACP_UPDATES_FILE;
+  if (updatesFile && existsSync(updatesFile)) {
+    try {
+      for (const params of JSON.parse(readFileSync(updatesFile, "utf8")) as unknown[]) {
+        if (params && typeof params === "object") out({ jsonrpc: "2.0", method: "session/update", params });
+      }
+    } catch {}
+  }
   const usageFile = process.env.FAKE_ACP_USAGE_UPDATES_FILE;
   if (usageFile && existsSync(usageFile)) {
     try {
@@ -528,7 +443,7 @@ function failRpc(msg: { method: string; id: unknown }): boolean {
   const failureFile = process.env.FAKE_ACP_RPC_FAILURE_FILE;
   if (failureFile && existsSync(failureFile)) rpcFailure = JSON.parse(readFileSync(failureFile, "utf8"));
   if (!rpcFailure) return false;
-  if (msg.method === "session/prompt" && process.env.FAKE_ACP_RPC_FAILURE_AFTER_USAGE === "1") emitUsageUpdates();
+  if (msg.method === "session/prompt" && process.env.FAKE_ACP_RPC_FAILURE_AFTER_USAGE === "1") emitSessionReports();
   if (msg.method === "session/prompt" && process.env.FAKE_ACP_RPC_FAILURE_AFTER_OUTPUT === "1") playTurn();
   const fail = () => {
     recordMethod(`${msg.method}.error`);
@@ -545,8 +460,6 @@ function failRpc(msg: { method: string; id: unknown }): boolean {
   return true;
 }
 
-/** Minimal one-shot MCP stdio client: initialize, call each tool in
- * sequence, return the text of the last result. Dependency-free. */
 function driveMcp(entry: McpEntry, calls: Array<{ name: string | (() => string); args: (prev: string) => object }>, strict = false): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
@@ -583,9 +496,6 @@ function driveMcp(entry: McpEntry, calls: Array<{ name: string | (() => string);
           continue;
         }
         if (msg.id === undefined) continue;
-        // Protocol failures (for example a removed tool) are never a successful
-        // empty reply. Tool-result denials remain inspectable by the legacy
-        // approval fixtures unless that caller explicitly requires success.
         if (msg.error || (strict && msg.result?.isError)) {
           clearTimeout(timer);
           child.kill();
@@ -611,7 +521,6 @@ function playTurn() {
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "tool_call_update", toolCallId: "tc-1", status: "completed", rawOutput: { text: "fixture file content", api_key: "acp-output-secret" } } } });
 }
 
-/** Scripted text → tool → text → tool → text turn for order-contract tests. */
 function playInterleaveTurn() {
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "before one" } } } });
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "tool_call", toolCallId: "tc-1", title: "run" } } });
@@ -622,9 +531,6 @@ function playInterleaveTurn() {
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "after" } } } });
 }
 
-/** Scripted reasoning-only turn: thought chunks and nothing else — the shape
- * of a provider that never leaves its thinking stream yet still answers
- * end_turn, which the driver must report as a lost turn, not a success. */
 function playReasoningTurn() {
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_thought_chunk", content: { text: "considering the request at length" } } } });
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_thought_chunk", content: { text: " without ever producing an answer" } } } });
@@ -644,23 +550,26 @@ process.stdin.on("data", (c) => {
     } catch {
       continue;
     }
-    handle(msg);
+    const sessionId = msg.params?.sessionId;
+    if (typeof sessionId === "string") answering.run(sessionId, () => handle(msg));
+    else handle(msg);
   }
 });
 
 function handle(msg: any) {
-  // client's response to the unsupported cursor/ask_question probe
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined) && msg.id === pendingAskQuestionId) {
     pendingAskQuestionId = null;
+    if (process.env.FAKE_ACP_ASK_ANSWER) {
+      writeFileSync(process.env.FAKE_ACP_ASK_ANSWER, JSON.stringify(msg.error !== undefined ? { error: msg.error } : { result: msg.result }));
+    }
     onAskQuestionAnswered?.();
     return;
   }
-  // client's response to our permission request
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined) && msg.id === pendingPermissionId) {
     pendingPermissionId = null;
     const chosen = msg.result?.outcome?.optionId;
     lastPermissionCancelled = msg.result?.outcome?.outcome === "cancelled";
-    // which option the client picked, for tests asserting allow_always
+    // FAKE_ACP_PERMISSION_ANSWER: the option the client picked.
     if (process.env.FAKE_ACP_PERMISSION_ANSWER) writeFileSync(process.env.FAKE_ACP_PERMISSION_ANSWER, String(chosen ?? "cancelled"));
     onPermissionAnswered?.(typeof chosen === "string" && chosen.startsWith("allow"));
     return;
@@ -682,17 +591,21 @@ function handle(msg: any) {
       const authMethods = mode === "no-auth" ? [] : [{ id: process.env.FAKE_ACP_AUTH_METHOD ?? "cached_token" }];
       const agentName = process.env.FAKE_ACP_AGENT_NAME;
       const acceptsImages = process.env.FAKE_ACP_IMAGE_CAPABILITY === "1";
-      // which remote MCP transports this agent advertises, e.g. "http,sse"
       const mcpTransports = (process.env.FAKE_ACP_MCP_TRANSPORTS ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+      const closesSessions = process.env.FAKE_ACP_SESSION_CLOSE === "1";
+      if (["1", "stuck"].includes(process.env.FAKE_ACP_CURSOR_FAST ?? "") && msg.params?.clientCapabilities?._meta?.parameterizedModelPicker === true) {
+        currentFast = "true";
+      }
       result(msg.id, {
         protocolVersion: 1,
         authMethods,
         agentInfo: agentName
           ? { name: agentName, version: process.env.FAKE_ACP_AGENT_VERSION ?? "test" }
           : undefined,
-        agentCapabilities: agentName || acceptsImages || mcpTransports.length
+        agentCapabilities: agentName || acceptsImages || mcpTransports.length || closesSessions
           ? {
               ...(agentName ? { loadSession: true, sessionCapabilities: { resume: true }, auth: { logout: true } } : {}),
+              ...(closesSessions ? { sessionCapabilities: { close: {} } } : {}),
               ...(acceptsImages ? { promptCapabilities: { image: true } } : {}),
               ...(mcpTransports.length ? { mcpCapabilities: { http: mcpTransports.includes("http"), sse: mcpTransports.includes("sse") } } : {}),
             }
@@ -728,23 +641,28 @@ function handle(msg: any) {
       if (process.env.FAKE_ACP_DUMP) {
         writeFileSync(`${process.env.FAKE_ACP_DUMP}.session.json`, JSON.stringify(msg.params));
         dumpState.mcpServers = servers;
-        writeFileSync(process.env.FAKE_ACP_DUMP, JSON.stringify(dumpState, null, 2));
+        writeDumpAtomic(process.env.FAKE_ACP_DUMP, JSON.stringify(dumpState, null, 2));
       }
-      agentsMcp = servers.find((s: any) => s?.name === "agents") ?? null;
+      const offered = servers.find((s: any) => s?.name === "agents") ?? null;
+      agentsMcp = mode === "list-peers" ? agentsMcp ?? offered : offered;
       sessionMcp = servers as AnyMcpEntry[];
       if (process.env.FAKE_ACP_DUMP) {
         writeFileSync(`${process.env.FAKE_ACP_DUMP}.mcp.json`, JSON.stringify(servers, null, 2));
       }
       const opts = configOptions();
       const mdls = sessionModels();
-      liveSession = "fake-acp-session";
+      sessionsOpened += 1;
+      liveSession = sessionsOpened === 1 ? "fake-acp-session" : `fake-acp-session-${sessionsOpened}`;
       resultAndConfigUpdates(msg.id, {
-        sessionId: "fake-acp-session",
+        sessionId: liveSession,
         ...(opts ? { configOptions: opts } : {}),
         ...(mdls ? { models: mdls } : {}),
-      }, "session/new", "fake-acp-session");
+      }, "session/new", liveSession);
       break;
     }
+    case "session/close":
+      result(msg.id, {});
+      break;
     case "session/load": {
       if (process.env.FAKE_ACP_LOAD_ERROR) {
         out({ jsonrpc: "2.0", id: msg.id, error: JSON.parse(process.env.FAKE_ACP_LOAD_ERROR) });
@@ -763,10 +681,11 @@ function handle(msg: any) {
         break;
       }
       const cachedLiveLoad = process.env.FAKE_ACP_CACHED_LIVE_LOAD === "1" && liveSession === msg.params?.sessionId;
-      // like a real agent that reconnects its MCP servers on load, so a
-      // later turn on this process carries that turn's own token
       if ((mode === "safe-agent-reads" || mode === "chief-delegate" || mode === "create-peer") && !cachedLiveLoad) {
         agentsMcp = (msg.params?.mcpServers ?? []).find((server: any) => server.name === "agents") ?? null;
+      }
+      if (mode === "list-peers") {
+        agentsMcp ??= (msg.params?.mcpServers ?? []).find((server: any) => server.name === "agents") ?? null;
       }
       if (process.env.FAKE_ACP_DUMP) {
         writeFileSync(`${process.env.FAKE_ACP_DUMP}.mcp.json`, JSON.stringify(msg.params?.mcpServers ?? []));
@@ -796,20 +715,15 @@ function handle(msg: any) {
       result(msg.id, { ...(opts ? { configOptions: opts } : {}), ...(mdls ? { models: mdls } : {}) });
       break;
     }
-    // per-session settings (droid sets model/autonomy here, not via argv).
-    // Recorded next to FAKE_ACP_DUMP so a test can assert what was applied.
-    // NOTE: last writer wins — each turn spawns a fresh child, so a two-turn
-    // test would only ever see the final turn's calls.
+    // droid sets model/autonomy here, not via argv. Recorded beside FAKE_ACP_DUMP; last writer wins.
     case "session/set_mode":
     case "session/set_model": {
       if (mode === "no-session-config") {
-        // an older agent that predates these methods
         return out({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "method not found" } });
       }
       if (msg.method === "session/set_model" && (mode === "set-model-invalid-params" ||
           (mode === "set-model-invalid-after-first" && configCalls.some((call) => call.method === "session/set_model")))) {
-        // an agent whose ACP model namespace does not contain the id it was
-        // sent — Cursor's answer when handed an argv slug like `auto`.
+        // Cursor's answer when handed an argv slug like `auto`.
         return out({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "Invalid params" } });
       }
       const settingId = msg.method === "session/set_mode" ? "modeId" : "modelId";
@@ -840,6 +754,15 @@ function handle(msg: any) {
         resultAndConfigUpdates(msg.id, process.env.FAKE_ACP_EMPTY_VARIANT_ACK ? {} : { configOptions: configOptions() }, "effort", msg.params.sessionId);
         break;
       }
+      if (configId === "fast" && currentFast && (value === "true" || value === "false")) {
+        if (process.env.FAKE_ACP_CURSOR_FAST !== "stuck") currentFast = value;
+        configCalls.push({ method: msg.method, params: msg.params });
+        if (process.env.FAKE_ACP_DUMP) {
+          writeFileSync(`${process.env.FAKE_ACP_DUMP}.config.json`, JSON.stringify(configCalls, null, 2));
+        }
+        result(msg.id, { configOptions: configOptions() });
+        break;
+      }
       if (configId === "mode" && modes.includes(value)) {
         const ackFile = process.env.FAKE_ACP_MODE_ACK_FILE;
         const ack = ackFile && existsSync(ackFile) ? readFileSync(ackFile, "utf8").trim() : "";
@@ -867,9 +790,6 @@ function handle(msg: any) {
         });
         break;
       }
-      // FAKE_ACP_MODEL_STICKS: answer OK and keep the old model anyway. Nothing
-      // in the protocol forbids it, and it is the shape core.ts's confirmation
-      // guard exists for — an error is loud, this is silent.
       if (!process.env.FAKE_ACP_MODEL_STICKS) {
         currentModel = value;
         currentVariant = variantConfigs[value]?.currentValue;
@@ -897,46 +817,39 @@ function handle(msg: any) {
         writeFileSync(`${process.env.FAKE_ACP_DUMP}.prompt.json`, JSON.stringify(msg.params?.prompt ?? null, null, 2));
       }
       if (failRpc(msg)) return;
-      // FAKE_ACP_TEXT_REPLY: a plain text answer and nothing else, the shape of
-      // memory upkeep's one-shot call (drivers/acp/background-text.ts)
       if (process.env.FAKE_ACP_TEXT_REPLY !== undefined) {
         out({ jsonrpc: "2.0", method: "session/update", params: { sessionId: msg.params?.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.env.FAKE_ACP_TEXT_REPLY } } } });
         result(msg.id, { stopReason: "end_turn", _meta: { inputTokens: 12, outputTokens: 4 } });
         return;
       }
-      if (mode === "hang") {
-        // never resolve the prompt on our own — lets tests exercise interrupt
+      const fullPrompt = (Array.isArray(msg.params?.prompt) ? msg.params.prompt : []).map((block: any) => block?.text ?? "").join("");
+      if (mode === "hang" || (process.env.FAKE_ACP_HANG_ON && fullPrompt.includes(process.env.FAKE_ACP_HANG_ON))) {
         hangingPromptId = msg.id;
         hangKeepAlive = setInterval(() => {}, 1_000);
         return;
       }
       if (mode === "stall-after-text") {
-        // Stream a chunk, then go fully silent forever: no updates, no result,
-        // no exit. This is the shape of a wedged OpenCode agent that stopped
-        // mid-answer — the driver's prompt idle guard must fail the turn on
-        // its own, because nothing else will ever arrive.
         out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "half an answer, then silence" } } } });
         hangingPromptId = msg.id;
         hangKeepAlive = setInterval(() => {}, 1_000);
         return;
       }
+      if (mode === "crash-in-prompt") {
+        out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "working" } } } });
+        setTimeout(() => process.exit(3), 200);
+        return;
+      }
       if (mode === "fail-after-text") {
-        // Stream real text, THEN fail the turn — the shape of a crash
-        // mid-answer. This is the one case where the routine-failed/done
-        // notification dedup is load-bearing: the reply is non-empty, so
-        // nothing else suppresses the generic done.
         out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "half a report, then a crash" } } } });
         recordMethod("session/prompt.error");
         out({ jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "fake acp: turn failed after streaming" } });
         return;
       }
       const complete = () => {
-        emitUsageUpdates();
+        emitSessionReports();
         recordMethod("session/prompt.result");
         result(
           msg.id,
-          // FAKE_ACP_USAGE_ROOT reproduces opencode 1.18.18's shape: usage at
-          // the result root with an empty _meta, instead of usage under _meta.
           process.env.FAKE_ACP_USAGE_ROOT
             ? { stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 5 }, _meta: {} }
             : { stopReason: "end_turn", _meta: { inputTokens: 10, outputTokens: 5 } },
@@ -964,7 +877,7 @@ function handle(msg: any) {
         const tool = (update: Record<string, unknown>) =>
           out({ jsonrpc: "2.0", method: "session/update", params: { update: { toolCallId: "tc-slow", ...update } } });
         // ACP's default status is pending: this tool_call carries none.
-        tool({ sessionUpdate: "tool_call", title: "sleep", rawInput: { command: "sleep 45 && echo done" } });
+        tool({ sessionUpdate: "tool_call", title: "sleep", kind: "execute", rawInput: { command: "sleep 45 && echo done" } });
         tool({ sessionUpdate: "tool_call_update", status: "in_progress" });
         const finish = () => tool({ sessionUpdate: "tool_call_update", status: "completed", rawOutput: { output: "done" } });
         if (mode === "stall-after-tool") {
@@ -981,9 +894,7 @@ function handle(msg: any) {
         return;
       }
       if (mode === "unkeyed-tool") {
-        // An agent that violates the ACP spec by omitting toolCallId: the
-        // turn's lifecycle pair must still carry one stable id so consumers
-        // can pair the start with its completion.
+        // Violates ACP by omitting toolCallId.
         out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "tool_call", title: "run", rawInput: { command: "echo done" } } } });
         out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "tool_call_update", status: "completed", rawOutput: { output: "done" } } } });
         out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "done" } } } });
@@ -991,10 +902,7 @@ function handle(msg: any) {
         return;
       }
       const promptText = String(msg.params?.prompt?.[0]?.text ?? "");
-      // A hand-off's result woke this bot (the runtime's resume, or the
-      // legacy wake): the harness revived it to fold the result in.
-      // Synthesize instead of driving the mode's usual hand-off flow, which
-      // would loop or re-ask for approval on a turn the user did not initiate.
+      // A hand-off result wake is synthesized: the mode's usual flow would loop on an unprompted turn.
       const runtimeReport = /\[OpenMausBot report from @[^\]\n]*: ([a-z_]+)/.exec(promptText);
       const wokeFromDelegation = promptText.includes("[A delegated task just completed]")
         || promptText.includes("[A delegated task failed]")
@@ -1102,6 +1010,18 @@ function handle(msg: any) {
           });
         return;
       }
+      if (mode === "list-peers" && agentsMcp) {
+        void driveMcp(agentsMcp, [{ name: "list_bots", args: () => ({}) }])
+          .then((list) => {
+            out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: `peers: ${list}` } } } });
+            complete();
+          })
+          .catch((e) => {
+            out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: `peers error: ${(e as Error).message}` } } } });
+            complete();
+          });
+        return;
+      }
       if (mode === "mcp-tools") {
         const handshake = process.env.FAKE_ACP_MCP_HANDSHAKE ? JSON.parse(process.env.FAKE_ACP_MCP_HANDSHAKE) : GROK_MCP_HANDSHAKE;
         void Promise.all(sessionMcp.map((entry) => listMcpTools(entry, handshake).then(
@@ -1114,10 +1034,6 @@ function handle(msg: any) {
         return;
       }
       if (mode === "ask-peer" && agentsMcp) {
-        // the comms e2e: ask a peer bot a question through the injected
-        // agents proxy and reply with what the tool said (the peer's fake
-        // runs plain happy — its depth-1 turn gets no agents server, so no
-        // recursion; its answer resumes this bot in a later turn)
         void driveMcp(agentsMcp, [
           { name: "list_bots", args: () => ({}) },
           handoffCall("ping from fake", { consult: true }),
@@ -1133,8 +1049,6 @@ function handle(msg: any) {
         return;
       }
       if (mode === "create-peer" && agentsMcp) {
-        // Below Full access create_bot only shows the team setup card. Once
-        // the person applies it the Chief resumes, finds Pixel and delegates.
         let listed = "";
         void driveMcp(agentsMcp, [
           { name: "list_bots", args: () => ({}) },
@@ -1150,8 +1064,6 @@ function handle(msg: any) {
             },
           },
           {
-            // Every turn hands work on the same way, the routine's and the
-            // person's resumed one after the card alike.
             name: "coordinate_bots",
             args: (created) => {
               const id = /id: ([\w-]+)/.exec(created)?.[1] ?? /^- Pixel\b.*?\[id: ([\w-]+)/m.exec(listed)?.[1] ?? "";
@@ -1171,17 +1083,12 @@ function handle(msg: any) {
         return;
       }
       if (mode === "echo-gated") {
-        // echoing the WHOLE prompt (system + turn text) lets a test assert
-        // both what a drained turn was sent and what it was NOT sent (e.g.
-        // the webhook untrusted-data paragraph a steered turn must not get)
         const finish = () => {
           out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: `echo: ${promptText}` } } } });
           complete();
         };
         const gate = process.env.FAKE_ACP_GATE_FILE;
-        // FAKE_ACP_STARTED_FILE: written the moment the prompt arrives, so a
-        // test can act "during the turn" (after the harness's pre-turn
-        // checkpoint) without racing the busy flag, which flips at claim.
+        // FAKE_ACP_STARTED_FILE: written when the prompt arrives, so a test can act during the turn.
         const started = process.env.FAKE_ACP_STARTED_FILE;
         if (started) writeFileSync(started, String(Date.now()));
         if (gate && !existsSync(gate)) {
@@ -1196,10 +1103,6 @@ function handle(msg: any) {
         return;
       }
       if (mode === "delegate-peer" && agentsMcp) {
-        // async peer-handoff e2e: hand the work on and return immediately;
-        // the harness fires the peer's depth-1 turn after our turn settles.
-        // We don't need the peer's reply in our text — the result resumes
-        // this bot in a later turn, which the wake branch above answers.
         void driveMcp(agentsMcp, [
           { name: "list_bots", args: () => ({}) },
           handoffCall("delegated task", { reason: "followup" }),
@@ -1230,8 +1133,6 @@ function handle(msg: any) {
       else if (mode !== "empty-reply") playTurn();
       if (mode === "safe-agent-reads" && agentsMcp) {
         const entry = agentsMcp;
-        // Deliberately independent of the app's policy catalog. These are the
-        // two exact calls in the reported regression, repeated in one turn.
         void (async () => {
           for (const name of ["list_bots", "session_search", "list_bots"]) {
             const nativeAuto = ["--permission-mode", "--approval-mode"].some((flag) => argv.includes(flag) && argv[argv.indexOf(flag) + 1] === "auto");
@@ -1256,9 +1157,6 @@ function handle(msg: any) {
         return;
       }
       if (mode === "permission") {
-        // ask the client to approve a tool, then — like a real agent once its
-        // card is answered — close the turn with a visible reply instead of
-        // ending bare (a bare end_turn is the lost-turn failure, not a success)
         pendingPermissionId = 9001;
         onPermissionAnswered = () => {
           out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "handled the permission decision" } } } });
@@ -1274,8 +1172,7 @@ function handle(msg: any) {
               : { kind: "execute", rawInput: { command: "echo hi" }, title: "echo hi" },
             options: process.env.FAKE_ACP_PERMISSION_OPTIONS ? JSON.parse(process.env.FAKE_ACP_PERMISSION_OPTIONS) : [
               { optionId: "allow-once", kind: "allow_once" },
-              // Grok offers a session-wide allow on some requests and omits
-              // it on others; the driver must cope with both.
+              // Grok offers a session-wide allow on some requests and omits it on others.
               ...(process.env.FAKE_ACP_ALLOW_ALWAYS ? [{ optionId: "allow-always", kind: "allow_always" }] : []),
               { optionId: "reject", kind: "reject_once" },
             ],
@@ -1305,8 +1202,7 @@ function handle(msg: any) {
       if (mode === "question") {
         pendingPermissionId = 9002;
         onPermissionAnswered = () => {
-          // FAKE_ACP_HOLD_ON_CANCELLED: a cancelled question leaves the prompt
-          // open until session/cancel, the way Antigravity's agent does
+          // FAKE_ACP_HOLD_ON_CANCELLED: a cancelled question holds the prompt until session/cancel, as Antigravity does.
           if (process.env.FAKE_ACP_HOLD_ON_CANCELLED && lastPermissionCancelled) {
             hangingPromptId = msg.id;
             return;
@@ -1332,26 +1228,40 @@ function handle(msg: any) {
         });
         return;
       }
-      if (mode === "ask-question-unsupported") {
-        // cursor/ask_question is deliberately unwired in the driver: its wire
-        // shape is unverified, so it must be rejected method-not-found rather
-        // than answered with a guessed shape. Complete only after the
-        // rejection arrives, so a test can await turn.completed.
-        pendingAskQuestionId = 9300;
-        onAskQuestionAnswered = complete;
-        out({
-          jsonrpc: "2.0",
-          id: pendingAskQuestionId,
-          method: "cursor/ask_question",
-          params: { questions: [{ question: "Which color?", options: ["Blue", "Green"] }] },
-        });
+      if (mode === "ask-question") {
+        const ask = () => {
+          pendingAskQuestionId = 9300;
+          out({
+            jsonrpc: "2.0",
+            id: pendingAskQuestionId,
+            method: process.env.FAKE_ACP_ASK_METHOD ?? "cursor/ask_question",
+            params: process.env.FAKE_ACP_ASK_PARAMS ? JSON.parse(process.env.FAKE_ACP_ASK_PARAMS) : {
+              toolCallId: "ask-1",
+              title: "Pick a color",
+              questions: [{ id: "color", prompt: "Which color?", options: [{ id: "blue-id", label: "Blue" }, { id: "green-id", label: "Green" }], allowMultiple: false }],
+            },
+          });
+        };
+        const timing = process.env.FAKE_ACP_ASK_TIMING;
+        if (timing === "with-result" || timing === "after-result") {
+          onAskQuestionAnswered = null;
+          if (timing === "with-result") ask();
+          complete();
+          // late enough that the driver has settled the turn first
+          if (timing === "after-result") setTimeout(ask, 300);
+          return;
+        }
+        onAskQuestionAnswered = () => {
+          out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "answered the question" } } } });
+          complete();
+        };
+        ask();
         return;
       }
       complete();
       break;
     }
     case "session/cancel":
-      // the interrupted prompt resolves as cancelled
       if (hangingPromptId !== null) {
         result(hangingPromptId, { stopReason: "cancelled", _meta: {} });
         if (hangKeepAlive) clearInterval(hangKeepAlive);

@@ -442,6 +442,8 @@ function mutatingPublicRoute(method: string, path: string): boolean {
   if (path.startsWith("/api/desktop-viewer/")) return true;
   // Drives a bot's browser: a WebSocket upgrade is a GET, but what it carries is input.
   if (/^\/api\/bots\/[\w-]+\/browser\/stream$/.test(path)) return true;
+  // A Live call's microphone: a WebSocket upgrade is a GET, but what it carries reaches the bot.
+  if (path === "/api/live/media") return true;
   if (["GET", "HEAD", "OPTIONS"].includes(upper)) return false;
   // Internal routes carry their own per-boot authorization; pairing-code exchange is public (the one-time code is its authorization).
   return !path.startsWith("/api/internal/") &&

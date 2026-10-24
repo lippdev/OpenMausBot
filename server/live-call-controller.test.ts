@@ -6,6 +6,7 @@ import {
 } from "./live-call-controller.ts";
 import { LIVE_COPY } from "../shared/live-approval.ts";
 import { LIVE_NEEDS_KEY, LiveSessionError } from "./live-call.ts";
+import { GEMINI_NEEDS_KEY, GEMINI_PHONE_UNSUPPORTED } from "./gemini-live.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { Message, StoreChange } from "./store.ts";
 
@@ -49,8 +50,7 @@ function setup(overrides: Partial<LiveCallDeps> = {}) {
     broadcast: (frame) => frames.push(frame.call),
     settings: () => settings,
     createSession: vi.fn(async () => ({ sessionId: "sess_1", sdp: "answer-sdp" })),
-    openSocket: (url, key) => { const socket = new FakeSocket(url, key); sockets.push(socket); return socket; },
-    attachUrl: (id) => `ws://fake/${id}/attach`,
+    openSideband: ({ sessionId, key }) => { const socket = new FakeSocket(`ws://fake/${sessionId}/attach`, key); sockets.push(socket); return socket; },
     speakable: (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean),
     log: (line) => logs.push(line),
     now: () => Date.now(),
@@ -76,7 +76,7 @@ describe("LiveCallController lifecycle", () => {
   it("creates the session with the key and voice, attaches the sideband and goes live", async () => {
     const t = setup();
     const result = await t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "offer-sdp" });
-    expect(t.deps.createSession).toHaveBeenCalledWith({ key: "sk-test", sdp: "offer-sdp", botId: "bot1", threadId: "t1", voice: "sol" });
+    expect(t.deps.createSession).toHaveBeenCalledWith({ provider: "openai", key: "sk-test", sdp: "offer-sdp", botId: "bot1", threadId: "t1", voice: "sol" });
     expect(result.sdp).toBe("answer-sdp");
     expect(result.call).toMatchObject({ botId: "bot1", threadId: "t1", client: "ios", voice: "sol", status: "connecting" });
     expect(t.socket().url).toBe("ws://fake/sess_1/attach");
@@ -134,7 +134,7 @@ describe("LiveCallController lifecycle", () => {
   });
 
   it("ends with sideband-lost and leaves no timer when the sideband cannot be opened", async () => {
-    const t = setup({ openSocket: () => { throw new Error("bad url"); } });
+    const t = setup({ openSideband: () => { throw new Error("bad url"); } });
     const result = await t.controller.start({ auth: owner, ...BOT, client: "desktop", sdp: "a" });
     expect(result.call).toMatchObject({ status: "ended", endReason: "sideband-lost" });
     expect(t.controller.current()).toBeNull();
@@ -1169,5 +1169,50 @@ describe("LiveCallController record", () => {
     expect(t.controller.current()).toBeNull();
     expect(t.logs.at(-1)).toContain("errors=record");
     await expect(t.start()).resolves.toBeTruthy();
+  });
+});
+
+describe("LiveCallController on Gemini Live", () => {
+  const gemini = (t: ReturnType<typeof setup>) => Object.assign(t.settings, { provider: "gemini" as const, geminiVoice: "kore" });
+
+  it("starts without an offer, with the Gemini voice, and records the provider", async () => {
+    const t = setup({ createSession: vi.fn(async () => ({ sessionId: "g1" })) });
+    gemini(t);
+    const result = await t.controller.start({ auth: owner, ...BOT, client: "web" });
+    expect(t.deps.createSession).toHaveBeenCalledWith({ provider: "gemini", key: "sk-test", botId: "bot1", threadId: "t1", voice: "Kore" });
+    expect(result).not.toHaveProperty("sdp");
+    expect(result.call).toMatchObject({ provider: "gemini", voice: "Kore", status: "connecting" });
+    expect(t.controller.mediaSession(result.call.callId, owner)).toBe("g1");
+    expect(t.controller.mediaSession("other", owner)).toBeNull();
+    expect(t.controller.mediaSession(result.call.callId, { kind: "session", session: { id: "s9" }, via: "cookie", scopes: ["client"] } as unknown as RequestAuth)).toBeNull();
+  });
+
+  it("refuses a phone and asks for the Gemini key, before creating a session", async () => {
+    const t = setup();
+    gemini(t);
+    await expect(t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "offer" })).rejects.toMatchObject({ message: GEMINI_PHONE_UNSUPPORTED, status: 422 });
+    t.settings.key = "";
+    await expect(t.controller.start({ auth: owner, ...BOT, client: "desktop" })).rejects.toMatchObject({ message: GEMINI_NEEDS_KEY, status: 409 });
+    expect(t.deps.createSession).not.toHaveBeenCalled();
+  });
+
+  it("still needs an offer for GPT-Live", async () => {
+    const t = setup();
+    await expect(t.controller.start({ auth: owner, ...BOT, client: "desktop" })).rejects.toMatchObject({ status: 400 });
+    expect(t.deps.createSession).not.toHaveBeenCalled();
+    expect(LIVE_NEEDS_KEY).toContain("OpenAI");
+  });
+
+  it("sends the bot what the voice says was asked, and names Google when the connection drops", async () => {
+    const t = setup({ createSession: vi.fn(async () => ({ sessionId: "g1" })) });
+    gemini(t);
+    await t.controller.start({ auth: owner, ...BOT, client: "desktop" });
+    t.socket().open();
+    t.socket().receive({ type: "session.input_transcript.delta", delta: "uh what's on my", start_ms: 0, end_ms: 100 });
+    t.socket().receive({ type: "session.delegation.created", offset_ms: 200, delegation: { id: "fc1", target: "client" }, request: "What is on my calendar today?" });
+    await vi.advanceTimersByTimeAsync(DELEGATION_SETTLE_MS);
+    expect(t.deps.send).toHaveBeenCalledWith(expect.objectContaining({ text: "What is on my calendar today?" }));
+    t.socket().drop();
+    expect(t.frames.at(-1)).toMatchObject({ status: "ended", endReason: "sideband-lost", error: "The call connection to Google dropped." });
   });
 });

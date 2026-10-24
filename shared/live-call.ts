@@ -178,6 +178,47 @@ export const LIVE_VOICE_OPTIONS: ReadonlyArray<{ id: string; label: string }> = 
   { id: "tempo", label: "Tempo — Brazilian Portuguese, masculine" },
 ];
 
+/** Gemini Live prebuilt voices (the Gemini text-to-speech voice list, which
+ * Live native-audio models accept), with Google's one-word characterisation. */
+export const GEMINI_LIVE_VOICE_OPTIONS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: "Puck", label: "Puck — upbeat (default)" },
+  { id: "Zephyr", label: "Zephyr — bright" },
+  { id: "Charon", label: "Charon — informative" },
+  { id: "Kore", label: "Kore — firm" },
+  { id: "Fenrir", label: "Fenrir — excitable" },
+  { id: "Leda", label: "Leda — youthful" },
+  { id: "Orus", label: "Orus — firm" },
+  { id: "Aoede", label: "Aoede — breezy" },
+  { id: "Callirrhoe", label: "Callirrhoe — easy-going" },
+  { id: "Autonoe", label: "Autonoe — bright" },
+  { id: "Enceladus", label: "Enceladus — breathy" },
+  { id: "Iapetus", label: "Iapetus — clear" },
+  { id: "Umbriel", label: "Umbriel — easy-going" },
+  { id: "Algieba", label: "Algieba — smooth" },
+  { id: "Despina", label: "Despina — smooth" },
+  { id: "Erinome", label: "Erinome — clear" },
+  { id: "Algenib", label: "Algenib — gravelly" },
+  { id: "Rasalgethi", label: "Rasalgethi — informative" },
+  { id: "Laomedeia", label: "Laomedeia — upbeat" },
+  { id: "Achernar", label: "Achernar — soft" },
+  { id: "Alnilam", label: "Alnilam — firm" },
+  { id: "Schedar", label: "Schedar — even" },
+  { id: "Gacrux", label: "Gacrux — mature" },
+  { id: "Pulcherrima", label: "Pulcherrima — forward" },
+  { id: "Achird", label: "Achird — friendly" },
+  { id: "Zubenelgenubi", label: "Zubenelgenubi — casual" },
+  { id: "Vindemiatrix", label: "Vindemiatrix — gentle" },
+  { id: "Sadachbia", label: "Sadachbia — lively" },
+  { id: "Sadaltager", label: "Sadaltager — knowledgeable" },
+  { id: "Sulafat", label: "Sulafat — warm" },
+];
+
+export const DEFAULT_GEMINI_LIVE_VOICE = "Puck";
+
+export function liveProviderName(provider: "openai" | "gemini" | undefined): string {
+  return provider === "gemini" ? "Google" : "OpenAI";
+}
+
 /** A call's length as a clock: m:ss under an hour ("0:07", "1:42"),
  * h:mm:ss from an hour on ("1:02:05"). Whole seconds; a value that is not a
  * length reads as 0:00. */

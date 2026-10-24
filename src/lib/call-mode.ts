@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { LocaleKey } from "@/locales";
+import type { LiveProvider } from "../../shared/wire";
 import { t } from "./i18n";
 
 export type CallMode = "turns" | "live";
@@ -10,11 +11,16 @@ export const CALL_MODES: ReadonlyArray<{ id: CallMode; label: LocaleKey }> = [
   { id: "live", label: "call.mode.live" },
 ];
 
-export function liveDisclosure({ cloudHome = false }: { cloudHome?: boolean } = {}): string {
+export function liveDisclosure({ cloudHome = false, provider = "openai" }: { cloudHome?: boolean; provider?: LiveProvider } = {}): string {
+  if (provider === "gemini") return t(cloudHome ? "call.live.geminiDisclosureCloud" : "call.live.geminiDisclosure");
   return t(cloudHome ? "call.live.disclosureCloud" : "call.live.disclosure");
 }
 
-export function callModeHint(mode: CallMode, where: { cloudHome?: boolean } = {}): string {
+export function liveCost(provider: LiveProvider = "openai"): string {
+  return t(provider === "gemini" ? "call.live.geminiCost" : "call.live.cost");
+}
+
+export function callModeHint(mode: CallMode, where: { cloudHome?: boolean; provider?: LiveProvider } = {}): string {
   return mode === "live" ? `${t("call.mode.liveHint")} ${liveDisclosure(where)}` : t("call.mode.turnsHint");
 }
 

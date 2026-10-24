@@ -234,3 +234,31 @@ call, titles off, one spoken request ("what is six times seven"), hung up.
   `src/components/ChatView.via-call.test.ts`).
 - SIGINT to the exact `ui launch` pid removed its data directory and the driver
   was stopped; `ps` showed no fixture, preview, driver or browser process left.
+
+## Gemini Live
+
+With `live.provider: "gemini"` (Call settings → Voice from → Google Gemini
+Live) a call runs on Gemini Live (`gemini-3.8-live`) with the person's Gemini
+API key (`live.geminiKey`, `OMB_GEMINI_LIVE_KEY`, or the desktop credential
+`geminiLiveKey`). Gemini Live has no WebRTC and no sideband, so the harness
+holds the only connection to Google (`server/gemini-live.ts`): the client
+streams 16 kHz PCM over `GET /api/live/media?callId=…` (a WebSocket, only for
+the person who started the call) and plays back the 24 kHz PCM it gets. The
+bridge speaks GPT-Live's sideband protocol to the same call controller, so
+delegation, spoken approvals, narration and the call row work unchanged; the
+voice delegates through a non-blocking `delegate` function. Phones are refused
+with 422 before anything reaches Google.
+
+```sh
+pnpm exec vitest run server/gemini-live.test.ts server/gemini-live.e2e.test.ts server/live-call-controller.test.ts server/routes/live.test.ts server/live-settings.test.ts
+pnpm exec vitest run src/lib/live-call-media.test.ts src/lib/gemini-live-audio.test.ts
+```
+
+`server/gemini-live.e2e.test.ts` boots the real harness against the fake
+Gemini Live (`server/testing/fake-gemini-live.ts`): it checks the settings
+report Gemini without the key, a phone is refused, the media socket relays PCM
+both ways, a spoken request reaches the bot with its call id, the answer comes
+back as a `[work, say]` turn, a hang-up closes Google's socket and the media
+socket and leaves the call row, and a refused key reads as a message for the
+user. Audio quality, echo and turn-taking need a real key and a person.
+

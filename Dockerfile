@@ -51,7 +51,9 @@ COPY . .
 # The Data engine's native modules (server/data/engine.ts), staged like the
 # desktop app's extraResources; the runtime stages copy this tree.
 RUN node scripts/prepare-duckdb.mjs && chmod -R go-w dist-native/duckdb
-RUN pnpm build:server && pnpm exec vite build && chmod -R go-w dist dist-server skills
+# The server typecheck needs more heap than Node's default on a small build machine.
+ARG BUILD_NODE_OPTIONS="--max-old-space-size=4096"
+RUN NODE_OPTIONS="$BUILD_NODE_OPTIONS" pnpm build:server && NODE_OPTIONS="$BUILD_NODE_OPTIONS" pnpm exec vite build && chmod -R go-w dist dist-server skills
 
 FROM node:24-bookworm-slim AS runtime
 # Install Chrome's Bookworm libraries directly: agent-browser --with-deps
@@ -174,6 +176,50 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
 # root's code from the image, never anything on the volume.
 USER root
 CMD ["node", "/app/dist-server/cloud-home-start.js"]
+
+# The self-hosted server built from this checkout for compose.yaml (Dokploy), with the tools the local deploy needs.
+FROM runtime AS local
+# Dependências para conexão SSH e instalação do Docker CLI.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssh-client tar \
+  && rm -rf /var/lib/apt/lists/*
+# Docker CLI 29.1.3, apenas o cliente, sem Docker daemon.
+ARG DOCKER_VERSION=29.1.3
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) DOCKER_ARCH="x86_64" ;; \
+      arm64) DOCKER_ARCH="aarch64" ;; \
+      *) echo "Arquitetura Docker não suportada: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    docker --version
+# Engines de IA: Claude Code e OpenAI Codex.
+ARG ENGINES="@anthropic-ai/claude-code @openai/codex"
+RUN if [ -n "$ENGINES" ]; then HOME=/tmp/omb-build-home npm install -g $ENGINES && rm -rf /tmp/omb-build-home /tmp/node-compile-cache; fi
+# Grok CLI: versão fixada, usando o instalador oficial da xAI. GROK_VERSION vazio não instala.
+ARG GROK_VERSION=1.0.41
+RUN if [ -n "$GROK_VERSION" ]; then \
+      mkdir -p /tmp/grok-install \
+      && curl -fsSL https://x.ai/cli/install.sh -o /tmp/grok-install/install.sh \
+      && HOME=/tmp/grok-install PATH="/tmp/grok-install/.grok/bin:$PATH" bash /tmp/grok-install/install.sh "$GROK_VERSION" \
+      && install -m 0755 "$(readlink -f /tmp/grok-install/.grok/bin/grok)" /usr/local/bin/grok \
+      && HOME=/tmp/grok-install grok --version | grep -qF "grok $GROK_VERSION " \
+      && rm -rf /tmp/grok-install; \
+    fi
+COPY --from=build --chown=maus:maus /src/dist-native/duckdb/linux-x64 ./duckdb
+COPY --from=build --chown=maus:maus /src/dist-server ./dist-server
+COPY --from=build --chown=maus:maus /src/dist ./dist
+COPY --from=build --chown=maus:maus /src/skills ./skills
+ENV HOME=/data
+VOLUME ["/data"]
+USER maus
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -sf http://127.0.0.1:8799/api/health | grep -q openmausbot || exit 1
+CMD ["node", "dist-server/server-launcher.js"]
 
 # The self-hosted server, last so a plain `docker build .` builds it.
 FROM runtime AS server

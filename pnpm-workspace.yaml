@@ -22,3 +22,5 @@ onlyBuiltDependencies:
 # mermaid 12.1 still allows dompurify 3.4.13. Force the patched release.
 overrides:
   dompurify: 3.4.16
+  # werift's certificate code breaks when two asn1-schema copies register schemas in separate stores.
+  "@peculiar/asn1-schema": 2.11.0

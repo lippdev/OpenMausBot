@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import OpusScript from "opusscript";
+import { MediaStreamTrack, RTCPeerConnection, RtpHeader, RtpPacket } from "werift";
 import { WebSocket } from "ws";
 import type { LiveCallState } from "../shared/wire.ts";
 import { WORK_TAG } from "./gemini-live.ts";
@@ -24,6 +26,7 @@ posixOnly("Gemini Live call e2e", () => {
   let base = "";
   let output = "";
   let gemini: FakeGeminiLive;
+  let phonePorts = "";
 
   const post = async (path: string, body: unknown): Promise<{ status: number; body: unknown }> => {
     const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -72,6 +75,8 @@ posixOnly("Gemini Live call e2e", () => {
       }),
     );
     const port = await freePortBlock([0, 1]);
+    const udp = await freePortBlock([0, 1, 2, 3]);
+    phonePorts = `${udp}-${udp + 3}`;
     base = `http://127.0.0.1:${port}`;
     child = spawn(process.execPath, [join(SERVER_DIR, "index.ts")], {
       cwd: join(SERVER_DIR, ".."),
@@ -83,6 +88,8 @@ posixOnly("Gemini Live call e2e", () => {
         OMB_WEBHOOK_PORT: String(port + 1),
         OMB_GEMINI_LIVE_URL: gemini.url,
         OMB_GEMINI_LIVE_KEY: GEMINI_KEY,
+        OMB_LIVE_PUBLIC_IP: "127.0.0.1",
+        OMB_LIVE_UDP_PORTS: phonePorts,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -112,13 +119,75 @@ posixOnly("Gemini Live call e2e", () => {
     expect(JSON.stringify(config)).not.toContain(GEMINI_KEY);
   });
 
-  it("refuses a phone before reaching Google", async () => {
+  it("refuses a phone without an offer before reaching Google", async () => {
     const bot = await createBot();
     const before = gemini.sessions.length;
     const res = await post("/api/live/session", { botId: bot.id, client: "ios" });
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(400);
     expect(gemini.sessions).toHaveLength(before);
   });
+
+  it("answers a phone app's GPT-Live offer itself and carries the call's audio to Gemini Live", async () => {
+    const bot = await createBot();
+    const encoder = new OpusScript(48_000, 1, OpusScript.Application.VOIP, { wasm: false });
+    const decoder = new OpusScript(48_000, 1, OpusScript.Application.VOIP, { wasm: false });
+    const phone = new RTCPeerConnection({ iceUseIpv6: false });
+    try {
+      const transceiver = phone.addTransceiver(new MediaStreamTrack({ kind: "audio" }), { direction: "sendrecv" });
+      const heard: Buffer[] = [];
+      phone.onTrack.subscribe((track) => track.onReceiveRtp.subscribe((rtp) => heard.push(decoder.decode(rtp.payload))));
+      const channel = phone.createDataChannel("oai-events");
+      const events: Array<Record<string, unknown>> = [];
+      channel.onMessage.subscribe((message) => events.push(JSON.parse(String(message)) as Record<string, unknown>));
+      await phone.setLocalDescription(await phone.createOffer());
+      await new Promise<void>((resolve) => {
+        if (phone.iceGatheringState === "complete") return resolve();
+        phone.iceGatheringStateChange.subscribe((state) => { if (state === "complete") resolve(); });
+      });
+
+      const before = gemini.sessions.length;
+      const started = await post("/api/live/session", { botId: bot.id, client: "android", sdp: phone.localDescription!.sdp });
+      expect(started.status).toBe(201);
+      const { call, transport } = started.body as { call: LiveCallState; transport: { type: string; sdp: string } };
+      expect(call).toMatchObject({ provider: "gemini", client: "android" });
+      expect(transport.type).toBe("webrtc");
+      const [low] = phonePorts.split("-").map(Number);
+      expect(transport.sdp).toMatch(new RegExp(`a=candidate:.* 127\\.0\\.0\\.1 (${low}|${low! + 1}|${low! + 2}|${low! + 3}) typ host`));
+      const session = await gemini.waitForSession(before);
+
+      await phone.setRemoteDescription({ type: "answer", sdp: transport.sdp });
+      await new Promise<void>((resolve) => {
+        if (phone.connectionState === "connected") return resolve();
+        phone.connectionStateChange.subscribe((state) => { if (state === "connected") resolve(); });
+      });
+      await expect.poll(() => events.some((event) => event.type === "session.started"), { timeout: 10_000 }).toBe(true);
+
+      const tone = Buffer.alloc(960 * 2);
+      for (let i = 0; i < 960; i++) tone.writeInt16LE(Math.round(Math.sin(i / 8) * 6000), i * 2);
+      for (let i = 0; i < 6; i++) {
+        const header = new RtpHeader({ payloadType: transceiver.sender.codec?.payloadType ?? 111, sequenceNumber: i, timestamp: i * 960 });
+        await transceiver.sender.sendRtp(new RtpPacket(header, encoder.encode(tone, 960)));
+      }
+      const appended = await gemini.waitForMessage(session, (message) => Boolean(message.realtimeInput));
+      const audio = (appended.realtimeInput as { audio: { data: string; mimeType: string } }).audio;
+      expect(audio.mimeType).toBe("audio/pcm;rate=16000");
+      expect(Buffer.from(audio.data, "base64").byteLength).toBe(1280);
+
+      gemini.emit(session, { serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: Buffer.alloc(24_000 * 2 / 10).toString("base64") } }] } } });
+      gemini.emit(session, { serverContent: { outputTranscription: { text: "Olá!" } } });
+      await expect.poll(() => heard.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(5);
+      expect(heard[0]!.byteLength).toBe(960 * 2);
+      await expect.poll(() => events.some((event) => event.type === "session.output_transcript.delta" && event.delta === "Olá!")).toBe(true);
+
+      channel.send(JSON.stringify({ type: "session.close" }));
+      await expect.poll(async () => (await (await fetch(`${base}/api/live/call`)).json() as { call: unknown }).call, { timeout: 10_000 }).toBeNull();
+      await expect.poll(() => session.closed).toBe(true);
+    } finally {
+      await phone.close();
+      encoder.delete();
+      decoder.delete();
+    }
+  }, 60_000);
 
   it("relays the call's audio, runs a spoken request through the bot and speaks the answer", async () => {
     const bot = await createBot();

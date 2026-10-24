@@ -6,7 +6,8 @@ import {
 } from "./live-call-controller.ts";
 import { LIVE_COPY } from "../shared/live-approval.ts";
 import { LIVE_NEEDS_KEY, LiveSessionError } from "./live-call.ts";
-import { GEMINI_NEEDS_KEY, GEMINI_PHONE_UNSUPPORTED } from "./gemini-live.ts";
+import { GEMINI_NEEDS_KEY } from "./gemini-live.ts";
+import { PHONE_BRIDGE_NOT_CONFIGURED } from "./live-phone-bridge.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { Message, StoreChange } from "./store.ts";
 
@@ -1190,10 +1191,19 @@ describe("LiveCallController on Gemini Live", () => {
   it("refuses a phone and asks for the Gemini key, before creating a session", async () => {
     const t = setup();
     gemini(t);
-    await expect(t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "offer" })).rejects.toMatchObject({ message: GEMINI_PHONE_UNSUPPORTED, status: 422 });
+    await expect(t.controller.start({ auth: owner, ...BOT, client: "ios", sdp: "offer" })).rejects.toMatchObject({ message: PHONE_BRIDGE_NOT_CONFIGURED, status: 422 });
     t.settings.key = "";
     await expect(t.controller.start({ auth: owner, ...BOT, client: "desktop" })).rejects.toMatchObject({ message: GEMINI_NEEDS_KEY, status: 409 });
     expect(t.deps.createSession).not.toHaveBeenCalled();
+  });
+
+  it("passes a phone's offer on to Gemini Live when the server can answer it", async () => {
+    const t = setup({ createSession: vi.fn(async () => ({ sessionId: "g2", sdp: "harness-answer" })), geminiPhones: () => true });
+    gemini(t);
+    await expect(t.controller.start({ auth: owner, ...BOT, client: "android" })).rejects.toMatchObject({ status: 400 });
+    const result = await t.controller.start({ auth: owner, ...BOT, client: "android", sdp: "phone-offer" });
+    expect(t.deps.createSession).toHaveBeenCalledWith(expect.objectContaining({ provider: "gemini", sdp: "phone-offer" }));
+    expect(result).toMatchObject({ sdp: "harness-answer", call: { provider: "gemini", client: "android" } });
   });
 
   it("still needs an offer for GPT-Live", async () => {

@@ -320,6 +320,7 @@ import { createLiveSession, liveAttachUrl, liveHistoryFrom, LiveSessionError, ty
 import { LiveCallController, LiveCallSignedOutError, type LiveSocket } from "./live-call-controller.ts";
 import { liveCallKey, liveSettingsFor } from "./live-settings.ts";
 import { GeminiLiveBridge, geminiInstructions } from "./gemini-live.ts";
+import { PhoneMediaPeer, phoneBridgeConfig, phonePeerConnection } from "./live-phone-bridge.ts";
 import { recordLiveCall, spokenLineFields, titleLiveCall } from "./live-call-record.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
 import { turnStartLogLine } from "./turn-log.ts";
@@ -13321,6 +13322,27 @@ function liveCallTitle(botId: string, threadId: string, excerpt: string): Promis
   return gate.ok ? generateThreadTitle(gate.instance, excerpt, "call") : null;
 }
 const geminiBridges = new Map<string, GeminiLiveBridge>();
+/** A phone app's call on Gemini Live: the harness answers its GPT-Live offer and carries the audio to the bridge. */
+async function answerPhone(bridge: GeminiLiveBridge, offer: string): Promise<string> {
+  const config = phoneBridgeConfig();
+  if (!config) {
+    bridge.end();
+    throw new LiveSessionError("The call could not start: phone audio is not configured on this server.", 422);
+  }
+  const peer = new PhoneMediaPeer(phonePeerConnection(config), {
+    audio: (pcm) => bridge.clientMessage(pcm, true),
+    event: (text) => bridge.clientMessage(text, false),
+    closed: () => bridge.clientClosed(),
+  });
+  bridge.attachClient(peer);
+  try {
+    return await peer.answer(offer);
+  } catch (error) {
+    peer.close();
+    bridge.end();
+    throw error instanceof LiveSessionError ? error : new LiveSessionError("The call could not start: the connection offer was invalid.", 400);
+  }
+}
 const liveCalls = new LiveCallController({
   store,
   send: async ({ auth, botId, threadId, text, callId }) => {
@@ -13368,8 +13390,10 @@ const liveCalls = new LiveCallController({
     const sessionId = randomUUID();
     geminiBridges.set(sessionId, bridge);
     bridge.whenClosed(() => geminiBridges.delete(sessionId));
-    return { sessionId };
+    if (!sdp) return { sessionId };
+    return { sessionId, sdp: await answerPhone(bridge, sdp) };
   },
+  geminiPhones: () => phoneBridgeConfig() !== null,
   openSideband: ({ provider, sessionId, key }) => {
     if (provider === "openai") {
       // Node's WebSocket (undici) accepts headers in its second argument.

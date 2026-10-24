@@ -246,11 +246,22 @@ streams 16 kHz PCM over `GET /api/live/media?callId=…` (a WebSocket, only for
 the person who started the call) and plays back the 24 kHz PCM it gets. The
 bridge speaks GPT-Live's sideband protocol to the same call controller, so
 delegation, spoken approvals, narration and the call row work unchanged; the
-voice delegates through a non-blocking `delegate` function. Phones are refused
-with 422 before anything reaches Google.
+voice delegates through a non-blocking `delegate` function.
+
+The phone apps only make GPT-Live WebRTC calls. On Gemini Live the harness
+answers a phone's offer itself (`server/live-phone-bridge.ts`, werift): it
+decodes the phone's Opus to 16 kHz PCM for the bridge, encodes the bridge's
+24 kHz PCM back to Opus paced at 20 ms, and speaks GPT-Live's `oai-events`
+data channel, so the phone cannot tell the voices apart. The phone's ICE has no
+STUN or TURN of its own, so the server must be reachable directly:
+`OMB_LIVE_PUBLIC_IP` is the public IPv4 address offered as the only useful
+candidate and `OMB_LIVE_UDP_PORTS` (default `40000-40009`) the ports it binds,
+which compose.yaml maps and the firewall must open. Without
+`OMB_LIVE_PUBLIC_IP` a phone's Gemini call is refused with 422 before anything
+reaches Google.
 
 ```sh
-pnpm exec vitest run server/gemini-live.test.ts server/gemini-live.e2e.test.ts server/live-call-controller.test.ts server/routes/live.test.ts server/live-settings.test.ts
+pnpm exec vitest run server/gemini-live.test.ts server/gemini-live.e2e.test.ts server/live-phone-bridge.test.ts server/live-call-controller.test.ts server/routes/live.test.ts server/live-settings.test.ts
 pnpm exec vitest run src/lib/live-call-media.test.ts src/lib/gemini-live-audio.test.ts
 ```
 
@@ -260,5 +271,10 @@ report Gemini without the key, a phone is refused, the media socket relays PCM
 both ways, a spoken request reaches the bot with its call id, the answer comes
 back as a `[work, say]` turn, a hang-up closes Google's socket and the media
 socket and leaves the call row, and a refused key reads as a message for the
-user. Audio quality, echo and turn-taking need a real key and a person.
+user. A werift peer stands in for a phone app: its GPT-Live offer is answered
+with a `127.0.0.1` candidate from the configured ports, its Opus reaches the
+fake as 16 kHz audio, the fake's audio comes back as decodable Opus frames, the
+transcript arrives on `oai-events`, and its `session.close` ends the call.
+Audio quality, echo and turn-taking need a real key and a person; a real phone
+also needs the public address and open UDP ports.
 

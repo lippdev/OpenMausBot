@@ -47,6 +47,7 @@ vi.mock("./DecisionModelSettings", () => ({ DecisionModelSettings: marker("decis
 vi.mock("./ApiKeys", () => ({
   ApiKeyRow: marker("apiKey"),
   AnthropicEveryClaudeBot: marker("anthropicEvery"),
+  LiveCallProviderChoice: marker("liveProvider"),
   OpenAiCompatUrl: marker("compatUrl"),
   OpenCodeProviderKeys: marker("opencodeProviderKeys"),
   VpsConnection: marker("vps"),

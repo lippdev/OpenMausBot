@@ -2,6 +2,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Check, CircleHelp, ExternalLink, Loader2, TriangleAlert } from "lucide-react";
 import { api, useStore, type ConfigStatus } from "@/state/store";
+import type { LiveProvider, LiveSettings } from "../../shared/wire";
+import { Select } from "./Select";
 import { cn } from "@/lib/cn";
 import { useMenuMotion } from "./MenuMotion";
 import { t } from "@/lib/i18n";
@@ -9,7 +11,7 @@ import type { LocaleKey } from "@/locales";
 import { SECTION_PROVIDER, type KeyResult, type KeyVia } from "@/lib/analytics-allowlist";
 import { keyRemoved, keySaved, keySaveFailure, keyTestResult, savedKeyResult } from "@/lib/product-events";
 
-export type ConfigSection = "composio" | "box" | "opencodeGo" | "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta" | "treg" | "deepseek";
+export type ConfigSection = "composio" | "box" | "opencodeGo" | "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta" | "treg" | "deepseek" | "geminiLive";
 export type TestableProvider = "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras" | "groq" | "meta" | "treg";
 
 const SECTIONS: Record<
@@ -46,15 +48,17 @@ const SECTIONS: Record<
   deepseek: { body: (v) => ({ deepseek: { key: v } }), flag: (c) => c.deepseek?.configured ?? false },
   xai: { body: (v) => ({ xai: { key: v } }), flag: (c) => c.xai?.configured ?? false },
   treg: { body: (v) => ({ treg: { key: v } }), flag: (c) => c.treg?.configured ?? false },
+  geminiLive: { body: (v) => ({ live: { geminiKey: v } }), flag: (c) => c.live?.geminiConfigured ?? false },
 };
 
 // Provider keys have no desktop-shell slot yet; they go to the server's own 0600 config. A secret the desktop's boot
 // migration moves into its encrypted store must save here, so Clear removes the stored copy too.
-const ELECTRON_CREDENTIAL: Partial<Record<ConfigSection, "composioApiKey" | "boxToken" | "opencodeGoApiKey" | "tregApiKey">> = {
+const ELECTRON_CREDENTIAL: Partial<Record<ConfigSection, "composioApiKey" | "boxToken" | "opencodeGoApiKey" | "tregApiKey" | "geminiLiveKey">> = {
   composio: "composioApiKey",
   box: "boxToken",
   opencodeGo: "opencodeGoApiKey",
   treg: "tregApiKey",
+  geminiLive: "geminiLiveKey",
 };
 
 /** The desktop shell's encrypted slot for a section, if it has one. */
@@ -192,6 +196,15 @@ const CREDENTIALS: Record<
     href: "https://console.x.ai",
     linkLabelKey: "keys.xai.link",
     optional: true,
+  },
+  geminiLive: {
+    labelKey: "keys.geminiLive.label",
+    placeholder: "AIza…",
+    descriptionKey: "keys.geminiLive.desc",
+    href: "https://aistudio.google.com/apikey",
+    linkLabelKey: "keys.geminiLive.link",
+    optional: true,
+    showLink: true,
   },
   treg: {
     labelKey: "keys.treg.label",
@@ -720,6 +733,38 @@ export function OpenAiCompatUrl() {
       </div>
       <p className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">{t("keys.openaiCompat.urlHint")}</p>
       {error && <div className="mt-1 text-[12px] text-danger">{error}</div>}
+    </div>
+  );
+}
+
+export function LiveCallProviderChoice() {
+  const { state, dispatch } = useStore();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const provider: LiveProvider = state.config?.live?.provider ?? "openai";
+  const choose = async (next: LiveProvider) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const body = await api<{ live: LiveSettings }>("/api/live/settings", { method: "PATCH", body: JSON.stringify({ provider: next }) });
+      if (state.config) dispatch({ type: "configStatus", config: { ...state.config, live: body.live } });
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="flex items-center justify-between gap-3">
+        <span className="text-[13px] font-medium text-ink">{t("keys.liveProvider.label")}</span>
+        <Select size="sm" value={provider} disabled={saving} onChange={(event) => void choose(event.target.value as LiveProvider)}>
+          <option value="openai">{t("call.live.providerOpenai")}</option>
+          <option value="gemini">{t("call.live.providerGemini")}</option>
+        </Select>
+      </label>
+      <p className="text-[12px] leading-relaxed text-ink-secondary">{t("keys.liveProvider.desc")}</p>
+      {error && <p className="text-[12px] text-danger">{error}</p>}
     </div>
   );
 }

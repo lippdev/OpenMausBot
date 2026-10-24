@@ -319,6 +319,7 @@ import { decideRoomResponder, type RoomRoutingInput } from "./decider/room-routi
 import { createLiveSession, liveAttachUrl, liveHistoryFrom, LiveSessionError, type LiveBot, type LiveHistoryMessage } from "./live-call.ts";
 import { LiveCallController, LiveCallSignedOutError, type LiveSocket } from "./live-call-controller.ts";
 import { liveCallKey, liveSettingsFor } from "./live-settings.ts";
+import { GeminiLiveBridge, geminiInstructions } from "./gemini-live.ts";
 import { recordLiveCall, spokenLineFields, titleLiveCall } from "./live-call-record.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
 import { turnStartLogLine } from "./turn-log.ts";
@@ -13319,6 +13320,7 @@ function liveCallTitle(botId: string, threadId: string, excerpt: string): Promis
   const gate = threadTitleGate(bot);
   return gate.ok ? generateThreadTitle(gate.instance, excerpt, "call") : null;
 }
+const geminiBridges = new Map<string, GeminiLiveBridge>();
 const liveCalls = new LiveCallController({
   store,
   send: async ({ auth, botId, threadId, text, callId }) => {
@@ -13351,10 +13353,32 @@ const liveCalls = new LiveCallController({
   },
   broadcast: (frame) => broadcast(frame, { adminOnly: true }),
   settings: () => ({ key: liveCallKey(cfg)?.key ?? "", ...liveSettingsFor(cfg) }),
-  createSession: ({ key, sdp, botId, threadId, voice }) => createLiveSession({ key, sdp, voice, bot: liveBotFor(botId), history: liveHistoryFor(threadId), cloudHome: Boolean(CLOUD_HOME) }),
-  // Node's WebSocket (undici) accepts headers in its second argument.
-  openSocket: (url, key) => new WebSocket(url, { headers: { authorization: `Bearer ${key}` } } as unknown as string[]) as unknown as LiveSocket,
-  attachUrl: (sessionId) => liveAttachUrl(sessionId),
+  createSession: async ({ provider, key, sdp, botId, threadId, voice }) => {
+    if (provider === "openai") return createLiveSession({ key, sdp: sdp ?? "", voice, bot: liveBotFor(botId), history: liveHistoryFor(threadId), cloudHome: Boolean(CLOUD_HOME) });
+    const bridge = await GeminiLiveBridge.connect({
+      key, voice,
+      instructions: geminiInstructions(liveBotFor(botId), liveHistoryFor(threadId), { cloudHome: Boolean(CLOUD_HOME) }),
+      open: (url) => {
+        const socket = new WebSocket(url);
+        // Gemini Live sends its JSON in binary frames, which Node's WebSocket hands over as Blobs by default.
+        socket.binaryType = "arraybuffer";
+        return socket as unknown as LiveSocket;
+      },
+    });
+    const sessionId = randomUUID();
+    geminiBridges.set(sessionId, bridge);
+    bridge.whenClosed(() => geminiBridges.delete(sessionId));
+    return { sessionId };
+  },
+  openSideband: ({ provider, sessionId, key }) => {
+    if (provider === "openai") {
+      // Node's WebSocket (undici) accepts headers in its second argument.
+      return new WebSocket(liveAttachUrl(sessionId), { headers: { authorization: `Bearer ${key}` } } as unknown as string[]) as unknown as LiveSocket;
+    }
+    const bridge = geminiBridges.get(sessionId);
+    if (!bridge) throw new LiveSessionError("The call is no longer running.", 410);
+    return bridge.sideband;
+  },
   speakable: (text) => toUtterances(text),
   // One "call" row per call: its id, times and length, never anything said on it.
   recordCall: (input) => {
@@ -13392,6 +13416,7 @@ ROUTES.push(createLiveRoutes({
     return { botId: bot.id, botName: bot.name, threadId: target };
   },
   settings: () => liveSettingsFor(cfg),
+  media: { upgrades, bridge: (sessionId) => geminiBridges.get(sessionId) },
   saveSettings: async (patch) => {
     if (providerConfigBusy) throw Object.assign(new Error("Settings are already being updated. Try again in a moment."), { status: 409 });
     saveConfig({ live: patch });

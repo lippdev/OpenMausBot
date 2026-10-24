@@ -24489,7 +24489,19 @@
       "usageMeter.err.unavailable": "595b6d5ee610c3a384520e944fcd5449f8442ea75e081ac8a2700b1518ed50c2",
       "usageMeter.err.priceChanged": "4737b834de90a637e588ba53c167bab6a77257e82af3088f1edfb689d0a5520f",
       "usageMeter.err.rateLimited": "7c60904ddf11a211571c25c7869e52723733c20a064857d1daa8984c8a967cc0",
-      "usageMeter.err.failed": "e527568cff20cf21d1ecd40fc5a81641838f452d940fe891384ec8fc45cbb040"
+      "usageMeter.err.failed": "e527568cff20cf21d1ecd40fc5a81641838f452d940fe891384ec8fc45cbb040",
+      "call.live.provider": "a1c7d8550a49357204113964a51d76afe565049b5df2c62348beff80368067c1",
+      "call.live.providerOpenai": "c934f59e9bbcec38fbcd7f5c1d4229c5c81044da6dd2f4ceaca430c01d3da589",
+      "call.live.providerGemini": "2ceaa192a41aeb69451c2b93f6c5c5ae50e82de20ca094d75b3f6528f8916d41",
+      "call.live.geminiKey": "ab4b4db7ff8f7e648b4dc9324acbc8d927cac63939625e541ed0804e52fdb5fa",
+      "call.live.geminiKeyTitle": "2fac0b78692d2e79f07a4c67c133374b0d0d6cb81fda6b6a28f0b114cc9603dd",
+      "call.live.geminiKeyExplain": "c0b11ce03e3072dad096c6e713083b375f496693cb9ab565e78cb7a5d082c043",
+      "call.live.geminiKeyField": "716fb6353eadefeea630fe3fca023bec4e26b1e898c72825d97e1fd2b5c9d48c",
+      "call.live.geminiNeedsKey": "98bef1f4b55dc809517e858e6a008c224f370060a89edeb40ace14286434d117",
+      "call.live.geminiCost": "a7ed2ecf42c9fe4f29286446c5ae9f1910f1715b5c068e9555e233b6cac3ccb6",
+      "call.live.geminiDisclosure": "1a815bc1fd45563b1e8ed264b8bbcf70e1887d808140087be46eb5d9ecc0b9b8",
+      "call.live.geminiDisclosureCloud": "78c0748b4a21ad315ebd47d8e260d1c2276e069806a28166dff16fb41a1f7550",
+      "call.live.geminiPhones": "b041b1cbd3b17b38fb504ff1b48fd0c365c4baa0bab593f64b21a0e8644d1c68"
     },
     "zh": {
       "highlevel.unavailable": "87b8ac7f7610e6dd69f520bc59058fd92f307b9f4bcf804075f25d08bcaa7533",

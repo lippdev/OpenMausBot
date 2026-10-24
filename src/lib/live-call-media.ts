@@ -1,10 +1,12 @@
-// Its data channel may only send session.close; everything else about the call runs on the harness.
+// Its data channel (GPT-Live) or media socket (Gemini Live) may only send session.close; everything else about the
+// call runs on the harness.
 import { useSyncExternalStore } from "react";
-import type { LiveCallState, LiveEndReason } from "../../shared/wire";
+import type { LiveCallState, LiveEndReason, LiveProvider } from "../../shared/wire";
 import { api, ApiError } from "@/state/store";
 import { openExternalLink } from "./app-links";
 import { endCall, startCall } from "./call";
 import { desktopCapabilitiesNow } from "./desktop";
+import { openGeminiMedia, type GeminiMediaEvents, type GeminiMediaLink } from "./gemini-live-audio";
 import { t } from "./i18n";
 
 export type LiveMediaPhase = "idle" | "starting" | "live" | "ending" | "ended" | "failed";
@@ -41,7 +43,11 @@ export interface LiveMediaDeps {
   capabilities(): DesktopCapabilities;
   pageMicrophone(): Promise<"allowed" | "refused" | undefined>;
   openInBrowser(url: string): void;
+  openGeminiMedia(url: string, stream: MediaStream, events: GeminiMediaEvents): GeminiMediaLink;
+  mediaUrl(path: string): string;
 }
+
+type SessionAnswer = { call: LiveCallState; transport: { type: "webrtc"; sdp: string } | { type: "websocket"; path: string } };
 
 const IDLE: LiveMediaState = {
   phase: "idle", callId: null, botId: null, threadId: null, startedAt: null, muted: false,
@@ -85,6 +91,11 @@ const defaults: LiveMediaDeps = {
     }
   },
   openInBrowser: (url) => void openExternalLink(url).catch(() => undefined),
+  openGeminiMedia: (url, stream, events) => {
+    if (typeof AudioWorkletNode === "undefined" || typeof WebSocket === "undefined") throw new LiveUnsupportedError(t("call.live.unsupported"));
+    return openGeminiMedia(url, stream, events);
+  },
+  mediaUrl: (path) => `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${path}`,
 };
 let deps: LiveMediaDeps = defaults;
 
@@ -93,6 +104,9 @@ let generation = 0;
 let microphone: MediaStream | null = null;
 let peer: RTCPeerConnection | null = null;
 let channel: RTCDataChannel | null = null;
+let media: GeminiMediaLink | null = null;
+let mediaOpen = false;
+let provider: LiveProvider = "openai";
 let heardTimer: ReturnType<typeof setTimeout> | null = null;
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -134,6 +148,7 @@ export function resetLiveMedia(): void {
   state = IDLE;
   serverCall = null;
   serverAttached = false;
+  provider = "openai";
 }
 
 export function applyCaption(current: { caption: string; heard: string }, event: { type?: unknown; delta?: unknown }): { caption: string; heard: string } {
@@ -174,11 +189,13 @@ function liveClient(capabilities: DesktopCapabilities): "desktop" | "web" {
   return inWebBrowser(capabilities) ? "web" : "desktop";
 }
 
-export async function startLiveCall(target: { botId: string; threadId: string }): Promise<void> {
+/** `provider` is the one the harness's Live settings name; the harness answers with the transport it chose. */
+export async function startLiveCall(target: { botId: string; threadId: string; provider?: LiveProvider }): Promise<void> {
   if (isLiveCallRunning(state.phase)) return;
   release();
   const mine = ++generation;
   serverAttached = false;
+  provider = target.provider ?? "openai";
   set({ ...IDLE, phase: "starting", botId: target.botId, threadId: target.threadId });
   startCall(target.botId);
   try {
@@ -186,6 +203,13 @@ export async function startLiveCall(target: { botId: string; threadId: string })
     if (mine !== generation) return void stream.getTracks().forEach((track) => track.stop());
     microphone = stream;
     for (const track of stream.getAudioTracks()) track.enabled = !state.muted;
+    if (provider === "gemini") {
+      const result = await requestSession(target);
+      if (!adopt(mine, result)) return;
+      if (result.transport.type !== "websocket") throw new Error(t("call.live.dropped"));
+      connectGeminiMedia(mine, result.transport.path, stream);
+      return;
+    }
     const connection = deps.createPeer();
     peer = connection;
     connection.ontrack = (event) => {
@@ -216,21 +240,14 @@ export async function startLiveCall(target: { botId: string; threadId: string })
     if (mine !== generation) return;
     const sdp = connection.localDescription?.sdp;
     if (!sdp) throw new Error(t("call.live.noOffer"));
-    const result = await deps.request<{ call: LiveCallState; transport: { sdp: string } }>("/api/live/session", {
-      method: "POST",
-      body: JSON.stringify({ botId: target.botId, threadId: target.threadId, sdp, client: liveClient(deps.capabilities()) }),
-      timeoutMs: 35_000,
-    });
-    if (mine !== generation) {
-      void endOnServer(result.call.callId);
+    const result = await requestSession(target, sdp);
+    if (!adopt(mine, result)) return;
+    if (result.transport.type === "websocket") {
+      // The Live settings switched to Gemini Live while this offer was made.
+      closePeer();
+      connectGeminiMedia(mine, result.transport.path, stream);
       return;
     }
-    const seen = serverCall;
-    set({ callId: result.call.callId });
-    applyServerCall(result.call);
-    // The SSE frame can overtake this response; it was ignored then because the id was not known yet.
-    if (seen?.callId === result.call.callId) applyServerCall(seen);
-    if (mine !== generation) return;
     await connection.setRemoteDescription({ type: "answer", sdp: result.transport.sdp });
     if (mine !== generation) return;
     if (connection.connectionState !== "connected") {
@@ -255,6 +272,54 @@ export async function startLiveCall(target: { botId: string; threadId: string })
     const hopeless = error instanceof LiveUnsupportedError || (error instanceof ApiError && error.status === 401);
     set({ ...failed, action: hopeless ? null : "retry", notice: error instanceof Error ? error.message : String(error) });
   }
+}
+
+function requestSession(target: { botId: string; threadId: string }, sdp?: string): Promise<SessionAnswer> {
+  return deps.request<SessionAnswer>("/api/live/session", {
+    method: "POST",
+    body: JSON.stringify({ botId: target.botId, threadId: target.threadId, ...(sdp ? { sdp } : {}), client: liveClient(deps.capabilities()) }),
+    timeoutMs: 35_000,
+  });
+}
+
+/** False when this start was cancelled or the call already ended. */
+function adopt(mine: number, result: SessionAnswer): boolean {
+  if (mine !== generation) {
+    void endOnServer(result.call.callId);
+    return false;
+  }
+  const seen = serverCall;
+  set({ callId: result.call.callId });
+  applyServerCall(result.call);
+  // The SSE frame can overtake this response; it was ignored then because the id was not known yet.
+  if (seen?.callId === result.call.callId) applyServerCall(seen);
+  return mine === generation;
+}
+
+function connectGeminiMedia(mine: number, path: string, stream: MediaStream) {
+  media = deps.openGeminiMedia(deps.mediaUrl(path), stream, {
+    onOpen: () => {
+      if (mine !== generation) return;
+      mediaOpen = true;
+      stopConnectWait();
+      goLiveWhenReady();
+    },
+    onEvent: (event) => {
+      if (mine === generation) onChannelEvent(event);
+    },
+    onClose: () => {
+      if (mine === generation && !closeTimer && state.phase !== "ending") void dropped(t("call.live.dropped"));
+    },
+    onPlaybackBlocked: () => {
+      if (mine === generation) set({ notice: t("call.live.clickToHear") });
+    },
+    onPlaybackResumed: () => {
+      if (mine === generation && state.notice === t("call.live.clickToHear")) set({ notice: null });
+    },
+  });
+  connectTimer = setTimeout(() => {
+    if (mine === generation && !mediaOpen) void dropped(t("call.live.droppedNoAudio"));
+  }, MEDIA_CONNECT_TIMEOUT_MS);
 }
 
 export async function hangUpLiveCall(): Promise<void> {
@@ -308,7 +373,7 @@ export function dismissStartPrompt(botId: string): void {
 export function takeLiveCallAction(): void {
   const { action, botId, threadId, phase } = state;
   if (phase !== "failed") return;
-  if (action === "retry" && botId && threadId) void startLiveCall({ botId, threadId });
+  if (action === "retry" && botId && threadId) void startLiveCall({ botId, threadId, provider });
   else if (action === "open-in-browser" && globalThis.location?.href) deps.openInBrowser(globalThis.location.href);
 }
 
@@ -365,7 +430,7 @@ function applyServerCall(call: LiveCallState | null) {
 }
 
 function goLiveWhenReady() {
-  if (state.phase !== "starting" || !serverAttached || channel?.readyState !== "open") return;
+  if (state.phase !== "starting" || !serverAttached || (channel?.readyState !== "open" && !mediaOpen)) return;
   set({ phase: "live", startedAt: Date.now() });
 }
 
@@ -406,6 +471,10 @@ function onChannelMessage(raw: unknown) {
   } catch {
     return;
   }
+  onChannelEvent(event);
+}
+
+function onChannelEvent(event: { type?: unknown; delta?: unknown }) {
   if (event.type === "session.closed") {
     stopCapturing();
     stopConnectWait();
@@ -456,6 +525,7 @@ function sendClose() {
   if (channel?.readyState === "open") {
     try { channel.send(JSON.stringify({ type: "session.close" })); } catch {}
   }
+  media?.hangUp();
 }
 
 function stopCapturing() {
@@ -469,12 +539,19 @@ function release() {
   stopGestureWait?.();
   stopGestureWait = null;
   stopCapturing();
+  closePeer();
+  media?.close();
+  media = null;
+  mediaOpen = false;
+  deps.stopRemote();
+  if (state.botId) endCall(state.botId);
+}
+
+function closePeer() {
   try { channel?.close(); } catch {}
   channel = null;
   try { peer?.close(); } catch {}
   peer = null;
-  deps.stopRemote();
-  if (state.botId) endCall(state.botId);
 }
 
 function busyText(call: LiveCallState): string {

@@ -54,18 +54,36 @@ function deps(overrides: Partial<LiveRouteDeps> = {}): LiveRouteDeps & { saved: 
       end: vi.fn(async (id: string) => (id === "c1" ? { ...call, status: "ended" as const, endReason: "hung-up" as const } : null)),
       current: () => call,
       deviceRevoked: vi.fn((device: string) => (device === "phone-1" ? { ...call, client: "ios" as const, status: "ending" as const } : null)),
+      mediaSession: () => null,
     },
     resolveTarget: (botId, threadId) => (botId === "bot1" && (threadId ?? "t1") === "t1" ? { botId, botName: "Ada", threadId: threadId ?? "t1" } : null),
-    settings: () => ({ configured: true, voice: "marin", readTypedReplies: true, idleMinutes: 5 }),
+    settings: () => ({ configured: true, provider: "openai" as const, openaiConfigured: true, geminiConfigured: false, geminiVoice: "Puck", voice: "marin", readTypedReplies: true, idleMinutes: 5 }),
     saveSettings: vi.fn(async (patch: SettingsPatch): Promise<LiveSettings> => {
       saved.push(patch);
-      return { configured: true, voice: "marin", readTypedReplies: true, idleMinutes: 5, ...patch };
+      return { configured: true, provider: "openai" as const, openaiConfigured: true, geminiConfigured: false, geminiVoice: "Puck", voice: "marin", readTypedReplies: true, idleMinutes: 5, ...patch };
     }),
     ...overrides,
   };
 }
 
 describe("live routes", () => {
+  it("starts a Gemini Live call without an offer and points the client at its media socket", async () => {
+    const call: LiveCallState = { callId: "c 2", botId: "bot1", threadId: "t1", client: "desktop", provider: "gemini", voice: "Puck", startedAt: 1, status: "connecting" };
+    const d = deps();
+    d.calls.start = vi.fn(async () => ({ call }));
+    const res = await request(d, "POST", "/api/live/session", { botId: "bot1", client: "desktop" });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ call: expect.objectContaining({ provider: "gemini" }), transport: { type: "websocket", path: "/api/live/media?callId=c%202" } });
+    expect(d.calls.start).toHaveBeenCalledWith(expect.not.objectContaining({ sdp: expect.anything() }));
+  });
+
+  it("answers a refused provider choice without asking for a key", async () => {
+    const d = deps();
+    d.calls.start = vi.fn(async () => { throw new LiveSessionError("phones cannot", 422); });
+    const res = await request(d, "POST", "/api/live/session", { botId: "bot1", client: "ios" });
+    expect(res).toEqual({ status: 422, body: { error: "phones cannot" } });
+  });
+
   it("starts a call and returns the answer", async () => {
     const d = deps();
     const res = await request(d, "POST", "/api/live/session", { botId: "bot1", sdp: "v=0\r\n", client: "ios" });
@@ -139,6 +157,13 @@ describe("live routes", () => {
     expect((await request(d, "PATCH", "/api/live/settings", { voice: "Marin!" })).status).toBe(400);
     expect(d.saved).toEqual([{ idleMinutes: 10, readTypedReplies: false }]);
   });
+  it("saves the provider and a Gemini voice", async () => {
+    const d = deps();
+    const res = await request(d, "PATCH", "/api/live/settings", { provider: "gemini", geminiVoice: "Kore" });
+    expect(res.status).toBe(200);
+    expect(d.saved).toEqual([{ provider: "gemini", geminiVoice: "Kore" }]);
+    expect((await request(d, "PATCH", "/api/live/settings", { provider: "grok" })).status).toBe(400);
+  });
   it("saves nothing for an empty patch", async () => {
     const d = deps();
     expect(await request(d, "PATCH", "/api/live/settings", {})).toEqual({ status: 400, body: { error: "nothing to save" } });
@@ -146,7 +171,7 @@ describe("live routes", () => {
   });
   it("never answers with the key", async () => {
     const res = await request(deps(), "PATCH", "/api/live/settings", { voice: "cedar" });
-    expect(res).toEqual({ status: 200, body: { live: { configured: true, voice: "cedar", readTypedReplies: true, idleMinutes: 5 } } });
+    expect(res).toEqual({ status: 200, body: { live: { configured: true, provider: "openai", openaiConfigured: true, geminiConfigured: false, geminiVoice: "Puck", voice: "cedar", readTypedReplies: true, idleMinutes: 5 } } });
   });
   it("passes other paths and methods", async () => {
     expect(await request(deps(), "GET", "/api/live/summary")).toEqual({ status: 404, body: { from: "inline routes" } });

@@ -4,8 +4,9 @@ import { spokenConsent } from "../shared/call-consent.ts";
 import {
   LIVE_COPY, liveCardKind, liveStepLabel, spokenApprovalPrompt, spokenConnectorPrompt, spokenQuestionPrompt, spokenReviewPrompt, spokenSecretPrompt, spokenSignInPrompt,
 } from "../shared/live-approval.ts";
-import { clampAppend, commentaryChunks, LiveTranscript } from "../shared/live-call.ts";
-import type { LiveCallRecord, LiveCallState, LiveClient, LiveEndReason } from "../shared/wire.ts";
+import { clampAppend, commentaryChunks, liveProviderName, LiveTranscript } from "../shared/live-call.ts";
+import type { LiveCallRecord, LiveCallState, LiveClient, LiveEndReason, LiveProvider } from "../shared/wire.ts";
+import { GEMINI_NEEDS_KEY, GEMINI_PHONE_UNSUPPORTED, geminiVoice } from "./gemini-live.ts";
 import { LIVE_NEEDS_KEY, liveCallSummaryLine, LiveSessionError, liveVoice } from "./live-call.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { Message, StoreChange } from "./store.ts";
@@ -46,10 +47,10 @@ export interface LiveCallDeps {
   personKey?(auth: RequestAuth): string | undefined;
   activity(botId: string, threadId: string): LiveActivity;
   broadcast(frame: { kind: "live.call"; botId: string; threadId: string; call: LiveCallState | null }): void;
-  settings(): { key: string; voice: string; readTypedReplies: boolean; idleMinutes: number };
-  createSession(input: { key: string; sdp: string; botId: string; threadId: string; voice: string }): Promise<{ sessionId: string; sdp: string }>;
-  openSocket(url: string, key: string): LiveSocket;
-  attachUrl(sessionId: string): string;
+  settings(): { key: string; provider?: LiveProvider; voice: string; geminiVoice?: string; readTypedReplies: boolean; idleMinutes: number };
+  /** GPT-Live answers the client's SDP offer; Gemini Live takes no offer and answers none. */
+  createSession(input: { provider: LiveProvider; key: string; sdp?: string; botId: string; threadId: string; voice: string }): Promise<{ sessionId: string; sdp?: string }>;
+  openSideband(input: { provider: LiveProvider; sessionId: string; key: string }): LiveSocket;
   speakable(text: string): string[];
   recordCall?(input: { threadId: string; botName: string; record: LiveCallRecord }): void;
   log(line: string): void;
@@ -143,26 +144,29 @@ export class LiveCallController {
     return this.call && this.call.state.status !== "ended" ? { ...this.call.state } : null;
   }
 
-  async start(input: { auth: RequestAuth; device?: string; botId: string; botName: string; threadId: string; client: LiveClient; sdp: string }): Promise<{ call: LiveCallState; sdp: string }> {
+  async start(input: { auth: RequestAuth; device?: string; botId: string; botName: string; threadId: string; client: LiveClient; sdp?: string }): Promise<{ call: LiveCallState; sdp?: string }> {
     if (this.call && this.call.state.status !== "ended") throw new LiveCallBusyError({ ...this.call.state });
     if (input.device && this.revokedDevices.has(input.device)) throw new LiveCallSignedOutError();
     const settings = this.deps.settings();
+    const provider = settings.provider ?? "openai";
+    if (provider === "gemini" && (input.client === "ios" || input.client === "android")) throw new LiveSessionError(GEMINI_PHONE_UNSUPPORTED, 422);
     const key = settings.key.trim();
-    if (!key) throw new LiveSessionError(LIVE_NEEDS_KEY, 409);
-    const voice = liveVoice(settings.voice);
-    const call = this.newCall(input, key, voice);
+    if (!key) throw new LiveSessionError(provider === "gemini" ? GEMINI_NEEDS_KEY : LIVE_NEEDS_KEY, 409);
+    if (provider === "openai" && !input.sdp) throw new LiveSessionError("The call could not start: the connection offer was invalid.", 400);
+    const voice = provider === "gemini" ? geminiVoice(settings.geminiVoice) : liveVoice(settings.voice);
+    const call = this.newCall(input, provider, key, voice);
     // Taken before the first await: a second start in the same tick is refused.
     this.call = call;
-    let session: { sessionId: string; sdp: string };
+    let session: { sessionId: string; sdp?: string };
     try {
-      session = await this.deps.createSession({ key, sdp: input.sdp, botId: input.botId, threadId: input.threadId, voice });
+      session = await this.deps.createSession({ provider, key, ...(input.sdp ? { sdp: input.sdp } : {}), botId: input.botId, threadId: input.threadId, voice });
     } catch (error) {
       if (this.call === call) this.call = null;
       this.deps.log(`[live] call failed bot=${input.botId} client=${input.client} status=${error instanceof LiveSessionError ? error.status : "error"}`);
       throw error;
     }
     if (this.call !== call) {
-      this.closeOrphan(session.sessionId, key);
+      this.closeOrphan(provider, session.sessionId, key);
       throw new LiveSessionError("The call was cancelled.", 503);
     }
     try {
@@ -172,7 +176,7 @@ export class LiveCallController {
       call.lastActivity = this.deps.activity(input.botId, input.threadId);
       if (call.lastActivity === "working") this.beginWork(call);
       call.unsubscribe = this.deps.store.onChange((change) => this.onStoreChange(call, change));
-      this.deps.log(`[live] call started bot=${input.botId} voice=${voice} client=${input.client}`);
+      this.deps.log(`[live] call started bot=${input.botId} provider=${provider} voice=${voice} client=${input.client}`);
       this.emit(call);
       // Set before attach: a sideband that fails at once runs finish, which clears this interval.
       call.idleTimer = setInterval(() => this.guarded(call, () => this.checkIdle(call)), IDLE_CHECK_MS);
@@ -181,10 +185,18 @@ export class LiveCallController {
     } catch (error) {
       const sidebandOpened = call.socket !== null;
       this.finish(call, "error", "The call could not start.");
-      if (!sidebandOpened) this.closeOrphan(session.sessionId, key);
+      if (!sidebandOpened) this.closeOrphan(provider, session.sessionId, key);
       throw error;
     }
-    return { call: { ...call.state }, sdp: session.sdp };
+    return { call: { ...call.state }, ...(session.sdp ? { sdp: session.sdp } : {}) };
+  }
+
+  /** The session a Gemini Live call's media socket joins: only the caller's own, while the call runs. */
+  mediaSession(callId: string, auth: RequestAuth): string | null {
+    const call = this.call;
+    if (!call || call.state.callId !== callId || call.state.provider !== "gemini" || !call.sessionId) return null;
+    if (call.state.status !== "connecting" && call.state.status !== "live") return null;
+    return sameCaller(call.auth, auth) ? call.sessionId : null;
   }
 
   async end(callId: string): Promise<LiveCallState | null> {
@@ -216,9 +228,9 @@ export class LiveCallController {
   }
 
 
-  private newCall(input: { auth: RequestAuth; device?: string; botId: string; botName: string; threadId: string; client: LiveClient }, key: string, voice: string): Call {
+  private newCall(input: { auth: RequestAuth; device?: string; botId: string; botName: string; threadId: string; client: LiveClient }, provider: LiveProvider, key: string, voice: string): Call {
     return {
-      state: { callId: randomUUID(), botId: input.botId, threadId: input.threadId, client: input.client, voice, startedAt: this.now(), status: "connecting" },
+      state: { callId: randomUUID(), botId: input.botId, threadId: input.threadId, client: input.client, provider, voice, startedAt: this.now(), status: "connecting" },
       auth: input.auth,
       device: input.device ?? null,
       personKey: this.deps.personKey?.(input.auth),
@@ -262,16 +274,18 @@ export class LiveCallController {
   }
 
   private attach(call: Call): void {
+    const provider = call.state.provider ?? "openai";
+    const couldNotConnect = `The call could not connect to ${liveProviderName(provider)}.`;
     let socket: LiveSocket;
     try {
-      socket = this.deps.openSocket(this.deps.attachUrl(call.sessionId), call.key);
+      socket = this.deps.openSideband({ provider, sessionId: call.sessionId, key: call.key });
     } catch {
-      this.finish(call, "sideband-lost", "The call could not connect to OpenAI.");
+      this.finish(call, "sideband-lost", couldNotConnect);
       return;
     }
     call.socket = socket;
     const attachTimer = this.later(call, () => {
-      if (!call.attached) this.finish(call, "sideband-lost", "The call could not connect to OpenAI.");
+      if (!call.attached) this.finish(call, "sideband-lost", couldNotConnect);
     }, ATTACH_TIMEOUT_MS);
     socket.onopen = () => {
       call.attached = true;
@@ -284,19 +298,19 @@ export class LiveCallController {
     socket.onmessage = (event) => this.guarded(call, () => this.onSideband(call, event.data));
     // Node's WebSocket reports a refused handshake as an error without a close.
     socket.onerror = () => {
-      if (!call.attached) this.finish(call, "sideband-lost", "The call could not connect to OpenAI.");
+      if (!call.attached) this.finish(call, "sideband-lost", couldNotConnect);
     };
     socket.onclose = () => {
       if (call.state.status === "ended") return;
       if (call.pendingEnd) this.finish(call, call.pendingEnd);
-      else this.finish(call, "sideband-lost", "The call connection to OpenAI dropped.");
+      else this.finish(call, "sideband-lost", `The call connection to ${liveProviderName(provider)} dropped.`);
     };
   }
 
-  private closeOrphan(sessionId: string, key: string): void {
+  private closeOrphan(provider: LiveProvider, sessionId: string, key: string): void {
     let socket: LiveSocket;
     try {
-      socket = this.deps.openSocket(this.deps.attachUrl(sessionId), key);
+      socket = this.deps.openSideband({ provider, sessionId, key });
     } catch {
       return;
     }
@@ -433,9 +447,11 @@ export class LiveCallController {
         if (delegation?.target !== "client" || typeof delegation.id !== "string") return;
         const id = delegation.id;
         const offset = Number(event.offset_ms) || 0;
+        // Gemini Live says what it delegates; GPT-Live only that it does.
+        const request = typeof event.request === "string" ? event.request.trim() : "";
         call.stats.delegations += 1;
         this.touch(call);
-        this.later(call, () => this.delegate(call, id, offset), DELEGATION_SETTLE_MS);
+        this.later(call, () => this.delegate(call, id, offset, request), DELEGATION_SETTLE_MS);
         return;
       }
       case "session.usage.updated":
@@ -458,10 +474,11 @@ export class LiveCallController {
   }
 
 
-  private async delegate(call: Call, id: string, offsetMs: number): Promise<void> {
+  private async delegate(call: Call, id: string, offsetMs: number, request = ""): Promise<void> {
     if (call.state.status !== "live") return;
     const heard = call.transcript.takeRequestParts(offsetMs);
-    const said = heard.text;
+    // A yes/no is read only from what the person said, never from the voice's summary of it.
+    const said = call.approval && !call.approval.submitted ? heard.text : request || heard.text;
     if (call.approval && !call.approval.submitted) {
       await this.decide(call, heard.withoutEcho, id, said);
       return;
@@ -656,7 +673,7 @@ export class LiveCallController {
     };
     if (!forCall && typed === undefined) return;
     if (!forCall && !this.deps.settings().readTypedReplies) {
-      // Off means nothing about a typed exchange reaches OpenAI, not even as context.
+      // Off means nothing about a typed exchange reaches the voice, not even as context.
       settle();
       call.spokenAnswers.add(message.id);
       return;
@@ -842,4 +859,9 @@ export class LiveCallController {
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
+}
+
+function sameCaller(started: RequestAuth, joining: RequestAuth): boolean {
+  if (started.kind === "session") return joining.kind === "session" && joining.session.id === started.session.id;
+  return joining.kind === started.kind;
 }

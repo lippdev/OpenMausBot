@@ -1,10 +1,10 @@
 import { useCallback, useId, useState } from "react";
 
-import { LIVE_VOICE_OPTIONS } from "../../shared/live-call";
+import { DEFAULT_GEMINI_LIVE_VOICE, GEMINI_LIVE_VOICE_OPTIONS, LIVE_VOICE_OPTIONS } from "../../shared/live-call";
 import { t } from "@/lib/i18n";
-import { liveDisclosure } from "@/lib/call-mode";
+import { liveCost, liveDisclosure } from "@/lib/call-mode";
 import { api, useStore, type ConfigStatus } from "@/state/store";
-import type { LiveSettings } from "../../shared/wire";
+import type { LiveProvider, LiveSettings } from "../../shared/wire";
 import { LiveKeySetup } from "./LiveKeySetup";
 import { Select } from "./Select";
 
@@ -21,10 +21,14 @@ export function LiveCallSettings({ onClose }: { onClose: () => void }) {
   const focusOnOpen = useCallback((dialog: HTMLDivElement | null) => {
     dialog?.querySelector<HTMLElement>("select, input, button")?.focus();
   }, []);
-  const voice = live.voice || "marin";
-  const known = LIVE_VOICE_OPTIONS.some((option) => option.id === voice);
+  const provider: LiveProvider = live.provider ?? "openai";
+  const gemini = provider === "gemini";
+  const voices = gemini ? GEMINI_LIVE_VOICE_OPTIONS : LIVE_VOICE_OPTIONS;
+  const voice = gemini ? live.geminiVoice || DEFAULT_GEMINI_LIVE_VOICE : live.voice || "marin";
+  const known = voices.some((option) => option.id === voice);
+  const ownKey = gemini ? live.keySource === "gemini" : live.keySource === "live";
 
-  const save = async (patch: Partial<Pick<LiveSettings, "voice" | "readTypedReplies" | "idleMinutes">>) => {
+  const save = async (patch: Partial<Pick<LiveSettings, "provider" | "voice" | "geminiVoice" | "readTypedReplies" | "idleMinutes">>) => {
     setSaving(true);
     setError(null);
     try {
@@ -42,8 +46,8 @@ export function LiveCallSettings({ onClose }: { onClose: () => void }) {
     setError(null);
     try {
       const status: ConfigStatus = window.ogb?.setCredential
-        ? await window.ogb.setCredential("openaiLiveKey", "")
-        : await api("/api/config", { method: "PUT", body: JSON.stringify({ live: { key: "" } }) });
+        ? await window.ogb.setCredential(gemini ? "geminiLiveKey" : "openaiLiveKey", "")
+        : await api("/api/config", { method: "PUT", body: JSON.stringify({ live: gemini ? { geminiKey: "" } : { key: "" } }) });
       dispatch({ type: "configStatus", config: status });
     } catch (removeError) {
       setError(removeError instanceof Error ? removeError.message : String(removeError));
@@ -66,15 +70,31 @@ export function LiveCallSettings({ onClose }: { onClose: () => void }) {
       }}
     >
       <label className="flex items-center justify-between gap-2">
+        <span className="text-ink-secondary">{t("call.live.provider")}</span>
+        <Select
+          size="sm"
+          value={provider}
+          disabled={saving}
+          onChange={(event) => {
+            setChangingKey(false);
+            void save({ provider: event.target.value as LiveProvider });
+          }}
+        >
+          <option value="openai">{t("call.live.providerOpenai")}</option>
+          <option value="gemini">{t("call.live.providerGemini")}</option>
+        </Select>
+      </label>
+      {gemini && <div className="-mt-2 text-[11.5px] text-ink-tertiary">{t("call.live.geminiPhones")}</div>}
+      <label className="flex items-center justify-between gap-2">
         <span className="text-ink-secondary">{t("call.live.voice")}</span>
         <Select
           size="sm"
           value={voice}
           disabled={saving}
-          onChange={(event) => void save({ voice: event.target.value })}
+          onChange={(event) => void save(gemini ? { geminiVoice: event.target.value } : { voice: event.target.value })}
         >
           {!known && <option value={voice}>{voice}</option>}
-          {LIVE_VOICE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          {voices.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
         </Select>
       </label>
       <div className="-mt-2 text-[11.5px] text-ink-tertiary">{t("call.live.voiceNext")}</div>
@@ -103,23 +123,25 @@ export function LiveCallSettings({ onClose }: { onClose: () => void }) {
         </Select>
       </label>
       <div className="flex items-center justify-between gap-2 border-t border-hairline/60 pt-2">
-        <span className="text-ink-secondary">{t("call.live.key")}</span>
+        <span className="text-ink-secondary">{t(gemini ? "call.live.geminiKey" : "call.live.key")}</span>
         <span className="flex gap-2">
           <button type="button" className="text-accent hover:underline" onClick={() => setChangingKey((open) => !open)}>
             {t("call.live.keyChange")}
           </button>
-          {live.keySource === "live" && (
+          {ownKey && (
             <button type="button" className="text-danger hover:underline" disabled={saving} onClick={() => void removeKey()}>
               {t("call.live.keyRemove")}
             </button>
           )}
         </span>
       </div>
-      {live.keySource !== "live" && (
-        <div className="-mt-2 text-[11.5px] text-ink-tertiary">{t(live.keySource === "openai" ? "call.live.keyFromApiKeys" : "call.live.needsKey")}</div>
+      {!ownKey && (
+        <div className="-mt-2 text-[11.5px] text-ink-tertiary">
+          {t(gemini ? "call.live.geminiNeedsKey" : live.keySource === "openai" ? "call.live.keyFromApiKeys" : "call.live.needsKey")}
+        </div>
       )}
-      {changingKey && <LiveKeySetup compact onSaved={() => setChangingKey(false)} />}
-      <div className="text-[11.5px] text-ink-tertiary">{liveDisclosure({ cloudHome: state.config?.cloudHome === true })} {t("call.live.cost")}</div>
+      {changingKey && <LiveKeySetup compact provider={provider} onSaved={() => setChangingKey(false)} />}
+      <div className="text-[11.5px] text-ink-tertiary">{liveDisclosure({ cloudHome: state.config?.cloudHome === true, provider })} {liveCost(provider)}</div>
       {error && <div className="text-[12px] text-danger">{error}</div>}
     </div>
   );

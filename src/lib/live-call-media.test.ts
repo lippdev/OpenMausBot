@@ -866,3 +866,73 @@ describe("a blocked microphone", () => {
     expect(liveMedia()).toMatchObject({ phase: "idle", notice: null, action: null });
   });
 });
+
+describe("live call media on Gemini Live", () => {
+  const geminiCall = { ...call, provider: "gemini", voice: "Puck" } as const;
+  let events: import("./gemini-live-audio").GeminiMediaEvents | null;
+  let link: { hangUp: ReturnType<typeof vi.fn<() => void>>; close: ReturnType<typeof vi.fn<() => void>> };
+  let opened: string[];
+
+  beforeEach(() => {
+    events = null;
+    opened = [];
+    link = { hangUp: vi.fn<() => void>(), close: vi.fn<() => void>() };
+    request.mockImplementation(async (path: string) => {
+      if (path === "/api/live/session") return { call: geminiCall, transport: { type: "websocket", path: "/api/live/media?callId=c1" } };
+      if (path === "/api/live/call/end") return { call: { ...geminiCall, status: "ended", endReason: "hung-up" } };
+      throw new Error(`unexpected ${path}`);
+    });
+    configureLiveMedia({
+      ...fakes(),
+      createPeer: () => { throw new Error("no WebRTC for Gemini Live"); },
+      mediaUrl: (path) => `ws://harness${path}`,
+      openGeminiMedia: (url, _stream, handlers) => { opened.push(url); events = handlers; return link; },
+    });
+  });
+
+  it("asks for a session without an offer, joins the media socket and goes live once both are up", async () => {
+    await startLiveCall({ botId: "b1", threadId: "t1", provider: "gemini" });
+    expect(JSON.parse(String(request.mock.calls[0][1].body))).toEqual({ botId: "b1", threadId: "t1", client: "web" });
+    expect(opened).toEqual(["ws://harness/api/live/media?callId=c1"]);
+    onServerCall({ ...geminiCall, status: "live" });
+    expect(liveMedia().phase).toBe("starting");
+    events!.onOpen();
+    expect(liveMedia().phase).toBe("live");
+    events!.onEvent({ type: "session.output_transcript.delta", delta: "Hi there" });
+    expect(liveMedia().caption).toBe("Hi there");
+  });
+
+  it("hangs up over the media socket and closes it", async () => {
+    await startLiveCall({ botId: "b1", threadId: "t1", provider: "gemini" });
+    events!.onOpen();
+    await hangUpLiveCall();
+    expect(link.hangUp).toHaveBeenCalled();
+    expect(link.close).toHaveBeenCalled();
+    expect(endRequests()).toEqual(["c1"]);
+    expect(liveMedia().phase).toBe("idle");
+  });
+
+  it("reports a dropped call when the media socket closes on its own, and retries on Gemini", async () => {
+    await startLiveCall({ botId: "b1", threadId: "t1", provider: "gemini" });
+    events!.onOpen();
+    events!.onClose();
+    expect(liveMedia()).toMatchObject({ phase: "failed", action: "retry" });
+    takeLiveCallAction();
+    await vi.waitFor(() => expect(opened).toHaveLength(2));
+  });
+
+  it("does not report a drop after the harness said the session closed", async () => {
+    await startLiveCall({ botId: "b1", threadId: "t1", provider: "gemini" });
+    events!.onOpen();
+    events!.onEvent({ type: "session.closed" });
+    events!.onClose();
+    expect(liveMedia().phase).not.toBe("failed");
+  });
+
+  it("switches to the media socket when the harness chose Gemini Live for a WebRTC offer", async () => {
+    configureLiveMedia({ ...fakes(), mediaUrl: (path) => `ws://harness${path}`, openGeminiMedia: (url, _stream, handlers) => { opened.push(url); events = handlers; return link; } });
+    await startLiveCall({ botId: "b1", threadId: "t1" });
+    expect(peer.closed).toBe(true);
+    expect(opened).toEqual(["ws://harness/api/live/media?callId=c1"]);
+  });
+});

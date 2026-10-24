@@ -6,6 +6,9 @@
  * for display and logs only. The phone apps show a value they do not know as
  * "another device". */
 export type LiveClient = "desktop" | "web" | "ios" | "android";
+/** The voice a Live call runs on: OpenAI GPT-Live (WebRTC from the client) or
+ * Google Gemini Live (the client streams audio through the harness). */
+export type LiveProvider = "openai" | "gemini";
 export type LiveCallStatus = "connecting" | "live" | "ending" | "ended";
 /** Why a call ended. "signed-out": the sign-in or paired phone that started
  * it was signed out, revoked or unpaired. A client that does not know a
@@ -20,6 +23,8 @@ export interface LiveCallState {
   botId: string;
   threadId: string;
   client: LiveClient;
+  /** Absent from a harness older than Gemini Live: read it as "openai". */
+  provider?: LiveProvider;
   voice: string;
   /** epoch ms when the session was created */
   startedAt: number;
@@ -45,14 +50,24 @@ export interface LiveCallRecord {
   title?: string;
 }
 
-/** `live`: the key saved for Live calls only; `openai`: the OpenAI API key from Settings → API keys, used when there is no `live` key. */
-export type LiveKeySource = "live" | "openai";
+/** `live`: the key saved for Live calls only; `openai`: the OpenAI API key from Settings → API keys, used when there is no `live` key;
+ * `gemini`: the Gemini API key saved for Gemini Live calls. */
+export type LiveKeySource = "live" | "openai" | "gemini";
 
 /** Non-secret Live settings, as GET /api/config and PATCH /api/live/settings report them. */
 export interface LiveSettings {
   /** A Live call has a key to use (`keySource` says which); never the key itself. */
   configured: boolean;
   keySource?: LiveKeySource;
+  /** Which voice new calls use. This and the next three are absent from a harness older than Gemini Live. */
+  provider?: LiveProvider;
+  /** An OpenAI key for GPT-Live calls is saved, whichever provider is chosen. */
+  openaiConfigured?: boolean;
+  /** A Gemini API key for Gemini Live calls is saved, whichever provider is chosen. */
+  geminiConfigured?: boolean;
+  /** A Gemini Live prebuilt voice. */
+  geminiVoice?: string;
+  /** A GPT-Live voice. */
   voice: string;
   readTypedReplies: boolean;
   idleMinutes: number;

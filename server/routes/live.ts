@@ -94,9 +94,9 @@ export function createLiveRoutes(deps: LiveRouteDeps): RouteHandler {
       try {
         const device = companionDevice(req);
         const { call, sdp } = await deps.calls.start({ auth, ...(device ? { device } : {}), ...target, client: parsed.data.client, ...(parsed.data.sdp ? { sdp: parsed.data.sdp } : {}) });
-        const transport = call.provider === "gemini"
-          ? { type: "websocket", path: `${LIVE_MEDIA_PATH}?callId=${encodeURIComponent(call.callId)}` }
-          : { type: "webrtc", sdp };
+        const transport = sdp
+          ? { type: "webrtc", sdp }
+          : { type: "websocket", path: `${LIVE_MEDIA_PATH}?callId=${encodeURIComponent(call.callId)}` };
         return json(res, 201, { call, transport });
       } catch (error) {
         if (error instanceof LiveCallBusyError) return json(res, 409, { error: error.message, activeCall: error.call });

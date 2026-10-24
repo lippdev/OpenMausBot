@@ -7,7 +7,6 @@ import type { LiveSocket } from "./live-call-controller.ts";
 export const GEMINI_LIVE_MODEL = "gemini-3.8-live";
 const GEMINI_LIVE_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 export const GEMINI_NEEDS_KEY = "Gemini Live calls use your own Gemini API key. Add it in the Live call settings.";
-export const GEMINI_PHONE_UNSUPPORTED = "Gemini Live calls work in the desktop app and in a web browser. Switch Live calls to OpenAI to call from a phone.";
 export const GEMINI_DELEGATE_TOOL = "delegate";
 /** Client → harness: 16-bit little-endian mono PCM at this rate (Gemini Live's input format). */
 export const GEMINI_INPUT_RATE = 16_000;

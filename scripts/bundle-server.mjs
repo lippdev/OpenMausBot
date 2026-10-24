@@ -23,8 +23,15 @@ const yamlEsmPlugin = {
 // ws is CommonJS and requires Node's own modules, which an ESM bundle reaches
 // only through a require of its own (esbuild otherwise throws "Dynamic require
 // of "events" is not supported" when it loads).
+// opusscript's Emscripten loader (live-phone-bridge.ts) reads __dirname as it starts, which ESM does not define.
 const NODE_REQUIRE = {
-  js: 'import { createRequire as __ombCreateRequire } from "node:module";\nconst require = __ombCreateRequire(import.meta.url);',
+  js: [
+    'import { createRequire as __ombCreateRequire } from "node:module";',
+    'import { dirname as __ombDirname } from "node:path";',
+    'import { fileURLToPath as __ombFileURLToPath } from "node:url";',
+    "const require = __ombCreateRequire(import.meta.url);",
+    "const __dirname = __ombDirname(__ombFileURLToPath(import.meta.url));",
+  ].join("\n"),
 };
 
 // Every file run as its own process.

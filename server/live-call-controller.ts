@@ -6,7 +6,8 @@ import {
 } from "../shared/live-approval.ts";
 import { clampAppend, commentaryChunks, liveProviderName, LiveTranscript } from "../shared/live-call.ts";
 import type { LiveCallRecord, LiveCallState, LiveClient, LiveEndReason, LiveProvider } from "../shared/wire.ts";
-import { GEMINI_NEEDS_KEY, GEMINI_PHONE_UNSUPPORTED, geminiVoice } from "./gemini-live.ts";
+import { GEMINI_NEEDS_KEY, geminiVoice } from "./gemini-live.ts";
+import { PHONE_BRIDGE_NOT_CONFIGURED } from "./live-phone-bridge.ts";
 import { LIVE_NEEDS_KEY, liveCallSummaryLine, LiveSessionError, liveVoice } from "./live-call.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { Message, StoreChange } from "./store.ts";
@@ -51,6 +52,8 @@ export interface LiveCallDeps {
   /** GPT-Live answers the client's SDP offer; Gemini Live takes no offer and answers none. */
   createSession(input: { provider: LiveProvider; key: string; sdp?: string; botId: string; threadId: string; voice: string }): Promise<{ sessionId: string; sdp?: string }>;
   openSideband(input: { provider: LiveProvider; sessionId: string; key: string }): LiveSocket;
+  /** The harness can answer a phone app's WebRTC offer itself on Gemini Live. */
+  geminiPhones?(): boolean;
   speakable(text: string): string[];
   recordCall?(input: { threadId: string; botName: string; record: LiveCallRecord }): void;
   log(line: string): void;
@@ -149,10 +152,11 @@ export class LiveCallController {
     if (input.device && this.revokedDevices.has(input.device)) throw new LiveCallSignedOutError();
     const settings = this.deps.settings();
     const provider = settings.provider ?? "openai";
-    if (provider === "gemini" && (input.client === "ios" || input.client === "android")) throw new LiveSessionError(GEMINI_PHONE_UNSUPPORTED, 422);
+    const phone = input.client === "ios" || input.client === "android";
+    if (provider === "gemini" && phone && !this.deps.geminiPhones?.()) throw new LiveSessionError(PHONE_BRIDGE_NOT_CONFIGURED, 422);
     const key = settings.key.trim();
     if (!key) throw new LiveSessionError(provider === "gemini" ? GEMINI_NEEDS_KEY : LIVE_NEEDS_KEY, 409);
-    if (provider === "openai" && !input.sdp) throw new LiveSessionError("The call could not start: the connection offer was invalid.", 400);
+    if ((provider === "openai" || phone) && !input.sdp) throw new LiveSessionError("The call could not start: the connection offer was invalid.", 400);
     const voice = provider === "gemini" ? geminiVoice(settings.geminiVoice) : liveVoice(settings.voice);
     const call = this.newCall(input, provider, key, voice);
     // Taken before the first await: a second start in the same tick is refused.

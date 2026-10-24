@@ -24501,7 +24501,14 @@
       "call.live.geminiCost": "a7ed2ecf42c9fe4f29286446c5ae9f1910f1715b5c068e9555e233b6cac3ccb6",
       "call.live.geminiDisclosure": "1a815bc1fd45563b1e8ed264b8bbcf70e1887d808140087be46eb5d9ecc0b9b8",
       "call.live.geminiDisclosureCloud": "78c0748b4a21ad315ebd47d8e260d1c2276e069806a28166dff16fb41a1f7550",
-      "call.live.geminiPhones": "b041b1cbd3b17b38fb504ff1b48fd0c365c4baa0bab593f64b21a0e8644d1c68"
+      "call.live.geminiPhones": "b041b1cbd3b17b38fb504ff1b48fd0c365c4baa0bab593f64b21a0e8644d1c68",
+      "keys.live.title": "e9ea9e2a1acce253154ff8fb072a357f076f0e192455f13fa93663ceda6b6255",
+      "keys.liveProvider.label": "839a48597f469348a8b264c5c909dbb994104780be3b4a02487cbdd01c401b9f",
+      "keys.liveProvider.desc": "31fec63c88f742db60ddabc48a1bf41c9e59140a5325066a79f1d041d5436fec",
+      "keys.geminiLive.label": "b72c9614a8f30ec664540da11e7e374642e7beb82afa0796ec9061bc2f4207d7",
+      "keys.geminiLive.desc": "53120e4df936a81ae10ed63e6f7671e6384c12475c4456637ff7815673db1baa",
+      "keys.geminiLive.link": "ad3cef61d37f5f52dd462d9e75e01ddf4842423e3a86ce2c361c9883b69f0df7",
+      "call.live.useGemini": "68847b82800e6cf664d0ae47c0f2de8f9d628e16a6138551088a7afc216d43da"
     },
     "zh": {
       "highlevel.unavailable": "87b8ac7f7610e6dd69f520bc59058fd92f307b9f4bcf804075f25d08bcaa7533",

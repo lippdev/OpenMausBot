@@ -57,7 +57,7 @@ Properties are counts, `true` or `false`, or words from fixed lists in the app's
 
 | List | Values |
 | --- | --- |
-| Key provider | `anthropic`, `openai`, `openrouter`, `openai_compat`, `xai`, `mistral`, `cerebras`, `groq`, `meta`, `boat`, `composio`, `opencode_go`, `custom_endpoint`, `elevenlabs`, `fish_audio`, `jev`, `openrouter_decider`, `openai_image`, `custom_image`, `openai_live`, `onepassword`, `treg` |
+| Key provider | `anthropic`, `openai`, `openrouter`, `openai_compat`, `xai`, `mistral`, `cerebras`, `groq`, `meta`, `boat`, `composio`, `opencode_go`, `custom_endpoint`, `elevenlabs`, `fish_audio`, `jev`, `openrouter_decider`, `openai_image`, `custom_image`, `openai_live`, `onepassword`, `treg`, `gemini_live` |
 | Engine | `claude`, `codex`, `gemini`, `cursor`, `opencode`, `qwen`, `hermes`, `cline`, `custom_acp`, `pi`, `openai_compat`, `grok`, `grok_api`, `kimi`, `droid`, `antigravity`, `minimax`, `mistral`, `cerebras`, `groq`, `meta`, `muse_code` |
 | App | The 24 apps Connected apps lists by default: `slack`, `github`, `gmail`, `googlecalendar`, `googlesheets`, `googledocs`, `googledrive`, `notion`, `linear`, `sentry`, `posthog`, `discord`, `twitter`, `reddit`, `zapier`, `hubspot`, `salesforce`, `jira`, `asana`, `trello`, `dropbox`, `airtable`, `figma`, `stripe`. Every other app is `other`. |
 | Starting role | `assistant`, `inbox`, `research`, `coder`, `community`, `ops` |
@@ -83,7 +83,7 @@ use their own Boat key, and how many bots run on cloud computers, without sendin
 
 | Property | Type | Meaning |
 | --- | --- | --- |
-| `key_providers` | list of key providers | Providers with your own key saved: the model providers and an OpenAI-compatible key when set; `boat` for your own Boat key (not one included with a plan); `composio` for a self-hosted Composio project; `opencode_go`; `elevenlabs` or `fish_audio` for your own voice key; `jev` or `openrouter_decider` for your own decision-model key; `openai_image` or `custom_image` for your own avatar-image key (an xAI key counts once, as `xai`); `openai_live` for a separate Live call key |
+| `key_providers` | list of key providers | Providers with your own key saved: the model providers and an OpenAI-compatible key when set; `boat` for your own Boat key (not one included with a plan); `composio` for a self-hosted Composio project; `opencode_go`; `elevenlabs` or `fish_audio` for your own voice key; `jev` or `openrouter_decider` for your own decision-model key; `openai_image` or `custom_image` for your own avatar-image key (an xAI key counts once, as `xai`); `openai_live` for a separate Live call key; `gemini_live` for a Gemini Live key |
 | `key_count` | count | How many entries `key_providers` has |
 | `has_boat_key` | true/false | Your own Boat key is saved |
 | `cloud_computer_source` | `own_key`, `included`, `none` | Where cloud computers come from: your own Boat key (it wins when both exist), a Cloud plan, or nowhere |

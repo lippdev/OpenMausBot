@@ -6,7 +6,7 @@ import { localeChoices, type LocaleKey } from "@/locales";
 import { t } from "@/lib/i18n";
 import { withTourReset } from "@/lib/guided-tour";
 import { completionPatch } from "@/lib/onboarding";
-import { AnthropicEveryClaudeBot, ApiKeyRow, OpenCodeProviderKeys, VpsConnection } from "./ApiKeys";
+import { AnthropicEveryClaudeBot, ApiKeyRow, LiveCallProviderChoice, OpenCodeProviderKeys, VpsConnection } from "./ApiKeys";
 import { AnalyticsRow } from "./AnalyticsRow";
 import { UpdatesConsentRow } from "./UpdatesConsent";
 import { DefaultBotSidebarRow } from "./DefaultBotControls";
@@ -748,6 +748,9 @@ export function SettingsModal() {
               <ApiKeyRow section="meta" testProvider="meta" />
               <ApiKeyRow section="deepseek" />
               <OtherOpenAiCompatServers />
+              <div className="pt-2 text-[11.5px] font-medium uppercase tracking-wide text-ink-secondary">{t("keys.live.title")}</div>
+              <LiveCallProviderChoice />
+              <ApiKeyRow section="geminiLive" />
               <div className="pt-2 text-[11.5px] font-medium uppercase tracking-wide text-ink-secondary">{t("keys.integrations.title")}</div>
               <ApiKeyRow section="treg" testProvider="treg" /><ApiKeyRow section="box" />
               <VpsConnection />

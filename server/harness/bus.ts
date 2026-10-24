@@ -60,8 +60,12 @@ export class EventBus {
     this.deliver(event);
   });
 
-  constructor(appendLog: EventLogAppend = defaultAppend) {
+  private readonly gate?: (event: RuntimeEvent) => boolean;
+
+  /** `gate` sees each adapter event first; true means it took the event and publishes what it chooses. */
+  constructor(appendLog: EventLogAppend = defaultAppend, gate?: (event: RuntimeEvent) => boolean) {
     this.appendLog = appendLog;
+    this.gate = gate;
   }
 
   attach(instances: ProviderInstance[]) {
@@ -73,7 +77,8 @@ export class EventBus {
           console.error(`bus: dropped cross-driver event from ${instance.instanceId}`);
           return;
         }
-        this.publish({ ...event, providerInstanceId: instance.instanceId });
+        const stamped = { ...event, providerInstanceId: instance.instanceId };
+        if (!this.gate?.(stamped)) this.publish(stamped);
       });
       this.unsubscribes.set(instance.instanceId, unsub);
     }

@@ -349,6 +349,11 @@ export interface WireBot extends DefaultBotFields {
   chiefOfStaff?: boolean;
   /** Owner-selected additional teams this Chief may coordinate. */
   managedSections?: string[];
+  /** Team Cloud only: the lowercased email of the member who created the bot (or moved it in). */
+  createdBy?: string;
+  /** Team Cloud only: the lowercased email of the member the bot reports to, whose inbox its questions, approvals,
+   * failures and routine results reach. Absent: it reports to `createdBy`. */
+  reportsTo?: string;
   /** Pause for human approval before this bot talks to a peer. */
   approvePeerComms?: boolean;
   /** Bot ids this bot is allowed to contact. */
@@ -456,6 +461,8 @@ export interface WireMessage extends HelperIntroField {
    * bots' work) rather than the bot: replayed to the bot only as labelled
    * data, never as its own words, and never edited by a bot. */
   serverCard?: true;
+  /** A setup suggestion the device renders in its own words (server/host/helper-suggestion.ts); `text` is the English. */
+  setupSuggestion?: { kind: "helperKey"; answer?: "notNow" };
   /** app rows (kind "app"): bot HTML or an MCP server's UI. `text` is always the readable fallback. */
   app?: AppPayload;
   /** user rows sent by an app's ui/message: the app row that sent them. Every client draws "Sent from <title>". */
@@ -547,7 +554,7 @@ export interface WireMessage extends HelperIntroField {
   /** A room reply whose speaker the decision model picked (an Auto room),
    * with how sure it was. Absent on every other message; clients that do
    * not know it ignore it. */
-  routedBy?: { provider: "jev" | "openrouter"; probability: number };
+  routedBy?: { provider: "jev" | "workersai" | "openrouter"; probability: number };
   /** On a conversational bot's user line: the picker label of the quick model its reply ran on. */
   quickModel?: string;
   /** Set on the user-role line another bot delivered into this bot's own

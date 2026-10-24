@@ -14,10 +14,11 @@ import type { CalendarEvent, EmailHeader, ReadSession } from "../connected-reads
 import { recordsBlock, clean } from "../records-block.ts";
 import { ownerOrAdmin, type RequestAuth } from "../request-auth.ts";
 import type { RoutineRun } from "../routines.ts";
-import { sectionKey, type BotRecord, type Message, type Store } from "../store.ts";
+import type { BotRecord, Message, Store } from "../store.ts";
 import { answered, localDate, qualifies, validZone } from "./check-plan.ts";
 import { parseWatchResult } from "./check-prompts.ts";
 import { briefCard, clockTime, DISMISS_ACTION, DRAFT_ACTION, prepCard, reminderCard, type BriefEmail, type BriefFacts, type BriefRow, type BuiltCard } from "./brief-cards.ts";
+import { proactiveOwner } from "./proactive-owner.ts";
 import type { CheckReport } from "./routine-checks.ts";
 import { clip, oneLine } from "./text-clip.ts";
 
@@ -123,6 +124,7 @@ export function createBrief(deps: BriefDeps) {
   let trouble: CheckReport["trouble"] = [];
   let waiting: CheckReport["waiting"];
   let unfenced = false;
+  let helpersSort = false;
   const headers = new Map<string, EmailHeader & { why?: string }>();
   let dirty = false;
   let rendering = false;
@@ -140,11 +142,8 @@ export function createBrief(deps: BriefDeps) {
     return start;
   };
 
-  /** The main agent: the Chief of the whole workspace, or the first Chief there is. */
-  function chief(): BotRecord | null {
-    const chiefs = deps.store.bots.filter((bot) => bot.chiefOfStaff && !bot.hidden);
-    return chiefs.find((bot) => sectionKey(bot.section) === "") ?? chiefs[0] ?? null;
-  }
+  /** The bot the brief belongs to: proactiveOwner decides. */
+  const chief = (): BotRecord | null => proactiveOwner(deps.store);
 
   /** The brief's chat: chosen once, the Chief's main chat at the time, and chosen again only if it is gone. */
   function home(bot: BotRecord): string | undefined {
@@ -222,9 +221,10 @@ export function createBrief(deps: BriefDeps) {
       const app = one.app === "gmail" ? "Gmail" : "Google Calendar";
       return { text: `Couldn't read ${app}`, note: one.signedOut ? `Reconnect ${app} in Connected apps.` : "I'll try again soon." };
     });
-    const unfencedRows: BriefRow[] = unfenced
-      ? [{ text: "I didn't sort email or prepare meetings", note: `That needs a Claude model as ${chiefBot.name}'s AI. Your day, reminders and clashes still show here.` }]
-      : [];
+    const unfencedRows: BriefRow[] = !unfenced ? []
+      : helpersSort
+        ? [{ text: "I didn't prepare meetings", note: `That needs a Claude model as ${chiefBot.name}'s AI. Your email is still sorted, and your day, reminders and clashes show here.` }]
+        : [{ text: "I didn't sort email or prepare meetings", note: `That needs a Claude model as ${chiefBot.name}'s AI. Your day, reminders and clashes still show here.` }];
     const meetings = calendar === undefined ? null : calendar.meetings
       .filter((meeting) => qualifies(meeting) || (meeting.ownedCalendar === true && meeting.status !== "cancelled" && !meeting.allDay && !meeting.selfDeclined))
       .filter((meeting) => meeting.end > at && localDate(meeting.start, zone) === day)
@@ -339,16 +339,28 @@ export function createBrief(deps: BriefDeps) {
     return { bot, threadId, messageId };
   }
 
-  /** What the checks found that needs no AI: today's meetings, clashes, reminders, other routines, trouble. */
+  /** An email picked for the brief, by a watch run or by the helper models: its row, with the why kept for this process. */
+  function keepImportant(email: EmailHeader, why: string, needsReply: boolean, at: number): void {
+    headers.set(email.id, { ...email, why });
+    state.important = [...state.important.filter((row) => row.messageId !== email.id), { messageId: email.id, threadId: email.threadId, at: email.at, judgedAt: at, needsReply }].slice(-MAX_ROWS);
+  }
+
+  /** What the checks found that needs no AI: today's meetings, clashes, reminders, other routines, trouble, and the
+   * emails the helper models picked. */
   async function report(found: CheckReport): Promise<void> {
     if (deps.hosted) return;
     if (found.meetings) calendar = { meetings: found.meetings, clashes: found.clashes ?? [] };
     trouble = found.trouble ?? [];
     waiting = found.waiting;
     unfenced = found.unfenced === true;
+    helpersSort = found.helpersSort === true;
     for (const event of found.remind ?? []) postCard(reminderCard({ event, timeZone: timeZone(), now: now() }));
+    const picked = found.picked ?? [];
+    for (const pick of picked) keepImportant(pick.email, pick.why, pick.needsReply, found.at);
+    if (picked.length) save();
     await followUpReplies(found.session);
-    if (state.lastActiveAt !== undefined) await render({ create: false, notify: true });
+    if (picked.length) await render({ create: true, notify: true });
+    else if (state.lastActiveAt !== undefined) await render({ create: false, notify: true });
   }
 
   /** An email waiting on a reply leaves the brief once the person has replied in its thread. */
@@ -379,11 +391,7 @@ export function createBrief(deps: BriefDeps) {
     }
     const at = now();
     if (!result.quiet) {
-      for (const pick of result.important) {
-        const email = items.mail.find((one) => one.id === pick.id)!;
-        headers.set(email.id, { ...email, why: pick.why });
-        state.important = [...state.important.filter((row) => row.messageId !== email.id), { messageId: email.id, threadId: email.threadId, at: email.at, judgedAt: at, needsReply: pick.needsReply }].slice(-MAX_ROWS);
-      }
+      for (const pick of result.important) keepImportant(items.mail.find((one) => one.id === pick.id)!, pick.why, pick.needsReply, at);
       for (const prep of result.prep) {
         const meeting = items.prep.find((one) => one.key === prep.id)!;
         if (state.preps.some((one) => one.key === meeting.key && one.at > at - DAY)) continue;

@@ -354,7 +354,6 @@ type AskResolutionSource = "user" | "timeout" | "system";
 
 const DENY_TIMEOUT_NOTE =
   "OpenMausBot: nobody answered this permission request in time. Skip this action and finish what you can without it.";
-const QUESTION_TIMEOUT_NOTE = "OpenMausBot: nobody answered in time. Use your best judgment and continue.";
 const DUPLICATE_ASK_ID_NOTE = "OpenMausBot: duplicate ask id — skipping this request.";
 
 function systemEndedReply(kind: Ask["kind"]): { behavior: AskBehavior; message: string } {
@@ -530,14 +529,8 @@ export async function createPermissionBroker(opts: {
           } catch {}
           opts.onResolve({ ...ask, behavior, source });
         };
-        const timer = setTimeout(
-          () =>
-            kind === "question"
-              ? finish("answer", QUESTION_TIMEOUT_NOTE, "timeout")
-              : finish("deny", DENY_TIMEOUT_NOTE, "timeout"),
-          timeoutMs,
-        );
-        timer.unref?.();
+        const timer = kind === "question" ? undefined : setTimeout(() => finish("deny", DENY_TIMEOUT_NOTE, "timeout"), timeoutMs);
+        timer?.unref?.();
         pending.set(askId, { ask, finish });
         opts.onAsk(ask);
       }

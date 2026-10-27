@@ -29,6 +29,7 @@ services:
     environment:
       OMB_PORT: "8799"
       OMB_WEBHOOK_PORT: "8800"
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
       # what the app prints as hook URLs — Caddy passes /hooks/* straight through
       OMB_WEBHOOK_PUBLIC_URL: https://${DOMAIN}
       # pairing links for remote clients point here (docs/self-hosting.md)

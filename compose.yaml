@@ -30,6 +30,7 @@ services:
     environment:
       OMB_PORT: "8799"
       OMB_WEBHOOK_PORT: "8800"
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
 
       # IP público da VPS: os apps de celular enviam o áudio das chamadas
       # Gemini Live direto para ele. Vazio desativa as chamadas Gemini pelo celular.
